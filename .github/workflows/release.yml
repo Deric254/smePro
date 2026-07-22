@@ -303,19 +303,33 @@ jobs:
                   f.write(content)
           "
 
-      # Only runs if a real release keystore has been added as a repo
-      # secret — see the job-level comment above. Without it, this step
-      # is skipped entirely and the build below falls back to Android's
-      # standard debug signing, which is a completely normal, installable
-      # APK, just not Play-Store-eligible.
+      # Only does anything if a real release keystore has been added as
+      # a repo secret — see the job-level comment above. Without it,
+      # this step is a no-op and the build below falls back to
+      # Android's standard debug signing, which is a completely normal,
+      # installable APK, just not Play-Store-eligible.
+      #
+      # The existence check happens INSIDE the shell script (env: var),
+      # not in a step-level `if:` — GitHub Actions' expression evaluator
+      # doesn't allow referencing the `secrets` context directly inside
+      # `if:` conditions the way this originally tried to (real error
+      # hit and fixed: "Unrecognized named-value: 'secrets'").
       - name: Decode release signing keystore (optional)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > src-tauri/gen/android/release.keystore
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "No release keystore secret set — building with Android's standard debug signing instead."
+            exit 0
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > src-tauri/gen/android/release.keystore
           cat > src-tauri/gen/android/keystore.properties <<EOF
-          password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
-          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          password=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
           storeFile=release.keystore
           EOF
 
