@@ -360,6 +360,31 @@ jobs:
       - name: Build APK
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
+          TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="$TOOLCHAIN:$PATH"
+
+          # openssl-src's build (Perl Configure + make, not just Cargo's
+          # own `cc` crate machinery) needs AR/RANLIB on PATH or in env.
+          # NDK r23+ (this workflow uses 26) REMOVED the old per-triple
+          # GNU-binutils-style wrappers (e.g. aarch64-linux-android-ranlib)
+          # entirely — only the unified, architecture-agnostic llvm-ar /
+          # llvm-ranlib remain. ar/ranlib just package already-compiled
+          # object files, so they don't need a per-arch variant the way a
+          # compiler does — one llvm-ar correctly handles every target.
+          export AR="$TOOLCHAIN/llvm-ar"
+          export RANLIB="$TOOLCHAIN/llvm-ranlib"
+
+          # Compilers DO need to be target- and API-level-specific — the
+          # NDK provides one clang wrapper per (arch, minSdkVersion) pair.
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android21-clang"
+          export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android21-clang"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$TOOLCHAIN/armv7a-linux-androideabi21-clang"
+          export CC_armv7_linux_androideabi="$TOOLCHAIN/armv7a-linux-androideabi21-clang"
+          export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$TOOLCHAIN/i686-linux-android21-clang"
+          export CC_i686_linux_android="$TOOLCHAIN/i686-linux-android21-clang"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$TOOLCHAIN/x86_64-linux-android21-clang"
+          export CC_x86_64_linux_android="$TOOLCHAIN/x86_64-linux-android21-clang"
+
           npm run tauri android build -- --apk
 
       - name: Locate built APK(s)
