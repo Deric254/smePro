@@ -77,6 +77,15 @@ jobs:
           echo "Bump type: $BUMP (from commit message)"
 
           NEW_VERSION=$(npm version "$BUMP" --no-git-tag-version | sed 's/^v//')
+
+          # Guard against a leftover tag from a previous attempt (a force
+          # push resets the branch but does NOT delete tags already on
+          # the remote) — keep bumping patch until we land on a version
+          # that isn't already tagged, instead of failing outright.
+          while git ls-remote --tags origin | grep -q "refs/tags/v${NEW_VERSION}$"; do
+            echo "Tag v$NEW_VERSION already exists on the remote — bumping patch again"
+            NEW_VERSION=$(npm version patch --no-git-tag-version | sed 's/^v//')
+          done
           echo "New version: $NEW_VERSION"
 
           node -e "
@@ -212,6 +221,21 @@ jobs:
         with:
           node-version: 20
 
+      - name: Free disk space
+        # A GitHub-hosted runner starts with ~14GB already used by
+        # preinstalled software this job never touches (.NET, existing
+        # Android emulator images, GHC, etc). Rust + the Android NDK +
+        # SDK + a full Gradle build in the SAME job can genuinely run
+        # the remaining space out, which shows up as a confusing failure
+        # deep inside the Gradle step rather than a clear "disk full"
+        # message. Clearing unused preinstalled stuff first is cheap
+        # insurance against that specific failure mode.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk-bundle \
+            /opt/ghc /usr/local/.ghcup /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          df -h /
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -241,6 +265,21 @@ jobs:
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
           npm run tauri android init
+
+      - name: Write local.properties
+        # Gradle traditionally reads SDK/NDK locations from this file,
+        # not just from ANDROID_HOME/NDK_HOME environment variables — a
+        # freshly-scaffolded project (generated mid-CI, never opened in
+        # Android Studio) doesn't have one yet, and some Android Gradle
+        # Plugin versions don't reliably fall back to the env vars alone
+        # in a non-interactive CI shell. Writing it explicitly removes
+        # that ambiguity rather than hoping the env vars are enough.
+        run: |
+          cat > src-tauri/gen/android/local.properties <<EOF
+          sdk.dir=$ANDROID_HOME
+          ndk.dir=$ANDROID_HOME/ndk/26.1.10909125
+          EOF
+          cat src-tauri/gen/android/local.properties
 
       - name: Apply loopback network security config
         # Same fix mobile-android.sh applies locally — Android blocks
