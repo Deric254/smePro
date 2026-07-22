@@ -211,6 +211,20 @@ jobs:
   android:
     needs: bump-version
     runs-on: ubuntu-24.04
+    env:
+      # The vendored OpenSSL build (see Cargo.toml — openssl-sys's
+      # "vendored" feature, needed for cross-compiling SQLCipher's
+      # crypto backend) includes optional assembly-optimized SM4 cipher
+      # routines using very new CPU instructions (vsm4key4/vsm4rnds4).
+      # NDK 26's bundled LLVM assembler doesn't recognize them yet,
+      # which fails the whole OpenSSL build with "invalid instruction
+      # mnemonic" — nothing to do with SQLCipher or our own code, purely
+      # an assembler-version gap. This skips assembly optimizations
+      # entirely, falling back to portable C — slightly slower crypto,
+      # but SM4 isn't even used anywhere in this app; the desktop builds
+      # don't set this because their host toolchains already handle it
+      # fine, so there's no reason to give up the optimization there too.
+      OPENSSL_NO_ASM: "1"
     steps:
       - uses: actions/checkout@v4
         with:
