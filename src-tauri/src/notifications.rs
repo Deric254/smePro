@@ -85,9 +85,12 @@ fn send_via_twilio(channel: &str, recipient: &str, message: &str) -> Result<Stri
     };
 
     let url = format!("https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json");
-    let agent = ureq::AgentBuilder::new()
-        .tls_connector(std::sync::Arc::new(native_tls::TlsConnector::new()?))
-        .build();
+    // Plain default agent — with `ureq`'s "tls" feature (rustls, pure
+    // Rust, no system OpenSSL needed) instead of the old explicit
+    // native_tls wiring, which is what was breaking cross-compiled
+    // builds (Android, cross-arch macOS) with "could not find OpenSSL
+    // installation" — rustls has no such external dependency at all.
+    let agent = ureq::AgentBuilder::new().build();
 
     use base64::Engine;
     let basic_auth = base64::engine::general_purpose::STANDARD.encode(format!("{sid}:{token}"));

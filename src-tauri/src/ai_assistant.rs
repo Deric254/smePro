@@ -52,9 +52,9 @@ pub fn ask(conn: &Connection, business_id: &str, user_id: &str, question: &str) 
 }
 
 fn tls_agent() -> Result<ureq::Agent> {
-    Ok(ureq::AgentBuilder::new()
-        .tls_connector(std::sync::Arc::new(native_tls::TlsConnector::new()?))
-        .build())
+    // See the matching comment in notifications.rs — plain default
+    // agent, rustls via ureq's "tls" feature, no system OpenSSL needed.
+    Ok(ureq::AgentBuilder::new().build())
 }
 
 /// NVIDIA NIM — free tier, OpenAI-compatible chat completions API.

@@ -23,8 +23,7 @@ argon2 = "=0.5.3"
 rand_core = { version = "=0.6.4", features = ["getrandom"] }
 rand = "=0.8.5"
 rust_xlsxwriter = "=0.77.0"
-ureq = { version = "=2.10.1", default-features = false, features = ["json", "native-tls"] }
-native-tls = "=0.2.12"
+ureq = { version = "=2.10.1", default-features = false, features = ["json", "tls"] }
 base64 = "=0.22.1"
 hmac = "=0.12.1"
 sha2 = "=0.10.8"
@@ -39,11 +38,8 @@ version = "=2.2.6"
 [dependencies.idna_adapter]
 version = "=1.0.0"
 
-[dependencies.openssl-sys]
-version = "=0.9.103"
-
-[dependencies.openssl]
-version = "=0.10.66"
+[dependencies.zeroize]
+version = "=1.7.0"
 
 [dependencies.tauri]
 version = "2"
