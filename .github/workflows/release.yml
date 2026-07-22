@@ -211,20 +211,20 @@ jobs:
   android:
     needs: bump-version
     runs-on: ubuntu-24.04
-    env:
-      # The vendored OpenSSL build (see Cargo.toml — openssl-sys's
-      # "vendored" feature, needed for cross-compiling SQLCipher's
-      # crypto backend) includes optional assembly-optimized SM4 cipher
-      # routines using very new CPU instructions (vsm4key4/vsm4rnds4).
-      # NDK 26's bundled LLVM assembler doesn't recognize them yet,
-      # which fails the whole OpenSSL build with "invalid instruction
-      # mnemonic" — nothing to do with SQLCipher or our own code, purely
-      # an assembler-version gap. This skips assembly optimizations
-      # entirely, falling back to portable C — slightly slower crypto,
-      # but SM4 isn't even used anywhere in this app; the desktop builds
-      # don't set this because their host toolchains already handle it
-      # fine, so there's no reason to give up the optimization there too.
-      OPENSSL_NO_ASM: "1"
+    # NOTE ON x86_64: deliberately not building for x86_64-linux-android
+    # (see the Rust-targets step below) — real Android phones are ARM
+    # (aarch64 64-bit, armv7 32-bit); x86_64 Android is essentially
+    # emulator-only. That architecture specifically hit a genuine
+    # upstream problem: OpenSSL's x86_64 SM4 cipher assembly
+    # (crypto/sm4/sm4-x86_64.S) uses very new CPU instructions
+    # (vsm4key4/vsm4rnds4) that NDK 26's bundled assembler doesn't
+    # recognize yet. Traced this by reading openssl-src's actual build.rs
+    # from crates.io — confirmed it has NO env var or Cargo feature to
+    # disable assembly optimizations for arbitrary targets (an
+    # OPENSSL_NO_ASM env var was tried first; it does nothing at all for
+    # this crate, only OpenSSL's own Configure script run directly reads
+    # that name — a real dead end, not a config mistake). Dropping the
+    # architecture nobody's phone uses was the actual fix.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -265,7 +265,7 @@ jobs:
       - name: Setup Rust with Android targets
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android
 
       - name: Rust build cache
         uses: swatinem/rust-cache@v2
@@ -396,8 +396,6 @@ jobs:
           export CC_armv7_linux_androideabi="$TOOLCHAIN/armv7a-linux-androideabi21-clang"
           export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$TOOLCHAIN/i686-linux-android21-clang"
           export CC_i686_linux_android="$TOOLCHAIN/i686-linux-android21-clang"
-          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$TOOLCHAIN/x86_64-linux-android21-clang"
-          export CC_x86_64_linux_android="$TOOLCHAIN/x86_64-linux-android21-clang"
 
           npm run tauri android build -- --apk
 
