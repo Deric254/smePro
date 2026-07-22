@@ -1,0 +1,18 @@
+{
+  "id": "purchasing",
+  "display_name": "Purchasing",
+  "fields": [
+    { "name": "supplier",     "type": "text",    "required": true },
+    { "name": "item_name",    "type": "text",    "required": true },
+    { "name": "quantity",     "type": "integer", "required": true, "default": 1 },
+    { "name": "unit_cost",    "type": "real",    "required": true },
+    { "name": "order_date",   "type": "date",    "required": false },
+    { "name": "received",     "type": "boolean", "required": false, "default": false }
+  ],
+  "actions": ["create", "read", "update", "delete", "export"],
+  "default_roles": {
+    "Owner":   ["create", "read", "update", "delete", "export", "approve"],
+    "Manager": ["create", "read", "update", "export"],
+    "Staff":   ["read"]
+  }
+}

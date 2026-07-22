@@ -1,0 +1,345 @@
+name: Release
+
+# FULLY AUTOMATED: push to main -> version auto-bumps -> a tag is
+# created and pushed -> that same run builds Windows/macOS/Linux
+# installers AND an Android APK -> all attached to ONE GitHub Release.
+# No manual `git tag` step needed for the normal case.
+#
+# Commit message controls the bump size (defaults to patch):
+#   git commit -m "fix: correct rounding in reports"        -> patch bump (0.1.0 -> 0.1.1)
+#   git commit -m "feat: add units of measure [minor]"      -> minor bump (0.1.0 -> 0.2.0)
+#   git commit -m "feat!: new module format [major]"        -> major bump (0.1.0 -> 1.0.0)
+#
+# Include "[skip ci]" anywhere in the commit message to push to main
+# WITHOUT triggering a release at all (docs-only changes, etc.) — this
+# is GitHub's own built-in convention, not something custom here.
+#
+# You can still cut a specific release manually the old way too:
+#   git tag v1.2.3 && git push --tags
+# — pushing a tag directly skips the auto-bump step and releases
+# exactly that version instead.
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*.*.*"
+
+# Required so the workflow can push the version-bump commit/tag back to
+# the repo, and create/upload to a release.
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------------
+  # Figures out the version for this run. If triggered by a direct tag
+  # push, uses that tag as-is (manual release path). If triggered by a
+  # normal push to main, computes the next version from the commit
+  # message, writes it into every file that needs to agree
+  # (package.json, package-lock.json, tauri.conf.json, Cargo.toml),
+  # commits, tags, and pushes — all in one step so there's no window
+  # where those files disagree with each other or with the tag.
+  # ------------------------------------------------------------------
+  bump-version:
+    if: ${{ github.ref_type == 'tag' || !contains(github.event.head_commit.message, 'chore(release):') }}
+    runs-on: ubuntu-24.04
+    outputs:
+      new_tag: ${{ steps.resolve.outputs.new_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+
+      # Manual path: a tag was pushed directly. Use it as-is, skip bumping.
+      - name: Use pushed tag directly
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: use-tag
+        run: echo "new_tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      # Automatic path: a normal push to main. Compute + apply the bump.
+      - name: Compute and apply next version
+        if: startsWith(github.ref, 'refs/heads/')
+        id: auto-bump
+        env:
+          # Passed as an env var, NOT interpolated directly into the
+          # script below — a commit message is attacker-controlled text
+          # (anyone who can push, or in some setups anyone who can open
+          # a PR) and textually splicing it into a shell script is a
+          # real injection vector. An env var is just data to the shell,
+          # no matter what it contains.
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          BUMP="patch"
+          if echo "$COMMIT_MSG" | grep -qiE '\[major\]'; then BUMP="major"
+          elif echo "$COMMIT_MSG" | grep -qiE '\[minor\]'; then BUMP="minor"
+          fi
+          echo "Bump type: $BUMP (from commit message)"
+
+          NEW_VERSION=$(npm version "$BUMP" --no-git-tag-version | sed 's/^v//')
+          echo "New version: $NEW_VERSION"
+
+          node -e "
+            const fs = require('fs');
+            const path = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(path));
+            conf.version = '$NEW_VERSION';
+            fs.writeFileSync(path, JSON.stringify(conf, null, 2) + '\n');
+          "
+          # Only the [package] version at the top of the file — Cargo.toml
+          # also has many dependency 'version = "..."' lines below it that
+          # must NOT be touched, so this is deliberately limited to the
+          # first match only.
+          sed -i "0,/^version = /s/^version = .*/version = \"$NEW_VERSION\"/" src-tauri/Cargo.toml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+          git commit -m "chore(release): v$NEW_VERSION [skip ci]"
+          git tag "v$NEW_VERSION"
+          git push origin HEAD:${{ github.ref_name }}
+          git push origin "v$NEW_VERSION"
+          echo "new_tag=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve final tag output
+        id: resolve
+        run: |
+          if [ -n "${{ steps.use-tag.outputs.new_tag || '' }}" ]; then
+            echo "new_tag=${{ steps.use-tag.outputs.new_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_tag=${{ steps.auto-bump.outputs.new_tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ------------------------------------------------------------------
+  # Desktop: Windows / macOS (Intel + Apple Silicon) / Linux, exactly
+  # as before — now just parameterized on bump-version's output tag
+  # instead of the raw push ref, so it builds the exact bumped-version
+  # commit whether this run came from an auto-bump or a manual tag.
+  # ------------------------------------------------------------------
+  desktop:
+    needs: bump-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-24.04
+            args: ""
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+          - platform: windows-latest
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.new_tag }}
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsqlcipher-dev
+
+      - name: Install macOS SQLCipher
+        if: matrix.platform == 'macos-latest'
+        run: brew install sqlcipher
+
+      - name: Install Windows SQLCipher (vcpkg)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          vcpkg install sqlcipher:x64-windows
+          echo "SQLCIPHER_LIB_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib" >> $env:GITHUB_ENV
+          echo "SQLCIPHER_INCLUDE_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\include" >> $env:GITHUB_ENV
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The signing key is what makes auto-update trustworthy: the
+          # updater plugin verifies every downloaded update against the
+          # public key baked into tauri.conf.json before installing it.
+          # Generate your OWN key (`npm run tauri signer generate`) and
+          # store the private half + its password as repo secrets —
+          # never commit the private key itself.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ needs.bump-version.outputs.new_tag }}
+          releaseName: "SME Pro ${{ needs.bump-version.outputs.new_tag }}"
+          releaseBody: "Automated release. See commit history for what changed."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+  # ------------------------------------------------------------------
+  # Android: builds a real APK and attaches it to the SAME release the
+  # desktop job above creates/updates (matched by tag name — whichever
+  # job finishes first creates the release, the other attaches to it).
+  #
+  # Uses DEBUG signing by default, which Android genuinely allows you to
+  # install and run — it is NOT a placeholder or a broken build, just
+  # not suitable for the Play Store. For Play Store distribution, add a
+  # real release keystore as repo secrets (ANDROID_KEYSTORE_BASE64,
+  # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD)
+  # and this job will automatically switch to using it instead — see
+  # the "Decode signing keystore" step below, which only runs if that
+  # secret is actually set.
+  # ------------------------------------------------------------------
+  android:
+    needs: bump-version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.new_tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager --install "ndk;26.1.10909125"
+
+      - name: Setup Rust with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlcipher-dev
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Scaffold Android project
+        run: |
+          export NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
+          npm run tauri android init
+
+      - name: Apply loopback network security config
+        # Same fix mobile-android.sh applies locally — Android blocks
+        # plain HTTP by default; our backend talks to 127.0.0.1 only
+        # (loopback inside the app's own process), which needs an
+        # explicit exception or the app can't reach its own API.
+        run: |
+          XML_DIR="src-tauri/gen/android/app/src/main/res/xml"
+          mkdir -p "$XML_DIR"
+          cat > "$XML_DIR/network_security_config.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <network-security-config>
+              <domain-config cleartextTrafficPermitted="true">
+                  <domain includeSubdomains="false">127.0.0.1</domain>
+              </domain-config>
+          </network-security-config>
+          EOF
+          MANIFEST="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
+          python3 -c "
+          import re
+          path = '$MANIFEST'
+          with open(path) as f:
+              content = f.read()
+          if 'networkSecurityConfig' not in content:
+              content = re.sub(r'(<application\b)', r'\1 android:networkSecurityConfig=\"@xml/network_security_config\"', content, count=1)
+              with open(path, 'w') as f:
+                  f.write(content)
+          "
+
+      - name: Add REQUEST_INSTALL_PACKAGES permission (needed for in-app updates)
+        # See the matching comment in mobile-android.sh — this permission
+        # is confirmed-correct Android API; whether tauri-plugin-opener's
+        # Android library needs an additional manually-declared
+        # FileProvider was NOT verified against a real device/emulator.
+        run: |
+          MANIFEST="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
+          python3 -c "
+          import re
+          path = '$MANIFEST'
+          with open(path) as f:
+              content = f.read()
+          if 'REQUEST_INSTALL_PACKAGES' not in content:
+              content = re.sub(r'(<manifest\b[^>]*>)', r'\1\n    <uses-permission android:name=\"android.permission.REQUEST_INSTALL_PACKAGES\" />', content, count=1)
+              with open(path, 'w') as f:
+                  f.write(content)
+          "
+
+      # Only runs if a real release keystore has been added as a repo
+      # secret — see the job-level comment above. Without it, this step
+      # is skipped entirely and the build below falls back to Android's
+      # standard debug signing, which is a completely normal, installable
+      # APK, just not Play-Store-eligible.
+      - name: Decode release signing keystore (optional)
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > src-tauri/gen/android/release.keystore
+          cat > src-tauri/gen/android/keystore.properties <<EOF
+          password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          storeFile=release.keystore
+          EOF
+
+      - name: Build APK
+        run: |
+          export NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
+          npm run tauri android build -- --apk
+
+      - name: Locate built APK(s)
+        id: find-apk
+        run: |
+          APK_DIR="src-tauri/gen/android/app/build/outputs/apk"
+          echo "Found:"
+          find "$APK_DIR" -name "*.apk"
+          {
+            echo "apk_paths<<APK_LIST_EOF"
+            find "$APK_DIR" -name "*.apk"
+            echo "APK_LIST_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attach APK to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.bump-version.outputs.new_tag }}
+          name: "SME Pro ${{ needs.bump-version.outputs.new_tag }}"
+          draft: true
+          files: ${{ steps.find-apk.outputs.apk_paths }}

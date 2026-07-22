@@ -1,0 +1,29 @@
+# --- Frontend ---
+node_modules/
+dist/
+*.local
+
+# --- Rust / Tauri ---
+src-tauri/target/
+vendor-authority/target/
+
+# --- Tauri mobile (generated, regenerated fresh by CI/mobile-android.sh) ---
+src-tauri/gen/
+
+# --- Local runtime data — never commit real business data or secrets ---
+src-tauri/erp.db
+src-tauri/erp.db-*
+src-tauri/.env
+vendor-authority/vendor_authority.db
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# --- Signing keys — generated locally per RELEASE.md, NEVER committed ---
+*.key
+release.keystore
+keystore.properties

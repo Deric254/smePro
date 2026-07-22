@@ -1,0 +1,18 @@
+{
+  "id": "hr",
+  "display_name": "HR / Staff",
+  "fields": [
+    { "name": "full_name",   "type": "text",    "required": true },
+    { "name": "role_title",  "type": "text",    "required": false },
+    { "name": "phone",       "type": "text",    "required": false },
+    { "name": "salary",      "type": "real",    "required": false, "default": 0.0 },
+    { "name": "hire_date",   "type": "date",    "required": false },
+    { "name": "active",      "type": "boolean", "required": false, "default": true }
+  ],
+  "actions": ["create", "read", "update", "delete", "export"],
+  "default_roles": {
+    "Owner":   ["create", "read", "update", "delete", "export", "approve"],
+    "Manager": ["create", "read", "update", "export"],
+    "Staff":   ["read"]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "accounting",
+  "display_name": "Bookkeeping",
+  "fields": [
+    { "name": "description",       "type": "text",    "required": true },
+    { "name": "entry_type",        "type": "text",    "required": true },
+    { "name": "category",          "type": "text",    "required": false },
+    { "name": "amount",            "type": "real",    "required": true },
+    { "name": "transaction_date",  "type": "date",    "required": false },
+    { "name": "notes",             "type": "text",    "required": false }
+  ],
+  "actions": ["create", "read", "update", "delete", "export"],
+  "default_roles": {
+    "Owner":   ["create", "read", "update", "delete", "export", "approve"],
+    "Manager": ["create", "read", "update", "export"],
+    "Staff":   ["read"]
+  }
+}

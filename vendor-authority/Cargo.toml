@@ -1,0 +1,20 @@
+[package]
+name = "vendor_authority"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "vendor_authority"
+path = "src/main.rs"
+
+[dependencies]
+rusqlite = { version = "=0.31.0", features = ["bundled"] }
+serde = { version = "=1.0.210", features = ["derive"] }
+serde_json = "=1.0.128"
+chrono = { version = "=0.4.38", features = ["serde"] }
+anyhow = "=1.0.89"
+uuid = { version = "=1.10.0", features = ["v4"] }
+tiny_http = "=0.12.0"
+sha2 = "=0.10.8"
+hex = "=0.4.3"
+rand = "=0.8.5"

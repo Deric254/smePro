@@ -1,0 +1,227 @@
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* ---- Palette: aged ledger paper + rubber ink stamp ---- */
+  --paper: #EAE3CE;
+  --paper-card: #F2ECDB;
+  --paper-line: #C9BC9A;
+  --ink: #202B33;
+  --ink-soft: #58666E;
+  --ink-faint: #8B968D;
+  --stamp: #A63F28;
+  --stamp-wash: rgba(166, 63, 40, 0.10);
+  --stamp-wash-strong: rgba(166, 63, 40, 0.18);
+  --ok: #2E6B4F;
+  --ok-wash: rgba(46, 107, 79, 0.12);
+  --warn: #A8791E;
+  --warn-wash: rgba(168, 121, 30, 0.14);
+
+  /* ---- Type ---- */
+  --font-display: 'Newsreader', Georgia, serif;
+  --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'Courier New', monospace;
+
+  --radius-card: 3px;
+  --radius-stamp: 999px;
+
+  color-scheme: light;
+}
+
+/* ---- Alternate themes ----
+   Selected via a `data-theme` attribute on <html>, set from the
+   business's own settings (see settings.rs / AdminPanel's Theme tab) —
+   not hardcoded to one look. Same token set, different values, so
+   every component that already uses var(--paper) etc. re-themes for
+   free with zero component changes. */
+html[data-theme='dark_ledger'] {
+  --paper: #1B1E1A;
+  --paper-card: #24281f;
+  --paper-line: #3a4034;
+  --ink: #E8E4D8;
+  --ink-soft: #ABB3A2;
+  --ink-faint: #6E7768;
+  --stamp: #D97757;
+  --stamp-wash: rgba(217, 119, 87, 0.14);
+  --stamp-wash-strong: rgba(217, 119, 87, 0.24);
+  --ok: #6FBF97;
+  --ok-wash: rgba(111, 191, 151, 0.14);
+  --warn: #E0B15A;
+  --warn-wash: rgba(224, 177, 90, 0.16);
+  color-scheme: dark;
+}
+
+html[data-theme='sea_glass'] {
+  --paper: #EAF1EF;
+  --paper-card: #F5FAF9;
+  --paper-line: #BFD6D1;
+  --ink: #1E3A38;
+  --ink-soft: #4C6D69;
+  --ink-faint: #8FA9A5;
+  --stamp: #2A6F77;
+  --stamp-wash: rgba(42, 111, 119, 0.10);
+  --stamp-wash-strong: rgba(42, 111, 119, 0.18);
+  --ok: #2E6B4F;
+  --ok-wash: rgba(46, 107, 79, 0.12);
+  --warn: #A8791E;
+  --warn-wash: rgba(168, 121, 30, 0.14);
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Faint horizontal ledger rules across the whole app background */
+body {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 27px,
+    var(--paper-line) 27px,
+    var(--paper-line) 28px
+  );
+  background-attachment: local;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 0.4em 0;
+}
+
+h1 { font-size: 1.6rem; }
+h2 { font-size: 1.2rem; }
+h3 { font-size: 1rem; }
+
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+button {
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+a { color: var(--stamp); }
+
+/* Focus visibility — accessible keyboard nav, quiet but present */
+:focus-visible {
+  outline: 2px solid var(--stamp);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* ---- Shared primitives ---- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.55em 1.1em;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper-card);
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: transform 0.12s ease, opacity 0.12s ease;
+}
+.btn:hover { opacity: 0.88; }
+.btn:active { transform: translateY(1px); }
+
+.btn-outline {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--ink-faint);
+}
+.btn-outline:hover { border-color: var(--ink); background: var(--stamp-wash); }
+
+.btn-stamp {
+  background: var(--stamp);
+  border-color: var(--stamp);
+  color: #fff;
+}
+
+.card {
+  background: var(--paper-card);
+  border: 1px solid var(--paper-line);
+  border-radius: var(--radius-card);
+  padding: 1.1rem 1.2rem;
+}
+
+input, select {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  padding: 0.5em 0.7em;
+  border: 1px solid var(--ink-faint);
+  border-radius: var(--radius-card);
+  background: #fff;
+  color: var(--ink);
+}
+input:focus, select:focus { border-color: var(--stamp); }
+
+label {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: block;
+  margin-bottom: 0.3em;
+}
+
+/* ---- Stamp badge: the signature element ----
+   A rubber ink-stamp circle, rendered with a slightly irregular double
+   ring and a faint rotation, used for module icons and status marks. */
+.stamp-badge {
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: var(--radius-stamp);
+  border: 2px solid currentColor;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1rem;
+  position: relative;
+  flex-shrink: 0;
+  transform: rotate(-3deg);
+}
+.stamp-badge::after {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-stamp);
+  opacity: 0.5;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  padding: 0.25em 0.7em;
+  border-radius: var(--radius-stamp);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.status-active { background: var(--ok-wash); color: var(--ok); }
+.status-grace, .status-locked { background: var(--warn-wash); color: var(--warn); }
+.status-inactive { background: var(--stamp-wash); color: var(--stamp); }

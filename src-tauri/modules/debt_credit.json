@@ -1,0 +1,18 @@
+{
+  "id": "debt_credit",
+  "display_name": "Debt & Credit Ledger",
+  "fields": [
+    { "name": "party_name",   "type": "text",    "required": true },
+    { "name": "direction",    "type": "text",    "required": true },
+    { "name": "amount",       "type": "real",    "required": true },
+    { "name": "due_date",     "type": "date",    "required": false },
+    { "name": "settled",      "type": "boolean", "required": false, "default": false },
+    { "name": "notes",        "type": "text",    "required": false }
+  ],
+  "actions": ["create", "read", "update", "delete", "export"],
+  "default_roles": {
+    "Owner":   ["create", "read", "update", "delete", "export", "approve"],
+    "Manager": ["create", "read", "update", "export"],
+    "Staff":   ["create", "read"]
+  }
+}

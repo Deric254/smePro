@@ -1,0 +1,22 @@
+{
+  "id": "inventory",
+  "display_name": "Inventory",
+  "fields": [
+    { "name": "sku",        "type": "text",     "required": true,  "unique": true },
+    { "name": "name",       "type": "text",     "required": true },
+    { "name": "category",   "type": "text",     "required": false },
+    { "name": "quantity",   "type": "integer",  "required": true,  "default": 0 },
+    { "name": "unit",       "type": "unit",     "required": false },
+    { "name": "unit_cost",  "type": "real",     "required": true,  "default": 0.0 },
+    { "name": "unit_price", "type": "real",     "required": true,  "default": 0.0 },
+    { "name": "currency",   "type": "currency", "required": false },
+    { "name": "reorder_level", "type": "integer", "required": false, "default": 5 },
+    { "name": "expiry_date", "type": "date",    "required": false }
+  ],
+  "actions": ["create", "read", "update", "delete", "export"],
+  "default_roles": {
+    "Owner":   ["create", "read", "update", "delete", "export", "approve"],
+    "Manager": ["create", "read", "update", "export"],
+    "Staff":   ["read"]
+  }
+}
