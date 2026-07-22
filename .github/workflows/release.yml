@@ -145,19 +145,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
-            patchelf \
-            libsqlcipher-dev
-
-      - name: Install macOS SQLCipher
-        if: matrix.platform == 'macos-latest'
-        run: brew install sqlcipher
-
-      - name: Install Windows SQLCipher (vcpkg)
-        if: matrix.platform == 'windows-latest'
-        run: |
-          vcpkg install sqlcipher:x64-windows
-          echo "SQLCIPHER_LIB_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib" >> $env:GITHUB_ENV
-          echo "SQLCIPHER_INCLUDE_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\include" >> $env:GITHUB_ENV
+            patchelf
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -245,9 +233,6 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libsqlcipher-dev
 
       - name: Install frontend dependencies
         run: npm ci

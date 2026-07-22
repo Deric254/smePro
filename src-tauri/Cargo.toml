@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.2"
+version = "0.1.0"
 edition = "2021"
 build = "build.rs"
 
@@ -12,7 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-rusqlite = { version = "=0.31.0", features = ["sqlcipher"] }
+rusqlite = { version = "=0.31.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "=1.0.210", features = ["derive"] }
 serde_json = "=1.0.128"
 chrono = { version = "=0.4.38", features = ["serde"] }
@@ -40,6 +40,9 @@ version = "=1.0.0"
 
 [dependencies.zeroize]
 version = "=1.7.0"
+
+[dependencies.openssl-sys]
+version = "=0.9.103"
 
 [dependencies.tauri]
 version = "2"
