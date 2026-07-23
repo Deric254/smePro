@@ -27,15 +27,6 @@ on:
 permissions:
   contents: write
 jobs:
-  # ------------------------------------------------------------------
-  # Figures out the version for this run. If triggered by a direct tag
-  # push, uses that tag as-is (manual release path). If triggered by a
-  # normal push to main, computes the next version from the commit
-  # message, writes it into every file that needs to agree
-  # (package.json, package-lock.json, tauri.conf.json, Cargo.toml),
-  # commits, tags, and pushes — all in one step so there's no window
-  # where those files disagree with each other or with the tag.
-  # ------------------------------------------------------------------
   bump-version:
     if: ${{ github.ref_type == 'tag' || !contains(github.event.head_commit.message, 'chore(release):') }}
     runs-on: ubuntu-24.04
@@ -46,12 +37,10 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.ref_name }}
-      # Manual path: a tag was pushed directly. Use it as-is, skip bumping.
       - name: Use pushed tag directly
         if: startsWith(github.ref, 'refs/tags/v')
         id: use-tag
         run: echo "new_tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-      # Automatic path: a normal push to main. Compute + apply the bump.
       - name: Compute and apply next version
         if: startsWith(github.ref, 'refs/heads/')
         id: auto-bump
@@ -253,6 +242,7 @@ jobs:
       - name: Build APK
         env:
           OPENSSL_NO_ASM: 1
+          CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: ""
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125"
           TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -265,7 +255,7 @@ jobs:
           export CC_armv7_linux_androideabi="$TOOLCHAIN/armv7a-linux-androideabi21-clang"
           export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$TOOLCHAIN/i686-linux-android21-clang"
           export CC_i686_linux_android="$TOOLCHAIN/i686-linux-android21-clang"
-          npm run tauri android build -- --apk
+          npm run tauri android build -- --apk --target aarch64
       - name: Locate built APK(s)
         id: find-apk
         run: |
