@@ -1,12 +1,66 @@
 [package]
 name = "core_engine"
-version = "0.1.9"
+version = "0.1.7"
 edition = "2021"
 build = "build.rs"
 
 [lib]
 name = "core_engine"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# The real, shipped application. Explicit and named on purpose — without
+# this, Cargo's only naming rule is "whatever the package is called"
+# (core_engine), which is not what a customer should see in Task
+# Manager or Program Files, and — the actual bug this fixes — leaves
+# Tauri's bundler with no explicit instruction on which of several
+# compiled binaries in this crate is "the app" when dev-only tools are
+# also present. That ambiguity is exactly what shipped a debug tool
+# (check_query_plan.exe) instead of the real application to a real
+# customer's machine.
+[[bin]]
+name = "sme-pro"
+path = "src/main.rs"
+
+# Every dev/test-only binary below requires the "dev-tools" feature,
+# which is OFF by default and never enabled anywhere in the release
+# build or CI. This isn't just a naming convention — `required-features`
+# makes Cargo skip compiling these entirely for a normal `cargo build
+# --release` (which is what both the desktop bundler and CI invoke).
+# They physically cannot end up in a shipped installer; there's no
+# binary for the bundler to mistakenly pick in the first place. Run
+# them locally with e.g. `cargo run --bin demo_seed --features dev-tools`.
+[[bin]]
+name = "demo_seed"
+path = "src/bin/demo_seed.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "empty_server"
+path = "src/bin/empty_server.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "check_query_plan"
+path = "src/bin/check_query_plan.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "get_due_date"
+path = "src/bin/get_due_date.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "set_due_date"
+path = "src/bin/set_due_date.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "seed_payment_intent"
+path = "src/bin/seed_payment_intent.rs"
+required-features = ["dev-tools"]
+
+[features]
+dev-tools = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -43,6 +97,18 @@ version = "=1.7.0"
 
 [dependencies.openssl-sys]
 version = "=0.9.103"
+# CRITICAL: rusqlite's "bundled-sqlcipher-vendored-openssl" feature does
+# NOT vendor OpenSSL itself — it relies on openssl-sys's own "vendored"
+# feature being enabled (which pulls in openssl-src to compile real
+# OpenSSL from C source, using whatever cross-compiler Cargo is already
+# targeting) and then reads the DEP_OPENSSL_INCLUDE env var openssl-sys's
+# build script exposes. Without this exact feature flag, openssl-sys
+# instead tries to find a SYSTEM-installed OpenSSL — which doesn't exist
+# for cross-compile targets (Android, cross-arch macOS), and is what
+# caused "library 'sqlcipher' not found" — a build script silently
+# proceeding with no usable crypto library, not visible until the final
+# link step, which made this a genuinely nasty one to trace.
+features = ["vendored"]
 
 [dependencies.tauri]
 version = "2"
