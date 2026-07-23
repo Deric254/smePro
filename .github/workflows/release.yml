@@ -211,7 +211,7 @@ jobs:
   android:
     needs: bump-version
     runs-on: ubuntu-24.04
-    # NOTE ON x86_64: deliberately not building for x86_64-linux-android
+    # NOTE ON x86_64: deliberately not building for x86_64-linux-android and removed it from code
     # (see the Rust-targets step below) — real Android phones are ARM
     # (aarch64 64-bit, armv7 32-bit); x86_64 Android is essentially
     # emulator-only. That architecture specifically hit a genuine
