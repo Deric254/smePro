@@ -17,6 +17,28 @@ pub fn any_business_exists(conn: &Connection) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// Resolves "the" business for this install, for the overwhelmingly
+/// common real-world case: one installed copy of the app == one
+/// business, forever. A customer should never need to know or type a
+/// raw business ID (a UUID) just to log in — that's an implementation
+/// detail, not something a shopkeeper should be expected to memorize
+/// or paste in.
+///
+/// Deliberately refuses to guess if there's more than one business in
+/// this database (e.g. a shared install, or test data) — silently
+/// picking one in that case could log someone into the wrong business
+/// without any indication anything unusual happened. The frontend
+/// falls back to asking for the business ID explicitly only in that
+/// genuinely ambiguous case, not by default for everyone.
+pub fn resolve_single_business_id(conn: &Connection) -> Result<Option<String>> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM businesses", [], |r| r.get(0))?;
+    if count != 1 {
+        return Ok(None);
+    }
+    let id: String = conn.query_row("SELECT id FROM businesses LIMIT 1", [], |r| r.get(0))?;
+    Ok(Some(id))
+}
+
 /// Generates a real, random admin recovery code — not the hardcoded
 /// placeholder used in the dev/test seed binary. Shown to the owner
 /// exactly once at business creation; only its hash is ever stored.

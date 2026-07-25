@@ -7,7 +7,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, audit, auth, crud, forecast, license, notifications, ocr_import, onboarding, payment, rbac, reference_data, report, roles, settings, users, xlsx_export};
+use crate::{ai_assistant, audit, auth, backup, crud, forecast, license, notifications, ocr_import, onboarding, payment, rbac, reference_data, report, roles, settings, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -153,6 +153,21 @@ fn route(
         };
     }
 
+    // GET /setup/business-id — resolves the business ID automatically
+    // for the normal case (one install, one business), so the login
+    // screen never has to ask someone to know or paste a raw UUID just
+    // to sign in. Public/no-auth on purpose: a business ID is a routing
+    // key, not a secret — the password is what actually protects the
+    // account. Returns null (not an error) when there's more than one
+    // business in this database, which the frontend treats as "ask for
+    // it explicitly" rather than silently guessing.
+    if parts.as_slice() == ["setup", "business-id"] && *method == Method::Get {
+        return match crate::business_panel::resolve_single_business_id(conn) {
+            Ok(id) => ApiResponse::Json(200, json!({"business_id": id})),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+
     // POST /setup/create-business — the ONE public write endpoint in
     // this whole API, because on a genuinely fresh install there is no
     // user yet to authenticate as. Guarded by refusing to run a second
@@ -217,6 +232,38 @@ fn route(
             "admin_recovery_code": admin_code,
             "warning": "Save this admin recovery code now — it is shown exactly once and cannot be retrieved later."
         }));
+    }
+
+    // POST /setup/restore — the actual disaster-recovery path, not just
+    // the "I'm already logged in and want to roll back" one that
+    // /admin/restore below covers. A REAL disaster (dead hard drive,
+    // wiped machine, fresh reinstall) leaves nothing to log into —
+    // there's no business, no user, no session to authenticate with.
+    // Without this, the backup/restore system this app already has
+    // would be completely unreachable at the exact moment it's needed
+    // most. Guarded the same way create-business is: only reachable
+    // before any business exists on this install, closed off the
+    // instant one does (same 409 pattern) so it can't be replayed
+    // against a live, already-set-up install without authentication.
+    // What actually gates this from being a free-for-all: the restore
+    // payload itself must contain a backup that decrypts correctly and
+    // is shaped like a real SME Pro database (validated inside
+    // backup::stage_restore) — only someone who actually has your
+    // backup file could produce that.
+    if parts.as_slice() == ["setup", "restore"] && *method == Method::Post {
+        match crate::business_panel::any_business_exists(conn) {
+            Ok(true) => return json_err(409, "this install already has a business set up — use Admin \u{2192} Backup to restore from within the app instead"),
+            Ok(false) => {}
+            Err(e) => return json_err(500, &e.to_string()),
+        }
+        let input: backup::RestoreInput = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => return json_err(400, "invalid restore payload"),
+        };
+        return match backup::stage_restore(conn, input) {
+            Ok(()) => ApiResponse::Json(200, json!({"staged": true, "message": "Restore staged. Restart the app to complete it."})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
     }
 
     if parts.as_slice() == ["auth", "login"] && *method == Method::Post {
@@ -371,6 +418,35 @@ fn route(
         return match crate::vendor_license::status(conn) {
             Ok(v) => ApiResponse::Json(200, v),
             Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+
+    // ---- Backup & restore — Owner-only, real disaster recovery. ----
+    if parts.as_slice() == ["admin", "backup"] && *method == Method::Post {
+        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
+        return match backup::create_backup(conn) {
+            Ok(data) => {
+                let _ = audit::log(conn, &business_id, Some(&user_id), "_backup", "create", None, None);
+                match serde_json::to_value(&data) {
+                    Ok(v) => ApiResponse::Json(200, v),
+                    Err(e) => json_err(500, &e.to_string()),
+                }
+            }
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["admin", "restore"] && *method == Method::Post {
+        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let input: backup::RestoreInput = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => return json_err(400, "invalid restore payload"),
+        };
+        return match backup::stage_restore(conn, input) {
+            Ok(()) => {
+                let _ = audit::log(conn, &business_id, Some(&user_id), "_backup", "restore_staged", None, None);
+                ApiResponse::Json(200, json!({"staged": true, "message": "Restore staged. Restart the app to complete it."}))
+            }
+            Err(e) => json_err(400, &e.to_string()),
         };
     }
 

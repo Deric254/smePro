@@ -60,6 +60,9 @@ export { ApiError };
 export const getSetupStatus = () =>
   fetch(`${API_BASE}/setup/status`).then((res) => res.json());
 
+export const getResolvedBusinessId = (): Promise<{ business_id: string | null }> =>
+  fetch(`${API_BASE}/setup/business-id`).then((res) => res.json());
+
 export const createBusiness = (payload: Record<string, string>) =>
   fetch(`${API_BASE}/setup/create-business`, {
     method: 'POST',
@@ -89,6 +92,17 @@ export const login = (username: string, password: string, biz: string) =>
 
 export const recoverViaSecurityQuestions = (biz: string, payload: Record<string, string>) =>
   fetch(`${API_BASE}/auth/recover/security-questions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Business-Id': biz },
+    body: JSON.stringify(payload),
+  }).then(async (res) => {
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(res.status, body.error || 'Recovery failed');
+    return body;
+  });
+
+export const recoverViaAdminCode = (biz: string, payload: Record<string, string>) =>
+  fetch(`${API_BASE}/auth/recover/admin-code`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Business-Id': biz },
     body: JSON.stringify(payload),
@@ -145,10 +159,8 @@ export const askAi = (question: string) =>
   request('/ai/ask', { method: 'POST', body: JSON.stringify({ question }) });
 export const getAiContext = () => request('/ai/context');
 
-// ---- Notifications ----
-export const listNotifications = () => request('/notifications');
-export const sendLowStockAlert = (channel: string, recipient: string) =>
-  request('/notifications/low-stock-alert', { method: 'POST', body: JSON.stringify({ channel, recipient }) });
+// (Notifications — see the fuller, typed versions further down:
+// listNotifications, sendNotification, sendLowStockAlert)
 
 // ---- Roles & permissions ----
 export const listRoles = () => request('/roles');
@@ -188,6 +200,89 @@ export const deleteCurrency = (currencyId: string) => request(`/currencies/${cur
 export const getSettings = () => request('/settings');
 export const setSetting = (key: string, value: string) =>
   request('/settings', { method: 'PUT', body: JSON.stringify({ key, value }) });
+
+// ---- Notifications ----
+export interface NotificationRecord {
+  id: string;
+  channel: string;
+  recipient: string;
+  message: string;
+  status: string;
+  created_at: string;
+}
+export const listNotifications = (): Promise<{ notifications: NotificationRecord[] }> => request('/notifications');
+export const sendNotification = (channel: 'whatsapp' | 'sms', recipient: string, message: string) =>
+  request('/notifications/send', { method: 'POST', body: JSON.stringify({ channel, recipient, message }) });
+export const sendLowStockAlert = (channel: 'whatsapp' | 'sms', recipient: string) =>
+  request('/notifications/low-stock-alert', { method: 'POST', body: JSON.stringify({ channel, recipient }) });
+
+// ---- OCR photo import — photograph a paper ledger page, review the
+// guessed records, confirm to actually create them. Requires
+// tesseract-ocr installed on this machine (not bundled with the app) —
+// callers should show a clear, specific message on failure rather than
+// a generic error, since "not installed" is the overwhelmingly likely
+// cause for most people trying this. ----
+export const ocrExtractText = (imageBase64: string): Promise<{ raw_text: string }> =>
+  request('/import/ocr/extract', { method: 'POST', body: JSON.stringify({ image_base64: imageBase64 }) });
+export const ocrParseCandidates = (moduleId: string, rawText: string): Promise<{ candidates: Record<string, unknown>[] }> =>
+  request('/import/ocr/parse', { method: 'POST', body: JSON.stringify({ module_id: moduleId, raw_text: rawText }) });
+export const bulkCreateRecords = (moduleId: string, records: Record<string, unknown>[]): Promise<{ created: number; errors: { index: number; error: string }[] }> =>
+  request(`/modules/${moduleId}/records/bulk`, { method: 'POST', body: JSON.stringify({ records }) });
+
+// ---- Change business type after setup — re-applies that type's
+// sensible default module set. ----
+export const changeBusinessType = (businessType: string): Promise<{ enabled_modules: string[] }> =>
+  request('/onboarding/setup', { method: 'POST', body: JSON.stringify({ business_type: businessType }) });
+
+// ---- Audit log — Owner-only, the record of who did what and when.
+// This is the actual "nothing gets lost, everything is accountable"
+// guarantee made concrete: every write anywhere in the app is logged
+// here automatically, not opt-in. ----
+export interface AuditLogEntry {
+  id: string;
+  user_id: string | null;
+  module_id: string;
+  action: string;
+  record_id: string | null;
+  details: unknown;
+  timestamp: string;
+}
+export const getAuditLog = (moduleId?: string, limit = 200): Promise<{ entries: AuditLogEntry[] }> =>
+  request(`/audit-log?limit=${limit}${moduleId ? `&module_id=${encodeURIComponent(moduleId)}` : ''}`);
+
+// ---- Backup & restore — real disaster recovery, not a suggestion to
+// copy files manually. ----
+export interface BackupData {
+  database_base64: string;
+  key_hex: string;
+  created_at: string;
+  schema_version: string;
+}
+export const createBackup = (): Promise<BackupData> => request('/admin/backup', { method: 'POST' });
+export const restoreBackup = (data: { database_base64: string; key_hex: string }) =>
+  request('/admin/restore', { method: 'POST', body: JSON.stringify(data) });
+export const restoreBackupFreshInstall = (data: { database_base64: string; key_hex: string }) =>
+  request('/setup/restore', { method: 'POST', body: JSON.stringify(data) });
+
+// ---- Real payment collection — Stripe checkout / M-Pesa STK push.
+// Separate from license/activate and license/pay, which are trust-based
+// manual toggles with no actual charge — these two call real payment
+// providers and money actually moves. ----
+export interface PaymentHistoryEntry {
+  provider: string;
+  reference: string;
+  purpose: string;
+  amount: number;
+  currency: string;
+  status: string;
+  created_at: string;
+  completed_at: string | null;
+}
+export const getPaymentHistory = (): Promise<{ payments: PaymentHistoryEntry[] }> => request('/payments/history');
+export const initiateStripeCheckout = (purpose: 'activation' | 'subscription', amount: number, currency: string) =>
+  request('/payments/checkout', { method: 'POST', body: JSON.stringify({ provider: 'stripe', purpose, amount, currency }) });
+export const initiateMpesaPayment = (purpose: 'activation' | 'subscription', amount: number, phone: string) =>
+  request('/payments/checkout', { method: 'POST', body: JSON.stringify({ provider: 'mpesa', purpose, amount, phone }) });
 
 // ---- Vendor license key redemption ----
 export const getVendorLicenseStatus = () => request('/license/vendor/status');

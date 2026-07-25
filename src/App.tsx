@@ -3,6 +3,7 @@ import Login from './pages/Login';
 import FirstRunSetup from './pages/FirstRunSetup';
 import ModuleView from './pages/ModuleView';
 import AdminPanel from './pages/AdminPanel';
+import Dashboard from './pages/Dashboard';
 import Sidebar from './components/Sidebar';
 import LicenseBanner from './components/LicenseBanner';
 import AiFloatingButton from './components/AiFloatingButton';
@@ -37,10 +38,11 @@ export default function App() {
     try {
       const res = await listModules();
       setModules(res.modules);
-      if (!selected && res.modules.length > 0) {
-        const firstEnabled = res.modules.find((m: ModuleListItem) => m.enabled);
-        if (firstEnabled) setSelected(firstEnabled.id);
-      }
+      // Deliberately NOT auto-selecting the first module anymore — a
+      // brand new user landing straight in an arbitrary module's raw
+      // data table, with no context on what it is or what to do, was
+      // the single biggest "directionless" complaint. `selected` stays
+      // null, which renders the Dashboard below instead.
     } catch {
       setLoadError('Could not load modules. Is the local server running?');
     }
@@ -116,7 +118,11 @@ export default function App() {
         ) : selected ? (
           <ModuleView moduleId={selected} />
         ) : (
-          <div className="card">No modules are enabled yet for this business.</div>
+          <Dashboard
+            businessName={businessName}
+            onSelectModule={setSelected}
+            onOpenAdmin={() => setSelected('__admin__')}
+          />
         )}
       </main>
 

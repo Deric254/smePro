@@ -8,6 +8,12 @@ export interface FieldDef {
   default?: unknown;
 }
 
+export interface DashboardMetric {
+  measure?: string;
+  aggregation: 'sum' | 'avg' | 'count';
+  label: string;
+}
+
 export interface ModuleSchema {
   id: string;
   display_name: string;
@@ -19,6 +25,10 @@ export interface ModuleSchema {
    * is the module's theoretical capability list, the same for every
    * user regardless of role. */
   my_permissions: string[];
+  /** The module's own declaration of its headline dashboard number, if
+   * it has one — null for a module that doesn't (falls back to a plain
+   * record count on the Dashboard instead). */
+  dashboard_metric?: DashboardMetric | null;
 }
 
 export interface ModuleListItem {

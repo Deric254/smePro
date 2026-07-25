@@ -2,17 +2,68 @@
   "id": "sales",
   "display_name": "Sales",
   "fields": [
-    { "name": "item_name",  "type": "text",    "required": true },
-    { "name": "customer",   "type": "text",    "required": false },
-    { "name": "branch",     "type": "text",    "required": false },
-    { "name": "quantity",   "type": "integer", "required": true, "default": 1 },
-    { "name": "revenue",    "type": "real",    "required": true },
-    { "name": "sale_date",  "type": "date",    "required": false }
+    {
+      "name": "item_name",
+      "type": "text",
+      "required": true
+    },
+    {
+      "name": "customer",
+      "type": "text",
+      "required": false
+    },
+    {
+      "name": "branch",
+      "type": "text",
+      "required": false
+    },
+    {
+      "name": "quantity",
+      "type": "integer",
+      "required": true,
+      "default": 1
+    },
+    {
+      "name": "revenue",
+      "type": "real",
+      "required": true
+    },
+    {
+      "name": "sale_date",
+      "type": "date",
+      "required": false
+    }
   ],
-  "actions": ["create", "read", "update", "delete", "export"],
+  "actions": [
+    "create",
+    "read",
+    "update",
+    "delete",
+    "export"
+  ],
   "default_roles": {
-    "Owner":   ["create", "read", "update", "delete", "export", "approve"],
-    "Manager": ["create", "read", "update", "export"],
-    "Staff":   ["create", "read"]
+    "Owner": [
+      "create",
+      "read",
+      "update",
+      "delete",
+      "export",
+      "approve"
+    ],
+    "Manager": [
+      "create",
+      "read",
+      "update",
+      "export"
+    ],
+    "Staff": [
+      "create",
+      "read"
+    ]
+  },
+  "dashboard_metric": {
+    "measure": "revenue",
+    "aggregation": "sum",
+    "label": "total revenue"
   }
 }

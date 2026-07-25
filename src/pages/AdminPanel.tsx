@@ -6,12 +6,18 @@ import {
   listCurrencies, createCurrency, deleteCurrency,
   getSettings, setSetting,
   getVendorLicenseStatus, redeemVendorKey,
+  createBackup, restoreBackup,
+  getPaymentHistory, initiateStripeCheckout, initiateMpesaPayment,
+  getAuditLog,
+  listNotifications, sendNotification,
+  changeBusinessType,
   listModules, getModuleSchema,
   ApiError,
 } from '../api';
+import type { PaymentHistoryEntry, AuditLogEntry, NotificationRecord } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
 
-type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license';
+type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'billing' | 'audit' | 'notifications';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
@@ -19,7 +25,11 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'units', label: 'Units' },
   { id: 'currencies', label: 'Currencies' },
   { id: 'settings', label: 'Theme & Settings' },
+  { id: 'notifications', label: 'Notifications' },
+  { id: 'billing', label: 'Billing' },
   { id: 'license', label: 'Vendor License' },
+  { id: 'backup', label: 'Backup & Restore' },
+  { id: 'audit', label: 'Audit Log' },
 ];
 
 export default function AdminPanel() {
@@ -43,7 +53,11 @@ export default function AdminPanel() {
       {tab === 'units' && <UnitsTab />}
       {tab === 'currencies' && <CurrenciesTab />}
       {tab === 'settings' && <SettingsTab />}
+      {tab === 'notifications' && <NotificationsTab />}
       {tab === 'license' && <VendorLicenseTab />}
+      {tab === 'billing' && <BillingTab />}
+      {tab === 'backup' && <BackupTab />}
+      {tab === 'audit' && <AuditLogTab />}
     </div>
   );
 }
@@ -496,6 +510,12 @@ function SettingsTab() {
   const [theme, setTheme] = useState('ledger');
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'none' | 'error'>('idle');
+  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+  const [businessType, setBusinessType] = useState('retail');
+  const [changingType, setChangingType] = useState(false);
+  const [typeChangedModules, setTypeChangedModules] = useState<string[] | null>(null);
+  const [typeError, setTypeError] = useState<string | null>(null);
 
   useEffect(() => {
     getSettings().then((s) => { if (s.theme) setTheme(s.theme); }).catch(() => {});
@@ -514,23 +534,111 @@ function SettingsTab() {
     }
   }
 
+  async function handleChangeBusinessType() {
+    setChangingType(true);
+    setTypeError(null);
+    setTypeChangedModules(null);
+    try {
+      const res = await changeBusinessType(businessType);
+      setTypeChangedModules(res.enabled_modules);
+    } catch (err) {
+      setTypeError(err instanceof ApiError ? err.message : 'Could not change business type');
+    } finally {
+      setChangingType(false);
+    }
+  }
+
+  async function checkForUpdates() {
+    setUpdateStatus('checking');
+    try {
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const update = await check();
+      if (update) {
+        setUpdateVersion(update.version);
+        setUpdateStatus('available');
+      } else {
+        setUpdateStatus('none');
+      }
+    } catch {
+      // Either not running inside the desktop app, or genuinely
+      // couldn't reach the update server — same message either way,
+      // since a customer doesn't need to know which.
+      setUpdateStatus('error');
+    }
+  }
+
   return (
-    <div className="card">
-      <ErrorBox error={error} />
-      <label>Theme</label>
-      <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
-        {THEMES.map((t) => (
-          <button
-            key={t.id}
-            className={theme === t.id ? 'btn' : 'btn btn-outline'}
-            onClick={() => applyTheme(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
+    <>
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <ErrorBox error={error} />
+        <label>Theme</label>
+        <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
+          {THEMES.map((t) => (
+            <button
+              key={t.id}
+              className={theme === t.id ? 'btn' : 'btn btn-outline'}
+              onClick={() => applyTheme(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {saved && <div style={{ marginTop: '0.7rem', color: 'var(--ok)', fontSize: '0.85rem' }}>Saved — applies for everyone on this install.</div>}
       </div>
-      {saved && <div style={{ marginTop: '0.7rem', color: 'var(--ok)', fontSize: '0.85rem' }}>Saved — applies for everyone on this install.</div>}
-    </div>
+
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <h3 style={{ marginTop: 0 }}>Business type</h3>
+        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+          Changes the sensible starting set of modules enabled for a business like this.
+          Doesn't remove or hide anything already in use — only adds modules that make
+          sense for the new type and aren't already on.
+        </p>
+        <ErrorBox error={typeError} />
+        {typeChangedModules && (
+          <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.7rem' }}>
+            Updated — enabled modules: {typeChangedModules.join(', ')}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-end' }}>
+          <div style={{ flex: 1 }}>
+            <label>Type</label>
+            <select value={businessType} onChange={(e) => setBusinessType(e.target.value)} style={{ width: '100%' }}>
+              <option value="retail">Retail / General Store</option>
+              <option value="food">Food / Restaurant</option>
+              <option value="services">Services</option>
+              <option value="manufacturing">Manufacturing</option>
+            </select>
+          </div>
+          <button className="btn btn-stamp" onClick={handleChangeBusinessType} disabled={changingType}>
+            {changingType ? 'Applying…' : 'Apply'}
+          </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Software updates</h3>
+        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+          The app checks for updates automatically each time it starts. Use this if you want
+          to check right now instead of waiting for the next launch.
+        </p>
+        <button className="btn btn-outline" onClick={checkForUpdates} disabled={updateStatus === 'checking'}>
+          {updateStatus === 'checking' ? 'Checking…' : 'Check for updates now'}
+        </button>
+        {updateStatus === 'available' && (
+          <div style={{ marginTop: '0.7rem', color: 'var(--stamp)', fontSize: '0.85rem' }}>
+            Version {updateVersion} is available — restart the app to see the install prompt.
+          </div>
+        )}
+        {updateStatus === 'none' && (
+          <div style={{ marginTop: '0.7rem', color: 'var(--ok)', fontSize: '0.85rem' }}>You're on the latest version.</div>
+        )}
+        {updateStatus === 'error' && (
+          <div style={{ marginTop: '0.7rem', color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
+            Couldn't check right now — this also happens normally in a browser/dev preview, not just on a real connection issue.
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -590,6 +698,486 @@ function VendorLicenseTab() {
   );
 }
 
+// -------------------------------------------------------------- Billing
+
+function BillingTab() {
+  const [history, setHistory] = useState<PaymentHistoryEntry[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+  const [provider, setProvider] = useState<'stripe' | 'mpesa'>('stripe');
+  const [purpose, setPurpose] = useState<'activation' | 'subscription'>('subscription');
+  const [amount, setAmount] = useState('');
+  const [currency, setCurrency] = useState('usd');
+  const [phone, setPhone] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [mpesaMessage, setMpesaMessage] = useState<string | null>(null);
+
+  const refreshHistory = () => {
+    setLoadingHistory(true);
+    getPaymentHistory().then((r) => setHistory(r.payments)).catch(() => {}).finally(() => setLoadingHistory(false));
+  };
+  useEffect(() => { refreshHistory(); }, []);
+
+  async function handlePay(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setMpesaMessage(null);
+    const parsedAmount = parseFloat(amount);
+    if (!parsedAmount || parsedAmount <= 0) { setError('Enter a valid amount.'); return; }
+    setBusy(true);
+    try {
+      if (provider === 'stripe') {
+        const res = await initiateStripeCheckout(purpose, parsedAmount, currency);
+        if (res.checkout_url) {
+          // Real payment page — leaves the app deliberately. Opened in
+          // the system browser, not inside the app's own webview, since
+          // that's where a saved card / Apple Pay / etc. already works.
+          try {
+            const { openUrl } = await import('@tauri-apps/plugin-opener');
+            await openUrl(res.checkout_url);
+          } catch {
+            window.open(res.checkout_url, '_blank');
+          }
+        }
+      } else {
+        if (!phone.trim()) { setError('Enter the M-Pesa phone number (format: 2547XXXXXXXX).'); setBusy(false); return; }
+        const res = await initiateMpesaPayment(purpose, parsedAmount, phone.trim());
+        setMpesaMessage(res.message || 'Check your phone to complete the M-Pesa payment.');
+      }
+      setAmount('');
+      refreshHistory();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not start the payment');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <h3 style={{ marginTop: 0 }}>Make a payment</h3>
+        <p style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: 0 }}>
+          This is a real charge through Stripe or M-Pesa — different from the free trial or a
+          vendor-issued license key. Use this if your vendor has set up real billing for this
+          install.
+        </p>
+        <ErrorBox error={error} />
+        {mpesaMessage && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginBottom: '0.8rem' }}>{mpesaMessage}</div>}
+        <form onSubmit={handlePay} style={styles.formGrid}>
+          <div>
+            <label>Provider</label>
+            <select value={provider} onChange={(e) => setProvider(e.target.value as 'stripe' | 'mpesa')} style={{ width: '100%' }}>
+              <option value="stripe">Card (Stripe)</option>
+              <option value="mpesa">M-Pesa</option>
+            </select>
+          </div>
+          <div>
+            <label>Purpose</label>
+            <select value={purpose} onChange={(e) => setPurpose(e.target.value as 'activation' | 'subscription')} style={{ width: '100%' }}>
+              <option value="subscription">Monthly subscription</option>
+              <option value="activation">One-time activation</option>
+            </select>
+          </div>
+          <div>
+            <label>Amount</label>
+            <input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} required style={{ width: '100%' }} />
+          </div>
+          {provider === 'stripe' ? (
+            <div>
+              <label>Currency</label>
+              <input value={currency} onChange={(e) => setCurrency(e.target.value.toLowerCase())} maxLength={3} style={{ width: '100%' }} />
+            </div>
+          ) : (
+            <div>
+              <label>M-Pesa phone number</label>
+              <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="2547XXXXXXXX" style={{ width: '100%' }} />
+            </div>
+          )}
+        </form>
+        <button className="btn btn-stamp" style={{ marginTop: '0.8rem' }} onClick={handlePay} disabled={busy}>
+          {busy ? 'Starting…' : provider === 'stripe' ? 'Continue to payment' : 'Send payment request'}
+        </button>
+      </div>
+
+      <h3 style={{ margin: '1.2rem 0 0.8rem' }}>Payment history</h3>
+      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>Date</th>
+              <th style={styles.th}>Provider</th>
+              <th style={styles.th}>Purpose</th>
+              <th style={styles.th}>Amount</th>
+              <th style={styles.th}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loadingHistory ? (
+              <tr><td style={styles.td} colSpan={5}>Loading…</td></tr>
+            ) : history.length === 0 ? (
+              <tr><td style={styles.td} colSpan={5}>No payments yet.</td></tr>
+            ) : (
+              history.map((p) => (
+                <tr key={p.reference}>
+                  <td style={styles.td}>{new Date(p.created_at).toLocaleDateString()}</td>
+                  <td style={styles.td}>{p.provider}</td>
+                  <td style={styles.td}>{p.purpose}</td>
+                  <td className="mono" style={styles.td}>{p.amount.toFixed(2)} {p.currency.toUpperCase()}</td>
+                  <td style={styles.td}>
+                    <span className={`status-pill ${p.status === 'completed' ? 'status-active' : p.status === 'failed' ? 'status-inactive' : ''}`}>
+                      {p.status}
+                    </span>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------- Backup
+
+function BackupTab() {
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [downloaded, setDownloaded] = useState(false);
+
+  const [restoreFile, setRestoreFile] = useState<{ database_base64: string; key_hex: string; created_at?: string; name: string } | null>(null);
+  const [confirmText, setConfirmText] = useState('');
+  const [restoring, setRestoring] = useState(false);
+  const [restoreStaged, setRestoreStaged] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+
+  async function handleCreateBackup() {
+    setCreating(true);
+    setError(null);
+    setDownloaded(false);
+    try {
+      const data = await createBackup();
+      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const dateStamp = new Date(data.created_at).toISOString().slice(0, 10);
+      a.href = url;
+      a.download = `sme-pro-backup-${dateStamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setDownloaded(true);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not create the backup');
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    setRestoreError(null);
+    setRestoreStaged(false);
+    setConfirmText('');
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result as string);
+        if (!parsed.database_base64 || !parsed.key_hex) {
+          setRestoreError('This does not look like a valid SME Pro backup file.');
+          return;
+        }
+        setRestoreFile({ ...parsed, name: file.name });
+      } catch {
+        setRestoreError('Could not read this file — it may be corrupted or not a valid backup.');
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  async function handleRestore() {
+    if (!restoreFile) return;
+    setRestoring(true);
+    setRestoreError(null);
+    try {
+      await restoreBackup({ database_base64: restoreFile.database_base64, key_hex: restoreFile.key_hex });
+      setRestoreStaged(true);
+    } catch (err) {
+      setRestoreError(err instanceof ApiError ? err.message : 'Could not restore this backup');
+    } finally {
+      setRestoring(false);
+    }
+  }
+
+  async function handleRestartNow() {
+    try {
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch {
+      // Not running inside the desktop app (e.g. browser dev mode) —
+      // nothing more this can do; the message below already covers it.
+    }
+  }
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <h3 style={{ marginTop: 0 }}>Back up your business</h3>
+        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+          Downloads your entire business database — every record, every user, every setting —
+          as one file, still encrypted. Store it somewhere safe: a cloud drive, a USB stick,
+          anywhere other than only this computer. If this machine is ever lost, stolen, or its
+          disk fails, this file is how you get everything back.
+        </p>
+        <ErrorBox error={error} />
+        {downloaded && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.7rem' }}>Backup downloaded.</div>}
+        <button className="btn btn-stamp" onClick={handleCreateBackup} disabled={creating}>
+          {creating ? 'Creating backup…' : 'Download backup now'}
+        </button>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Restore from a backup</h3>
+        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+          <strong>This replaces everything currently in this app</strong> with what's in the
+          backup file — every record, every user, every setting reverts to exactly how it was
+          when that backup was made. Anything created since then is gone. Only do this if
+          that's really what you want.
+        </p>
+        <ErrorBox error={restoreError} />
+
+        {!restoreStaged ? (
+          <>
+            <input type="file" accept=".json,application/json" onChange={handleFileSelect} style={{ marginBottom: '0.8rem' }} />
+            {restoreFile && (
+              <div style={styles.restorePreview}>
+                <div style={{ fontSize: '0.85rem' }}>
+                  <strong>{restoreFile.name}</strong>
+                  {restoreFile.created_at && (
+                    <span style={{ color: 'var(--ink-soft)' }}> — backed up {new Date(restoreFile.created_at).toLocaleString()}</span>
+                  )}
+                </div>
+                <label style={{ display: 'block', marginTop: '0.8rem' }}>
+                  Type <span className="mono">RESTORE</span> to confirm — this cannot be undone
+                </label>
+                <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} style={{ width: '100%', marginTop: '0.3rem' }} />
+                <button
+                  className="btn btn-stamp"
+                  style={{ marginTop: '0.8rem' }}
+                  disabled={confirmText !== 'RESTORE' || restoring}
+                  onClick={handleRestore}
+                >
+                  {restoring ? 'Restoring…' : 'Restore this backup'}
+                </button>
+              </div>
+            )}
+          </>
+        ) : (
+          <div>
+            <div style={{ color: 'var(--ok)', fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+              Backup staged successfully.
+            </div>
+            <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+              The restore will finish the next time the app starts. Restart now to complete it.
+            </p>
+            <button className="btn btn-stamp" onClick={handleRestartNow}>Restart now</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ------------------------------------------------------------ Audit Log
+
+function AuditLogTab() {
+  const [entries, setEntries] = useState<AuditLogEntry[]>([]);
+  const [users, setUsers] = useState<Record<string, string>>({});
+  const [moduleFilter, setModuleFilter] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listUsers().then((r) => {
+      const map: Record<string, string> = {};
+      r.users.forEach((u: UserAccountLike) => { map[u.id] = u.username; });
+      setUsers(map);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    getAuditLog(moduleFilter || undefined)
+      .then((r) => setEntries(r.entries))
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the audit log'))
+      .finally(() => setLoading(false));
+  }, [moduleFilter]);
+
+  const moduleOptions = Array.from(new Set(entries.map((e) => e.module_id))).sort();
+
+  return (
+    <div>
+      <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', marginTop: 0 }}>
+        Every create, update, delete, and admin action anywhere in this app, automatically —
+        not something anyone has to remember to turn on. This is the full accountability
+        trail: who did what, and when.
+      </p>
+      <div style={{ marginBottom: '0.8rem' }}>
+        <label>Filter by module</label>
+        <select value={moduleFilter} onChange={(e) => setModuleFilter(e.target.value)} style={{ marginLeft: '0.6rem' }}>
+          <option value="">All</option>
+          {moduleOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
+      <ErrorBox error={error} />
+      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>When</th>
+              <th style={styles.th}>Who</th>
+              <th style={styles.th}>Module</th>
+              <th style={styles.th}>Action</th>
+              <th style={styles.th}>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td style={styles.td} colSpan={5}>Loading…</td></tr>
+            ) : entries.length === 0 ? (
+              <tr><td style={styles.td} colSpan={5}>No activity recorded yet.</td></tr>
+            ) : (
+              entries.map((e) => (
+                <tr key={e.id}>
+                  <td style={styles.td} className="mono">{new Date(e.timestamp).toLocaleString()}</td>
+                  <td style={styles.td}>{e.user_id ? (users[e.user_id] ?? 'Unknown user') : 'System'}</td>
+                  <td style={styles.td}>{e.module_id}</td>
+                  <td style={styles.td}>{e.action}</td>
+                  <td style={styles.td} className="mono">
+                    {e.details ? JSON.stringify(e.details).slice(0, 80) : e.record_id ? `record: ${e.record_id.slice(0, 8)}…` : '—'}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+type UserAccountLike = { id: string; username: string };
+
+// -------------------------------------------------------- Notifications
+
+function NotificationsTab() {
+  const [channel, setChannel] = useState<'whatsapp' | 'sms'>('whatsapp');
+  const [recipient, setRecipient] = useState('');
+  const [message, setMessage] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
+  const [history, setHistory] = useState<NotificationRecord[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+
+  const refresh = () => {
+    setLoadingHistory(true);
+    listNotifications().then((r) => setHistory(r.notifications)).catch(() => {}).finally(() => setLoadingHistory(false));
+  };
+  useEffect(() => { refresh(); }, []);
+
+  async function handleSend(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setSent(false);
+    setSending(true);
+    try {
+      await sendNotification(channel, recipient, message);
+      setMessage('');
+      setSent(true);
+      refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not send this message');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <h3 style={{ marginTop: 0 }}>Send a message</h3>
+        <p style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: 0 }}>
+          Sends a real WhatsApp or SMS message via this business's configured Twilio account.
+          Without one configured, messages are logged here but not actually delivered — ask
+          whoever set up this install whether that's connected yet.
+        </p>
+        <ErrorBox error={error} />
+        {sent && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.7rem' }}>Sent.</div>}
+        <form onSubmit={handleSend} style={styles.formGrid}>
+          <div>
+            <label>Channel</label>
+            <select value={channel} onChange={(e) => setChannel(e.target.value as 'whatsapp' | 'sms')} style={{ width: '100%' }}>
+              <option value="whatsapp">WhatsApp</option>
+              <option value="sms">SMS</option>
+            </select>
+          </div>
+          <div>
+            <label>Recipient phone number</label>
+            <input value={recipient} onChange={(e) => setRecipient(e.target.value)} placeholder="+2547XXXXXXXX" required style={{ width: '100%' }} />
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label>Message</label>
+            <textarea value={message} onChange={(e) => setMessage(e.target.value)} required rows={3} style={{ width: '100%' }} />
+          </div>
+        </form>
+        <button className="btn btn-stamp" style={{ marginTop: '0.8rem' }} onClick={handleSend} disabled={sending}>
+          {sending ? 'Sending…' : 'Send'}
+        </button>
+      </div>
+
+      <h3 style={{ margin: '1.2rem 0 0.8rem' }}>Recent messages</h3>
+      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>When</th>
+              <th style={styles.th}>Channel</th>
+              <th style={styles.th}>To</th>
+              <th style={styles.th}>Message</th>
+              <th style={styles.th}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loadingHistory ? (
+              <tr><td style={styles.td} colSpan={5}>Loading…</td></tr>
+            ) : history.length === 0 ? (
+              <tr><td style={styles.td} colSpan={5}>No messages sent yet.</td></tr>
+            ) : (
+              history.map((n) => (
+                <tr key={n.id}>
+                  <td style={styles.td} className="mono">{new Date(n.created_at).toLocaleString()}</td>
+                  <td style={styles.td}>{n.channel}</td>
+                  <td style={styles.td} className="mono">{n.recipient}</td>
+                  <td style={styles.td}>{n.message.length > 60 ? n.message.slice(0, 60) + '…' : n.message}</td>
+                  <td style={styles.td}>
+                    <span className={`status-pill ${n.status === 'sent' ? 'status-active' : ''}`}>{n.status}</span>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 const styles: Record<string, React.CSSProperties> = {
   headerRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.9rem', flexWrap: 'wrap', gap: '0.6rem' },
   tabs: { display: 'flex', gap: '0.4rem', flexWrap: 'wrap' },
@@ -600,4 +1188,5 @@ const styles: Record<string, React.CSSProperties> = {
   formGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.8rem' },
   smallBtn: { padding: '0.3em 0.7em', fontSize: '0.78rem' },
   badge: { fontSize: '0.65rem', color: 'var(--ink-faint)', textTransform: 'uppercase', letterSpacing: '0.03em', marginLeft: '0.4em' },
+  restorePreview: { padding: '0.9rem', border: '1px solid var(--paper-line)', borderRadius: 3, background: 'var(--stamp-wash)' },
 };

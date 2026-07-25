@@ -16,6 +16,26 @@ pub struct FieldDef {
     pub default: Option<Value>,
 }
 
+/// A module's own declaration of what single number best represents it
+/// at a glance — "units in stock", "total revenue", "open debts" —
+/// shown on its Dashboard tile. Data-driven on purpose, same as
+/// everything else in this engine: a custom module a business defines
+/// themselves gets exactly the same dashboard treatment as the built-in
+/// ones, just by adding this to its own JSON, no engine code changes.
+/// Optional and backward-compatible — a module without one just shows
+/// its record count instead, same as before this existed.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DashboardMetric {
+    /// Field to aggregate. Ignored (may be omitted) when aggregation is
+    /// "count", same rule as the general report engine.
+    #[serde(default)]
+    pub measure: Option<String>,
+    /// "sum" | "count" | "avg" — same three the report engine supports.
+    pub aggregation: String,
+    /// Shown next to the number, e.g. "in stock", "this month".
+    pub label: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModuleDef {
     pub id: String,
@@ -23,6 +43,8 @@ pub struct ModuleDef {
     pub fields: Vec<FieldDef>,
     pub actions: Vec<String>,
     pub default_roles: std::collections::HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub dashboard_metric: Option<DashboardMetric>,
 }
 
 /// SQL column/table names are RESERVED — every module table already has
@@ -80,6 +102,27 @@ impl ModuleDef {
         for f in &def.fields {
             if !seen.insert(f.name.as_str()) {
                 return Err(anyhow!("duplicate field name '{}' in module '{}'", f.name, def.id));
+            }
+        }
+
+        if let Some(metric) = &def.dashboard_metric {
+            match metric.aggregation.as_str() {
+                "sum" | "avg" => {
+                    let field_name = metric.measure.as_deref().ok_or_else(|| {
+                        anyhow!("module '{}': dashboard_metric aggregation '{}' requires a measure field", def.id, metric.aggregation)
+                    })?;
+                    let field = def.fields.iter().find(|f| f.name == field_name).ok_or_else(|| {
+                        anyhow!("module '{}': dashboard_metric measure '{field_name}' is not a field on this module", def.id)
+                    })?;
+                    if field.field_type != "integer" && field.field_type != "real" {
+                        return Err(anyhow!(
+                            "module '{}': dashboard_metric measure '{field_name}' must be numeric (integer/real), got '{}'",
+                            def.id, field.field_type
+                        ));
+                    }
+                }
+                "count" => {} // no measure needed
+                other => return Err(anyhow!("module '{}': dashboard_metric aggregation must be sum/avg/count, got '{other}'", def.id)),
             }
         }
 

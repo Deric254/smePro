@@ -2,6 +2,7 @@ pub mod ai_assistant;
 pub mod ai_context;
 pub mod audit;
 pub mod auth;
+pub mod backup;
 pub mod business_panel;
 pub mod crud;
 pub mod db;
@@ -42,11 +43,6 @@ pub mod xlsx_export;
 /// transfers over silently.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    std::thread::spawn(|| {
-        let conn = db::open("erp.db").expect("failed to open local database");
-        http_api::serve(conn, "127.0.0.1:8080");
-    });
-
     let builder = tauri::Builder::default();
 
     // Self-updating via tauri-plugin-updater only makes sense on
@@ -74,6 +70,42 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init());
 
     builder
+        .setup(|app| {
+            // THE FIX: the database used to open at a bare relative
+            // path ("erp.db"), which resolves against the process's
+            // current working directory — for a real installed
+            // desktop app, that directory is NOT guaranteed to be the
+            // same every launch (it depends on how Windows happened to
+            // start the process — Start Menu vs. desktop shortcut vs.
+            // "Run as administrator" can all differ). That's exactly
+            // what could make the app seem to intermittently "forget"
+            // a business was already set up: it wasn't forgetting, it
+            // was sometimes looking in a different folder for a
+            // database that was never there in the first place, and
+            // silently creating a new empty one.
+            //
+            // app.path().app_data_dir() is Tauri's own, OS-correct,
+            // always-consistent answer to "where should this app keep
+            // its data" — resolves to a real per-user, per-app folder
+            // (e.g. %APPDATA%\com.smepro.app\ on Windows) that's the
+            // same every single launch, regardless of how the app was
+            // started.
+            use tauri::Manager;
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("could not resolve the app data directory: {e}"))?;
+            std::fs::create_dir_all(&app_data_dir)
+                .map_err(|e| format!("could not create the app data directory: {e}"))?;
+            let db_path = app_data_dir.join("erp.db").to_string_lossy().to_string();
+
+            std::thread::spawn(move || {
+                let conn = db::open(&db_path).expect("failed to open local database");
+                http_api::serve(conn, "127.0.0.1:8080");
+            });
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running the Tauri application");
 }

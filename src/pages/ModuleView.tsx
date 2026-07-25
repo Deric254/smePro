@@ -4,12 +4,14 @@ import {
   runReport, exportReport, listUnits, listCurrencies, ApiError,
 } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
+import OcrImport from './OcrImport';
 
 export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [schema, setSchema] = useState<ModuleSchema | null>(null);
   const [records, setRecords] = useState<Record_[]>([]);
   const [search, setSearch] = useState('');
   const [showForm, setShowForm] = useState(false);
+  const [showOcrImport, setShowOcrImport] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'records' | 'report'>('records');
@@ -111,9 +113,19 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             </form>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
               {canExport && <button className="btn btn-outline" onClick={() => exportModule(moduleId)}>Export to Excel</button>}
+              {canCreate && <button className="btn btn-outline" onClick={() => setShowOcrImport(true)}>Import from photo</button>}
               {canCreate && <button className="btn btn-stamp" onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ New'}</button>}
             </div>
           </div>
+
+          {showOcrImport && schema && (
+            <OcrImport
+              moduleId={moduleId}
+              fields={schema.fields}
+              onClose={() => setShowOcrImport(false)}
+              onImported={() => { refreshRecords(); }}
+            />
+          )}
 
           {showForm && (
             <form onSubmit={handleCreate} className="card" style={styles.form}>

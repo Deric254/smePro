@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { createBusiness, setSession, ApiError } from '../api';
+import { createBusiness, setSession, restoreBackupFreshInstall, ApiError } from '../api';
 import { login } from '../api';
 
 const BUSINESS_TYPES = [
@@ -10,12 +10,16 @@ const BUSINESS_TYPES = [
   { value: 'manufacturing', label: 'Manufacturing' },
 ];
 
-type Step = 'business' | 'owner' | 'recovery-code' | 'done';
+type Step = 'business' | 'owner' | 'recovery-code' | 'done' | 'restore';
 
 export default function FirstRunSetup({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState<Step>('business');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const [restoreFile, setRestoreFile] = useState<{ database_base64: string; key_hex: string; created_at?: string; name: string } | null>(null);
+  const [restoreConfirmText, setRestoreConfirmText] = useState('');
+  const [restoreStaged, setRestoreStaged] = useState(false);
 
   const [businessName, setBusinessName] = useState('');
   const [currency, setCurrency] = useState('USD');
@@ -38,6 +42,52 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
     if (!businessName.trim()) { setError('Business name is required.'); return; }
     setError(null);
     setStep('owner');
+  }
+
+  function handleRestoreFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    setError(null);
+    setRestoreStaged(false);
+    setRestoreConfirmText('');
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result as string);
+        if (!parsed.database_base64 || !parsed.key_hex) {
+          setError('This does not look like a valid SME Pro backup file.');
+          return;
+        }
+        setRestoreFile({ ...parsed, name: file.name });
+      } catch {
+        setError('Could not read this file — it may be corrupted or not a valid backup.');
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  async function handleRestoreSubmit() {
+    if (!restoreFile) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await restoreBackupFreshInstall({ database_base64: restoreFile.database_base64, key_hex: restoreFile.key_hex });
+      setRestoreStaged(true);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not restore this backup');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleRestartAfterRestore() {
+    try {
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch {
+      // Browser dev mode, or process plugin unavailable — nothing more
+      // to do; the on-screen instruction already covers this case.
+    }
   }
 
   async function handleOwnerStep(e: FormEvent) {
@@ -93,7 +143,7 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
       <div className="card" style={styles.card}>
         <div style={styles.stampRow}>
           <div className="stamp-badge" style={{ color: 'var(--stamp)', width: '3.2rem', height: '3.2rem', fontSize: '1.3rem' }}>
-            L&C
+            SP
           </div>
           <div>
             <div style={styles.eyebrow}>Welcome</div>
@@ -101,11 +151,16 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
           </div>
         </div>
 
+        <p style={styles.introLine}>
+          Three quick steps: your business details, your owner account, and a recovery
+          code. Takes about two minutes — everything here can be changed later.
+        </p>
+
         {step === 'business' && (
           <form onSubmit={handleBusinessStep} style={styles.form}>
             <div>
               <label>Business name</label>
-              <input value={businessName} onChange={(e) => setBusinessName(e.target.value)} required style={styles.input} placeholder="e.g. Mama Nia General Store" />
+              <input value={businessName} onChange={(e) => setBusinessName(e.target.value)} required style={styles.input} placeholder="e.g. Kanini General Store" />
             </div>
             <div>
               <label>Currency</label>
@@ -120,7 +175,75 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
             </div>
             {error && <div style={styles.error}>{error}</div>}
             <button className="btn btn-stamp" type="submit" style={{ width: '100%', justifyContent: 'center' }}>Continue</button>
+            <button
+              type="button"
+              onClick={() => { setError(null); setStep('restore'); }}
+              style={{ background: 'none', border: 'none', color: 'var(--ink-soft)', fontSize: '0.8rem', cursor: 'pointer', textAlign: 'center', textDecoration: 'underline', padding: '0.3rem' }}
+            >
+              Setting up on a new machine after losing the old one? Restore from a backup instead
+            </button>
           </form>
+        )}
+
+        {step === 'restore' && (
+          <div style={styles.form}>
+            <div style={styles.hint}>
+              Select the backup file you downloaded from Admin → Backup &amp; Restore on your
+              previous install. This replaces the empty database on this fresh install with
+              everything from that backup — your business, users, and all records, exactly as
+              they were.
+            </div>
+            {error && <div style={styles.error}>{error}</div>}
+
+            {!restoreStaged ? (
+              <>
+                <input type="file" accept=".json,application/json" onChange={handleRestoreFileSelect} />
+                {restoreFile && (
+                  <div style={styles.restorePreview}>
+                    <div style={{ fontSize: '0.85rem' }}>
+                      <strong>{restoreFile.name}</strong>
+                      {restoreFile.created_at && (
+                        <span style={{ color: 'var(--ink-soft)' }}> — backed up {new Date(restoreFile.created_at).toLocaleString()}</span>
+                      )}
+                    </div>
+                    <label style={{ display: 'block', marginTop: '0.8rem' }}>
+                      Type <span className="mono">RESTORE</span> to confirm
+                    </label>
+                    <input value={restoreConfirmText} onChange={(e) => setRestoreConfirmText(e.target.value)} style={styles.input} />
+                    <button
+                      className="btn btn-stamp"
+                      type="button"
+                      style={{ marginTop: '0.8rem', width: '100%', justifyContent: 'center' }}
+                      disabled={restoreConfirmText !== 'RESTORE' || loading}
+                      onClick={handleRestoreSubmit}
+                    >
+                      {loading ? 'Restoring…' : 'Restore this backup'}
+                    </button>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => { setError(null); setRestoreFile(null); setStep('business'); }}
+                  style={{ background: 'none', border: 'none', color: 'var(--ink-soft)', fontSize: '0.8rem', cursor: 'pointer', textAlign: 'center', textDecoration: 'underline', padding: '0.3rem' }}
+                >
+                  Back to setting up a new business instead
+                </button>
+              </>
+            ) : (
+              <div>
+                <div style={{ color: 'var(--ok)', fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                  Backup staged successfully.
+                </div>
+                <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+                  Restart the app now to complete the restore. You'll be able to log in with
+                  your existing account right after.
+                </p>
+                <button className="btn btn-stamp" type="button" style={{ width: '100%', justifyContent: 'center' }} onClick={handleRestartAfterRestore}>
+                  Restart now
+                </button>
+              </div>
+            )}
+          </div>
         )}
 
         {step === 'owner' && (
@@ -174,6 +297,11 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
               <input type="checkbox" checked={savedCodeConfirmed} onChange={(e) => setSavedCodeConfirmed(e.target.checked)} />
               I've saved this code somewhere safe
             </label>
+            <div style={styles.hint}>
+              One more thing: your business starts on a free trial automatically — no
+              license needed yet. When you're ready to activate or pay, that's under
+              <strong> Admin → Vendor License</strong> once you're signed in.
+            </div>
             {error && <div style={styles.error}>{error}</div>}
             <button className="btn btn-stamp" onClick={handleFinish} disabled={!savedCodeConfirmed || loading} style={{ width: '100%', justifyContent: 'center' }}>
               {loading ? 'Finishing…' : 'Continue to my business'}
@@ -198,6 +326,7 @@ const styles: Record<string, React.CSSProperties> = {
   card: { width: '100%', maxWidth: 420 },
   stampRow: { display: 'flex', alignItems: 'center', gap: '0.9rem', marginBottom: '1.4rem' },
   eyebrow: { fontSize: '0.72rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-soft)' },
+  introLine: { fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5, margin: '0 0 1.2rem' },
   form: { display: 'flex', flexDirection: 'column', gap: '0.9rem' },
   input: { width: '100%' },
   hint: { fontSize: '0.8rem', color: 'var(--ink-soft)', lineHeight: 1.4 },
@@ -207,4 +336,5 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '1.3rem', textAlign: 'center', letterSpacing: '0.1em', padding: '0.8em',
     background: 'var(--paper)', border: '1px dashed var(--ink-faint)', borderRadius: 3, color: 'var(--ink)',
   },
+  restorePreview: { padding: '0.9rem', border: '1px solid var(--paper-line)', borderRadius: 3, background: 'var(--stamp-wash)' },
 };
