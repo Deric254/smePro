@@ -20,6 +20,7 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [businessName, setBusinessName] = useState('');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // On launch, ask the backend whether this install has ever had a
   // business created — this is what decides between the first-run
@@ -100,9 +101,22 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex' }}>
-      <Sidebar modules={modules} selected={selected} onSelect={setSelected} businessName={businessName || '…'} />
+      <Sidebar
+        modules={modules}
+        selected={selected}
+        onSelect={setSelected}
+        businessName={businessName || '…'}
+        mobileOpen={mobileMenuOpen}
+        onCloseMobile={() => setMobileMenuOpen(false)}
+      />
+      <div className={`app-sidebar-backdrop${mobileMenuOpen ? ' mobile-open' : ''}`} onClick={() => setMobileMenuOpen(false)} />
 
-      <main style={{ flex: 1, padding: '1.6rem 2rem', maxWidth: 980 }}>
+      <main className="app-main-content" style={{ flex: 1, padding: '1.6rem 2rem', maxWidth: 980 }}>
+        <div className="app-mobile-topbar">
+          <button className="app-hamburger" onClick={() => setMobileMenuOpen(true)} aria-label="Open menu">☰</button>
+          <div style={{ fontWeight: 600 }}>{businessName || 'SME Pro'}</div>
+        </div>
+
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.6rem' }}>
           <button className="btn btn-outline" onClick={handleLogout} style={{ fontSize: '0.8rem' }}>Sign out</button>
         </div>
