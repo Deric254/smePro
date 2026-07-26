@@ -349,35 +349,133 @@ jobs:
                   f.write(content)
           "
 
-      # Only does anything if a real release keystore has been added as
-      # a repo secret — see the job-level comment above. Without it,
-      # this step is a no-op and the build below falls back to
-      # Android's standard debug signing, which is a completely normal,
-      # installable APK, just not Play-Store-eligible.
+      # THE ACTUAL BUG THIS FIXES: Tauri's default Android Gradle
+      # template has NO signingConfig at all on the "release" build
+      # type (confirmed by reading tauri-cli's own template source) —
+      # Android's automatic debug-signing only applies to the "debug"
+      # build type, never "release". `tauri android build` (no --debug
+      # flag) builds the release variant. Previously, this workflow
+      # wrote a keystore.properties file when a real keystore secret
+      # was configured, but NOTHING actually read that file — meaning
+      # even the "real keystore" path never got wired into Gradle.
+      # Every release APK this pipeline ever produced was unsigned,
+      # which Android refuses to install, always, on every device,
+      # regardless of what was previously installed — not a signature
+      # MISMATCH, a complete absence of one.
       #
-      # The existence check happens INSIDE the shell script (env: var),
-      # not in a step-level `if:` — GitHub Actions' expression evaluator
-      # doesn't allow referencing the `secrets` context directly inside
-      # `if:` conditions the way this originally tried to (real error
-      # hit and fixed: "Unrecognized named-value: 'secrets'").
-      - name: Decode release signing keystore (optional)
+      # This step guarantees a keystore.properties + matching .keystore
+      # file exist by the time Gradle runs, either from your own real
+      # release keystore (repo secrets) or from a fallback keystore
+      # this workflow generates and persists (via actions/cache) so
+      # every build until you add a real one is signed with the SAME
+      # key — installable, and consistently upgradable, just not
+      # Play-Store-eligible (that still needs your own real keystore).
+      # secrets.X cannot be referenced directly inside a step-level
+      # `if:` — GitHub Actions' expression evaluator rejects it
+      # ("Unrecognized named-value: 'secrets'"), a real error already
+      # hit and fixed once this session. Route it through a step output
+      # instead, which `if:` conditions ARE allowed to reference.
+      - name: Check for a real release keystore secret
+        id: check-keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "has_real_keystore=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_real_keystore=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore or create a persistent fallback keystore
+        if: steps.check-keystore.outputs.has_real_keystore == 'false'
+        id: fallback-keystore
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/gen/android/fallback.keystore
+          key: android-fallback-keystore-v1
+
+      - name: Generate the fallback keystore (first run only)
+        if: steps.check-keystore.outputs.has_real_keystore == 'false' && steps.fallback-keystore.outputs.cache-hit != 'true'
+        run: |
+          keytool -genkeypair -v \
+            -keystore src-tauri/gen/android/fallback.keystore \
+            -alias smepro-fallback \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass smeprofallback -keypass smeprofallback \
+            -dname "CN=SME Pro, OU=Fallback, O=SME Pro, L=Unknown, ST=Unknown, C=US"
+
+      - name: Write keystore.properties (real keystore or fallback)
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "No release keystore secret set — building with Android's standard debug signing instead."
-            exit 0
-          fi
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > src-tauri/gen/android/release.keystore
-          cat > src-tauri/gen/android/keystore.properties <<EOF
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "Using your real release keystore from repo secrets."
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > src-tauri/gen/android/release.keystore
+            cat > src-tauri/gen/android/keystore.properties <<EOF
           password=$ANDROID_KEYSTORE_PASSWORD
           keyAlias=$ANDROID_KEY_ALIAS
           keyPassword=$ANDROID_KEY_PASSWORD
           storeFile=release.keystore
           EOF
+          else
+            echo "No release keystore secret set — using the persistent fallback keystore."
+            cat > src-tauri/gen/android/keystore.properties <<EOF
+          password=smeprofallback
+          keyAlias=smepro-fallback
+          keyPassword=smeprofallback
+          storeFile=fallback.keystore
+          EOF
+          fi
+
+      # keystore.properties existing is necessary but not sufficient —
+      # this is the step that actually makes Gradle use it. Patches the
+      # generated build.gradle.kts to add a real signingConfigs block
+      # and apply it to the release build type. Idempotent (checks
+      # before patching) since `gen/android` is regenerated fresh each
+      # run anyway, but harmless either way.
+      - name: Wire the keystore into Gradle's release signing config
+        run: |
+          python3 - <<'PYEOF'
+          path = "src-tauri/gen/android/app/build.gradle.kts"
+          with open(path) as f:
+              content = f.read()
+
+          if "keystoreProperties" in content:
+              print("Already patched, skipping.")
+          else:
+              content = "import java.io.FileInputStream\n\n" + content
+
+              signing_config = (
+                  "\n    signingConfigs {\n"
+                  "        create(\"release\") {\n"
+                  "            val keystorePropertiesFile = rootProject.file(\"keystore.properties\")\n"
+                  "            if (keystorePropertiesFile.exists()) {\n"
+                  "                val keystoreProperties = Properties()\n"
+                  "                keystoreProperties.load(FileInputStream(keystorePropertiesFile))\n"
+                  "                storeFile = rootProject.file(keystoreProperties[\"storeFile\"] as String)\n"
+                  "                storePassword = keystoreProperties[\"password\"] as String\n"
+                  "                keyAlias = keystoreProperties[\"keyAlias\"] as String\n"
+                  "                keyPassword = keystoreProperties[\"keyPassword\"] as String\n"
+                  "            }\n"
+                  "        }\n"
+                  "    }\n"
+                  "    buildTypes {"
+              )
+              content = content.replace("    buildTypes {", signing_config, 1)
+
+              content = content.replace(
+                  "        getByName(\"release\") {\n            isMinifyEnabled = true",
+                  "        getByName(\"release\") {\n            signingConfig = signingConfigs.getByName(\"release\")\n            isMinifyEnabled = true",
+                  1,
+              )
+
+              with open(path, "w") as f:
+                  f.write(content)
+              print("Patched build.gradle.kts with a real signingConfig.")
+          PYEOF
 
       - name: Build APK
         run: |
