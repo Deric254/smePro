@@ -225,3 +225,88 @@ label {
 .status-active { background: var(--ok-wash); color: var(--ok); }
 .status-grace, .status-locked { background: var(--warn-wash); color: var(--warn); }
 .status-inactive { background: var(--stamp-wash); color: var(--stamp); }
+
+/* ---- Responsive sidebar ----
+   Below the breakpoint, the sidebar becomes a slide-in drawer instead
+   of a fixed 220px column permanently eating into a phone-width
+   screen — that fixed-width column squeezed against real content was
+   exactly what made the Android app's Admin screen unusable. Above the
+   breakpoint (any normal desktop window), every one of these rules is
+   simply never active — the desktop layout is completely untouched. */
+.app-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--paper-line);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  background: var(--paper);
+}
+
+.app-hamburger {
+  display: none;
+}
+
+.app-sidebar-backdrop {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  .app-hamburger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.3rem;
+    height: 2.3rem;
+    border: 1px solid var(--paper-line);
+    border-radius: 3px;
+    background: var(--paper-card);
+    color: var(--ink);
+    font-size: 1.1rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .app-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 80vw;
+    max-width: 300px;
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 3px 0 16px rgba(0, 0, 0, 0.2);
+  }
+
+  .app-sidebar.mobile-open {
+    transform: translateX(0);
+  }
+
+  .app-sidebar-backdrop.mobile-open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 45;
+  }
+
+  .app-main-content {
+    padding: 1rem !important;
+    max-width: 100% !important;
+  }
+
+  .app-mobile-topbar {
+    display: flex !important;
+  }
+}
+
+.app-mobile-topbar {
+  display: none;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+}
