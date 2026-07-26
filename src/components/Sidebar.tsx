@@ -11,14 +11,26 @@ export default function Sidebar({
   selected,
   onSelect,
   businessName,
+  mobileOpen = false,
+  onCloseMobile,
 }: {
   modules: ModuleListItem[];
   selected: string | null;
   onSelect: (id: string) => void;
   businessName: string;
+  mobileOpen?: boolean;
+  onCloseMobile?: () => void;
 }) {
+  // Tapping any nav item closes the drawer on mobile — on desktop
+  // onCloseMobile is either absent or a harmless no-op, since the
+  // sidebar isn't a drawer there in the first place.
+  function select(id: string) {
+    onSelect(id);
+    onCloseMobile?.();
+  }
+
   return (
-    <nav style={styles.wrap}>
+    <nav className={`app-sidebar${mobileOpen ? ' mobile-open' : ''}`}>
       <div style={styles.header}>
         <div style={styles.wordmark}>SME Pro</div>
         <div style={styles.bizName}>{businessName}</div>
@@ -26,7 +38,7 @@ export default function Sidebar({
 
       <div style={styles.list}>
         <button
-          onClick={() => onSelect('')}
+          onClick={() => select('')}
           style={{ ...styles.item, ...(!selected ? styles.itemActive : {}) }}
         >
           <span
@@ -44,7 +56,7 @@ export default function Sidebar({
         {modules.filter((m) => m.enabled).map((m) => (
           <button
             key={m.id}
-            onClick={() => onSelect(m.id)}
+            onClick={() => select(m.id)}
             style={{ ...styles.item, ...(selected === m.id ? styles.itemActive : {}) }}
           >
             <span
@@ -63,7 +75,7 @@ export default function Sidebar({
 
       <div style={styles.footer}>
         <button
-          onClick={() => onSelect('__admin__')}
+          onClick={() => select('__admin__')}
           style={{ ...styles.item, ...(selected === '__admin__' ? styles.itemActive : {}) }}
         >
           <span
@@ -83,10 +95,6 @@ export default function Sidebar({
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  wrap: {
-    width: 220, flexShrink: 0, borderRight: '1px solid var(--paper-line)',
-    display: 'flex', flexDirection: 'column', height: '100vh', position: 'sticky', top: 0,
-  },
   header: { padding: '1.4rem 1.2rem 1rem' },
   wordmark: { fontFamily: 'var(--font-display)', fontWeight: 600, fontSize: '1.1rem' },
   bizName: { fontSize: '0.75rem', color: 'var(--ink-soft)', marginTop: '0.15rem' },
