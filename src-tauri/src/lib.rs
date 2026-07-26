@@ -14,9 +14,39 @@ pub mod notifications;
 pub mod ocr_import;
 pub mod onboarding;
 pub mod payment;
+pub mod pos;
 pub mod rate_limit;
 pub mod rbac;
 pub mod reference_data;
+
+/// Where the bundled `modules/*.json` files actually live at runtime.
+/// Resolved ONCE at startup (see `run()` below) via Tauri's own
+/// resource-directory API, then read from here — the HTTP handler runs
+/// on a plain thread with no direct access to the Tauri `app` handle,
+/// so this is how it reaches a value that otherwise requires one.
+///
+/// THE BUG THIS FIXES: `onboarding.rs` used to read module definitions
+/// from a bare relative path ("modules/inventory.json"), which only
+/// resolves correctly when the process's current working directory
+/// happens to be the source tree — true in dev (`cargo run`), never
+/// true for a real installed app, whose working directory depends on
+/// how the OS launched it. On every real installed copy, every module
+/// silently failed to enable, business type selection did nothing, and
+/// a brand new business ended up with zero modules and no visible way
+/// to add any — the exact "No modules are enabled yet" dead end this
+/// was traced from. Same root-cause pattern, same fix shape, as the
+/// earlier database-path bug.
+static MODULES_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Returns the resolved modules directory, or a plain relative
+/// "modules" path as a fallback for contexts where the real app never
+/// started up through `run()` at all (dev/test binaries like
+/// `demo_seed`, which call `enable_module` directly with their own
+/// paths and never go through this at all — this fallback exists for
+/// completeness, not because anything currently relies on it).
+pub fn modules_dir() -> std::path::PathBuf {
+    MODULES_DIR.get().cloned().unwrap_or_else(|| std::path::PathBuf::from("modules"))
+}
 pub mod report;
 pub mod roles;
 pub mod settings;
@@ -98,6 +128,17 @@ pub fn run() {
             std::fs::create_dir_all(&app_data_dir)
                 .map_err(|e| format!("could not create the app data directory: {e}"))?;
             let db_path = app_data_dir.join("erp.db").to_string_lossy().to_string();
+
+            // See the MODULES_DIR doc comment above — this is the fix
+            // for module JSON files never resolving correctly on a real
+            // installed app. resource_dir() correctly points at wherever
+            // the OS actually placed this app's bundled resources
+            // (declared in tauri.conf.json's bundle.resources).
+            let resource_dir = app
+                .path()
+                .resource_dir()
+                .map_err(|e| format!("could not resolve the resource directory: {e}"))?;
+            let _ = MODULES_DIR.set(resource_dir.join("modules"));
 
             std::thread::spawn(move || {
                 let conn = db::open(&db_path).expect("failed to open local database");
