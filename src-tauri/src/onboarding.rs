@@ -32,9 +32,9 @@ pub fn apply_business_type(
     let modules = preset_modules(business_type)?;
     let mut enabled = Vec::new();
     for module_id in modules {
-        let path = format!("modules/{module_id}.json");
-        if std::path::Path::new(&path).exists() {
-            business_panel::enable_module(conn, business_id, &path)?;
+        let path = crate::modules_dir().join(format!("{module_id}.json"));
+        if path.exists() {
+            business_panel::enable_module(conn, business_id, &path.to_string_lossy())?;
             enabled.push(module_id.to_string());
         }
         // Silently skips a module whose JSON file isn't present on disk —
