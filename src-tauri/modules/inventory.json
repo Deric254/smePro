@@ -63,7 +63,10 @@
     "read",
     "update",
     "delete",
-    "export"
+    "export",
+    "sell",
+    "receive",
+    "repack"
   ],
   "default_roles": {
     "Owner": [
@@ -72,13 +75,19 @@
       "update",
       "delete",
       "export",
-      "approve"
+      "approve",
+      "sell",
+      "receive",
+      "repack"
     ],
     "Manager": [
       "create",
       "read",
       "update",
-      "export"
+      "export",
+      "sell",
+      "receive",
+      "repack"
     ],
     "Staff": [
       "read"

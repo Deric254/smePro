@@ -7,7 +7,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, audit, auth, backup, crud, forecast, license, notifications, ocr_import, onboarding, payment, rbac, reference_data, report, roles, settings, users, xlsx_export};
+use crate::{ai_assistant, audit, auth, backup, crud, forecast, license, notifications, ocr_import, onboarding, payment, pos, rbac, receiving, reference_data, report, repack, roles, settings, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -401,11 +401,9 @@ fn route(
         if let Err(e) = crate::vendor_license::validate_key_format(&key) {
             return json_err(400, &format!("invalid key: {e}"));
         }
-        let vendor_url = match std::env::var("VENDOR_LICENSE_URL") {
-            Ok(u) if !u.is_empty() => u,
-            _ => return json_err(500, "VENDOR_LICENSE_URL is not configured on this install"),
-        };
-        return match crate::vendor_license::redeem(conn, &vendor_url, &key) {
+        // Fully offline now — no server URL, no network call. See
+        // vendor_license.rs for why (and its honest trade-off).
+        return match crate::vendor_license::redeem(conn, &key) {
             Ok(result) => {
                 let _ = audit::log(conn, &business_id, Some(&user_id), "_license", "vendor_key_redeem", None, Some(&result));
                 ApiResponse::Json(200, result)
@@ -806,6 +804,53 @@ fn route(
             }
         }
         return ApiResponse::Json(200, json!({"created": created, "errors": errors}));
+    }
+
+    // ---- Point of sale: the real link between Sales and Inventory —
+    // see pos.rs for why this is its own module rather than going
+    // through the generic create/update endpoints directly. ----
+    if parts.as_slice() == ["pos", "checkout"] && *method == Method::Post {
+        let req: pos::CheckoutRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return json_err(400, &format!("invalid checkout request: {e}")),
+        };
+        return match pos::checkout(conn, &business_id, &user_id, req) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
+        };
+    }
+    if parts.len() == 3 && parts[0] == "pos" && parts[1] == "orders" && *method == Method::Get {
+        let order_id = parts[2];
+        return match pos::get_order(conn, &business_id, order_id) {
+            Ok(order) => ApiResponse::Json(200, order),
+            Err(e) => json_err(404, &e.to_string()),
+        };
+    }
+
+    // ---- Receiving stock: the buying-side counterpart to POS — see
+    // receiving.rs for why this is its own module rather than the
+    // generic update endpoint. ----
+    if parts.as_slice() == ["purchasing", "receive"] && *method == Method::Post {
+        let req: receiving::ReceiveRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return json_err(400, &format!("invalid receive request: {e}")),
+        };
+        return match receiving::receive(conn, &business_id, &user_id, req) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Repacking / breaking bulk: see repack.rs. ----
+    if parts.as_slice() == ["inventory", "repack"] && *method == Method::Post {
+        let req: repack::RepackRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return json_err(400, &format!("invalid repack request: {e}")),
+        };
+        return match repack::repack(conn, &business_id, &user_id, req) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
+        };
     }
 
     // ---- Audit log: the actual point of recording all of this is being

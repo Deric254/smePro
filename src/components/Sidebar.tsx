@@ -53,6 +53,22 @@ export default function Sidebar({
           <span>Home</span>
         </button>
 
+        <button
+          onClick={() => select('__pos__')}
+          style={{ ...styles.item, ...(selected === '__pos__' ? styles.itemActive : {}) }}
+        >
+          <span
+            className="stamp-badge"
+            style={{
+              width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
+              color: selected === '__pos__' ? 'var(--stamp)' : 'var(--ink-faint)',
+            }}
+          >
+            $
+          </span>
+          <span>Sell</span>
+        </button>
+
         {modules.filter((m) => m.enabled).map((m) => (
           <button
             key={m.id}

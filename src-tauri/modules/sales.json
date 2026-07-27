@@ -32,6 +32,21 @@
       "name": "sale_date",
       "type": "date",
       "required": false
+    },
+    {
+      "name": "unit_price",
+      "type": "real",
+      "required": false
+    },
+    {
+      "name": "payment_method",
+      "type": "text",
+      "required": false
+    },
+    {
+      "name": "order_id",
+      "type": "text",
+      "required": false
     }
   ],
   "actions": [

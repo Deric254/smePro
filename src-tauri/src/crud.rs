@@ -10,7 +10,7 @@ use crate::{audit, rbac};
 /// from a file) — this is what makes CRUD generic at request time: any
 /// module enabled for the business, past or present, can be operated on
 /// purely from what's stored in the DB.
-fn load_module(conn: &Connection, business_id: &str, module_id: &str) -> Result<ModuleDef> {
+pub(crate) fn load_module(conn: &Connection, business_id: &str, module_id: &str) -> Result<ModuleDef> {
     let raw: String = conn
         .query_row(
             "SELECT schema_json FROM modules WHERE business_id = ?1 AND id = ?2 AND enabled = 1",
@@ -44,6 +44,27 @@ pub fn create(
     module.validate(&record)?;
     crate::reference_data::validate_field_references(conn, business_id, &module, &record)?;
 
+    let id = insert_validated_record(conn, business_id, &module, &record)?;
+
+    audit::log(conn, business_id, Some(user_id), module_id, "create", Some(&id), Some(&json!(body)))?;
+    Ok(id)
+}
+
+/// The actual INSERT, split out from `create()` above so any caller
+/// that needs this exact insert wrapped in a LARGER transaction — most
+/// notably `pos::checkout`, which must insert a sales record AND
+/// deduct inventory atomically — reuses this precisely, instead of a
+/// second, hand-copied INSERT that could quietly drift out of sync
+/// with this one as the schema evolves. Validation is the caller's
+/// responsibility (call `module.validate()` and
+/// `reference_data::validate_field_references()` first) — this
+/// function trusts `record` is already correct.
+pub fn insert_validated_record(
+    conn: &Connection,
+    business_id: &str,
+    module: &ModuleDef,
+    record: &std::collections::HashMap<String, Value>,
+) -> Result<String> {
     let table = module.table_name();
     let mut col_names = vec!["id".to_string(), "business_id".to_string()];
     let mut placeholders = vec!["?1".to_string(), "?2".to_string()];
@@ -73,8 +94,6 @@ pub fn create(
     );
     let params_refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|b| b.as_ref()).collect();
     conn.execute(&sql, params_refs.as_slice())?;
-
-    audit::log(conn, business_id, Some(user_id), module_id, "create", Some(&id), Some(&json!(body)))?;
     Ok(id)
 }
 

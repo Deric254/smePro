@@ -49,6 +49,17 @@ pub struct CheckoutRequest {
     /// silently allowed by default for everyone.
     #[serde(default)]
     pub allow_oversell: bool,
+    /// Selling on credit — the customer owes the business, doesn't pay
+    /// now. When true, this checkout ALSO creates a Debt & Credit
+    /// record for the full subtotal, in the exact same transaction as
+    /// the stock deduction and sales record. Before this, a credit sale
+    /// had no connection to Debt & Credit at all — someone had to
+    /// remember to go create that record by hand, with everything that
+    /// implies for a business actually collecting on it later.
+    #[serde(default)]
+    pub on_credit: bool,
+    #[serde(default)]
+    pub due_date: Option<String>,
 }
 
 /// Runs the whole checkout as one atomic transaction. On success,
@@ -67,6 +78,17 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         .map_err(|_| anyhow!("the Inventory module isn't enabled for this business — checkout needs it"))?;
     let sales_module = crud::load_module(conn, business_id, "sales")
         .map_err(|_| anyhow!("the Sales module isn't enabled for this business — checkout needs it"))?;
+    let debt_credit_module = if req.on_credit {
+        Some(
+            crud::load_module(conn, business_id, "debt_credit")
+                .map_err(|_| anyhow!("selling on credit needs the Debt & Credit module enabled for this business"))?,
+        )
+    } else {
+        None
+    };
+    if req.on_credit && req.customer.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(anyhow!("a customer name is required for a credit sale — Debt & Credit needs to know who owes it"));
+    }
     let inventory_table = inventory_module.table_name();
     let sales_table = sales_module.table_name();
 
@@ -143,6 +165,34 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         }));
     }
 
+    // If this is a credit sale, the debt is created here — still
+    // inside `tx`, still nothing durable yet. Same all-or-nothing
+    // guarantee extends to a third module now: stock deduction, sales
+    // record, AND the debt record either all become real together at
+    // the commit below, or none of them do.
+    let mut debt_record_id: Option<String> = None;
+    if let Some(debt_credit_module) = &debt_credit_module {
+        let mut debt_record: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        debt_record.insert("party_name".into(), json!(req.customer.as_deref().unwrap_or("")));
+        debt_record.insert("direction".into(), json!("owed_to_business"));
+        debt_record.insert("amount".into(), json!(subtotal));
+        debt_record.insert("settled".into(), json!(false));
+        debt_record.insert("notes".into(), json!(format!("Credit sale, POS order {order_id}")));
+        if let Some(d) = &req.due_date {
+            debt_record.insert("due_date".into(), json!(d));
+        }
+        for f in &debt_credit_module.fields {
+            if !debt_record.contains_key(&f.name) {
+                if let Some(d) = &f.default {
+                    debt_record.insert(f.name.clone(), d.clone());
+                }
+            }
+        }
+        debt_credit_module.validate(&debt_record)?;
+        crate::reference_data::validate_field_references(&tx, business_id, debt_credit_module, &debt_record)?;
+        debt_record_id = Some(crud::insert_validated_record(&tx, business_id, debt_credit_module, &debt_record)?);
+    }
+
     // Everything above happened inside `tx` and nothing is durable yet.
     // This is the one moment it all becomes real, together — if the
     // process died at any point before this line, every UPDATE and
@@ -157,6 +207,8 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         "subtotal": subtotal,
         "item_count": req.items.len(),
         "items": lines,
+        "on_credit": req.on_credit,
+        "debt_record_id": debt_record_id,
     });
 
     // Logged after commit, deliberately: the audit log recording a

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   getModuleSchema, listRecords, createRecord, deleteRecord, exportModule,
-  runReport, exportReport, listUnits, listCurrencies, ApiError,
+  runReport, exportReport, listUnits, listCurrencies, runForecast, ApiError,
 } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
 import OcrImport from './OcrImport';
@@ -271,6 +271,7 @@ function ReportPanel({ moduleId, schema, canExport }: { moduleId: string; schema
   const max = Math.max(1, ...points.map((p) => p.value));
 
   return (
+    <>
     <div className="card">
       <div style={styles.reportControls}>
         <div>
@@ -348,6 +349,78 @@ function ReportPanel({ moduleId, schema, canExport }: { moduleId: string; schema
           </div>
         ))}
       </div>
+      </div>
+      {numericFields.length > 0 && <ForecastPanel moduleId={moduleId} numericFields={numericFields} />}
+    </>
+  );
+}
+
+function ForecastPanel({ moduleId, numericFields }: { moduleId: string; numericFields: FieldDef[] }) {
+  const [measure, setMeasure] = useState(numericFields[0]?.name ?? '');
+  const [bucket, setBucket] = useState('month');
+  const [method, setMethod] = useState<'moving_average' | 'exponential_smoothing'>('moving_average');
+  const [result, setResult] = useState<{ forecast_next: number; method: string; history: { label: string; value: number }[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await runForecast(moduleId, { measure, bucket, method });
+      setResult(res);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not run the forecast — needs a few periods of history to work from');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginTop: '1rem' }}>
+      <h3 style={{ marginTop: 0 }}>Forecast next period</h3>
+      <p style={{ fontSize: '0.82rem', color: 'var(--ink-soft)', marginTop: '-0.4rem' }}>
+        A plain-arithmetic projection from your own history — not a guess, not AI-invented. Needs a
+        few periods of real data behind it to mean anything.
+      </p>
+      <div style={styles.reportControls}>
+        <div>
+          <label>Of</label>
+          <select value={measure} onChange={(e) => setMeasure(e.target.value)}>
+            {numericFields.map((f) => <option key={f.name} value={f.name}>{f.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>Bucket</label>
+          <select value={bucket} onChange={(e) => setBucket(e.target.value)}>
+            <option value="day">Day</option>
+            <option value="week">Week</option>
+            <option value="month">Month</option>
+            <option value="quarter">Quarter</option>
+          </select>
+        </div>
+        <div>
+          <label>Method</label>
+          <select value={method} onChange={(e) => setMethod(e.target.value as typeof method)}>
+            <option value="moving_average">Moving average</option>
+            <option value="exponential_smoothing">Exponential smoothing (weights recent periods more)</option>
+          </select>
+        </div>
+        <button className="btn btn-stamp" onClick={run} disabled={loading}>{loading ? 'Calculating…' : 'Forecast'}</button>
+      </div>
+
+      {error && <div style={styles.error}>{error}</div>}
+
+      {result && (
+        <div style={{ marginTop: '1rem' }}>
+          <div style={{ fontSize: '1.6rem', fontWeight: 600, color: 'var(--stamp)' }}>
+            {result.forecast_next.toLocaleString()}
+          </div>
+          <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)' }}>
+            projected for the next {bucket}, based on {result.history.length} periods of history ({result.method})
+          </div>
+        </div>
+      )}
     </div>
   );
 }

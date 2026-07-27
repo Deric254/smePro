@@ -310,3 +310,19 @@ label {
   gap: 0.8rem;
   margin-bottom: 1rem;
 }
+
+/* Two columns (products + cart) on desktop; stacks to one column on
+   phone-width screens, same breakpoint as the sidebar drawer, so the
+   cart doesn't get squeezed into an unusably narrow strip. */
+.pos-layout {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 1.2rem;
+  align-items: flex-start;
+}
+
+@media (max-width: 860px) {
+  .pos-layout {
+    grid-template-columns: 1fr;
+  }
+}

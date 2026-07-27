@@ -120,6 +120,34 @@ export const payLicense = () => request('/license/pay', { method: 'POST' });
 // ---- Modules ----
 export const getBusinessInfo = () => request('/business');
 export const listModules = () => request('/modules');
+
+// ---- Point of sale — atomically links Sales and Inventory (and,
+// optionally, Debt & Credit for a sale on credit). See pos.rs. ----
+export interface CartItem { inventory_record_id: string; quantity: number }
+export interface CheckoutRequest {
+  items: CartItem[];
+  payment_method?: string;
+  customer?: string;
+  allow_oversell?: boolean;
+  on_credit?: boolean;
+  due_date?: string;
+}
+export const checkout = (req: CheckoutRequest) =>
+  request('/pos/checkout', { method: 'POST', body: JSON.stringify(req) });
+export const getOrder = (orderId: string) => request(`/pos/orders/${orderId}`);
+
+// ---- Receiving stock — the buying-side counterpart. See receiving.rs. ----
+export const receiveStock = (purchaseRecordId: string, quantityReceived?: number) =>
+  request('/purchasing/receive', {
+    method: 'POST',
+    body: JSON.stringify({ purchase_record_id: purchaseRecordId, quantity_received: quantityReceived }),
+  });
+
+// ---- Repacking / breaking bulk. See repack.rs. ----
+export const repackStock = (req: {
+  source_record_id: string; source_quantity: number;
+  target_record_id: string; target_quantity_produced: number; notes?: string;
+}) => request('/inventory/repack', { method: 'POST', body: JSON.stringify(req) });
 export const getModuleSchema = (moduleId: string) => request(`/modules/${moduleId}/schema`);
 export const listRecords = (moduleId: string, search?: string) =>
   request(`/modules/${moduleId}/records${search ? `?search=${encodeURIComponent(search)}` : ''}`);

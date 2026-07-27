@@ -17,7 +17,9 @@ pub mod payment;
 pub mod pos;
 pub mod rate_limit;
 pub mod rbac;
+pub mod receiving;
 pub mod reference_data;
+pub mod repack;
 
 /// Where the bundled `modules/*.json` files actually live at runtime.
 /// Resolved ONCE at startup (see `run()` below) via Tauri's own

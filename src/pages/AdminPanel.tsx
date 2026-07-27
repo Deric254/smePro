@@ -686,7 +686,7 @@ function VendorLicenseTab() {
               className="mono"
               value={key}
               onChange={(e) => setKey(e.target.value.toUpperCase())}
-              placeholder="LKC-XXXX-XXXX-XXXX-XXXX"
+              placeholder="SPK-XXXXX-XXXXX-XXXXX-..."
               style={{ width: '100%' }}
               required
             />

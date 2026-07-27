@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.20"
+version = "0.1.7"
 edition = "2021"
 build = "build.rs"
 
@@ -59,6 +59,11 @@ name = "seed_payment_intent"
 path = "src/bin/seed_payment_intent.rs"
 required-features = ["dev-tools"]
 
+[[bin]]
+name = "offline_keygen"
+path = "src/bin/offline_keygen.rs"
+required-features = ["dev-tools"]
+
 [features]
 dev-tools = []
 
@@ -78,6 +83,7 @@ rand_core = { version = "=0.6.4", features = ["getrandom"] }
 rand = "=0.8.5"
 rust_xlsxwriter = "=0.77.0"
 ureq = { version = "=2.10.1", default-features = false, features = ["json", "tls"] }
+ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
 base64 = "=0.22.1"
 hmac = "=0.12.1"
 sha2 = "=0.10.8"

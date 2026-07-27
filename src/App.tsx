@@ -4,6 +4,7 @@ import FirstRunSetup from './pages/FirstRunSetup';
 import ModuleView from './pages/ModuleView';
 import AdminPanel from './pages/AdminPanel';
 import Dashboard from './pages/Dashboard';
+import PointOfSale from './pages/PointOfSale';
 import Sidebar from './components/Sidebar';
 import LicenseBanner from './components/LicenseBanner';
 import AiFloatingButton from './components/AiFloatingButton';
@@ -129,6 +130,8 @@ export default function App() {
 
         {selected === '__admin__' ? (
           <AdminPanel />
+        ) : selected === '__pos__' ? (
+          <PointOfSale />
         ) : selected ? (
           <ModuleView moduleId={selected} />
         ) : (

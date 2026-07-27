@@ -13,6 +13,11 @@
       "required": true
     },
     {
+      "name": "inventory_record_id",
+      "type": "text",
+      "required": false
+    },
+    {
       "name": "quantity",
       "type": "integer",
       "required": true,
