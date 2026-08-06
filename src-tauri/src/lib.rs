@@ -86,7 +86,7 @@ pub mod xlsx_export;
 /// events) to survive the user switching away from the app briefly.
 /// Flagging this now rather than assuming desktop's threading model
 /// transfers over silently.
-#[cfg(feature = "tauri_shell")]
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
 
