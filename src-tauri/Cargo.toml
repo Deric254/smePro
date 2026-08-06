@@ -2,7 +2,6 @@
 name = "core_engine"
 version = "0.1.21"
 edition = "2021"
-build = "build.rs"
 
 [lib]
 name = "core_engine"
@@ -67,9 +66,6 @@ required-features = ["dev-tools"]
 [features]
 dev-tools = []
 
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-
 [dependencies]
 rusqlite = { version = "=0.31.0", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
 serde = { version = "=1.0.210", features = ["derive"] }
@@ -88,6 +84,8 @@ base64 = "=0.22.1"
 hmac = "=0.12.1"
 sha2 = "=0.10.8"
 hex = "=0.4.3"
+totp-rs = { version = "=5.7.2", default-features = false, features = ["gen_secret", "otpauth"] }
+regex = "1.10"
 
 [dependencies.base64ct]
 version = "=1.6.0"
@@ -115,25 +113,3 @@ version = "=0.9.103"
 # proceeding with no usable crypto library, not visible until the final
 # link step, which made this a genuinely nasty one to trace.
 features = ["vendored"]
-
-[dependencies.tauri]
-version = "2"
-features = []
-
-[dependencies.tauri-plugin-updater]
-version = "2"
-
-[dependencies.tauri-plugin-process]
-version = "2"
-
-[dependencies.tauri-plugin-fs]
-version = "2"
-
-[dependencies.tauri-plugin-http]
-version = "2"
-
-[dependencies.tauri-plugin-opener]
-version = "2"
-
-[dependencies.tauri-plugin-os]
-version = "2"

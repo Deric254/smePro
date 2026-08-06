@@ -30,7 +30,7 @@ pub fn open(path: &str) -> Result<Connection> {
     let key_path = key_path_for(db_path);
     let key_hex = get_or_create_key(&key_path)?;
 
-    let conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
     // SQLCipher's raw-key syntax (`x'...'`) avoids its own key-derivation
     // pass since we already have a high-entropy random key — no need to
     // stretch a password that doesn't exist.
@@ -56,6 +56,7 @@ pub fn open(path: &str) -> Result<Connection> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
     conn.execute_batch(SCHEMA)?;
+    crate::db_migrations::run(&mut conn)?;
     Ok(conn)
 }
 

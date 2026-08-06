@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { login, setSession, getResolvedBusinessId, recoverViaSecurityQuestions, recoverViaAdminCode, ApiError } from '../api';
+import { login, login2fa, setSession, getResolvedBusinessId, recoverViaSecurityQuestions, recoverViaAdminCode, ApiError } from '../api';
 
-type Mode = 'login' | 'recover-questions' | 'recover-admin-code' | 'recover-success';
+type Mode = 'login' | '2fa' | 'recover-questions' | 'recover-admin-code' | 'recover-success';
 
 export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [businessId, setBusinessId] = useState(localStorage.getItem('erp_business_id') || '');
@@ -13,6 +13,8 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<Mode>('login');
+  const [tempToken, setTempToken] = useState('');
+  const [twoFaCode, setTwoFaCode] = useState('');
 
   // Recovery form state — shared field names across both methods where
   // they overlap (username, new password) to keep this simple.
@@ -46,8 +48,13 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     setError(null);
     setLoading(true);
     try {
-      const { token } = await login(username, password, businessId);
-      setSession(token, businessId);
+      const result = await login(username, password, businessId);
+      if (result.requires_2fa) {
+        setTempToken(result.temp_token);
+        setMode('2fa');
+        return;
+      }
+      setSession(result.token, businessId);
       onLoggedIn();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not reach the server');
@@ -56,9 +63,25 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     }
   }
 
+  async function handleTwoFaSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const { token } = await login2fa(tempToken, twoFaCode);
+      setSession(token, businessId);
+      onLoggedIn();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not verify code');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function resetRecoveryFields() {
     setRecoverUsername(''); setAnswer1(''); setAnswer2(''); setAdminCode('');
     setNewPassword(''); setConfirmNewPassword(''); setError(null);
+    setTempToken(''); setTwoFaCode('');
   }
 
   function switchMode(next: Mode) {
@@ -101,7 +124,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
           </div>
           <div>
             <div style={styles.eyebrow}>SME Pro</div>
-            <h1 style={{ margin: 0 }}>{mode === 'login' ? 'Sign in' : 'Reset your password'}</h1>
+            <h1 style={{ margin: 0 }}>{mode === 'login' ? 'Sign in' : mode === '2fa' ? 'Verify your identity' : 'Reset your password'}</h1>
           </div>
         </div>
 
@@ -133,6 +156,37 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
             <button type="button" onClick={() => switchMode('recover-questions')} style={styles.linkBtn}>
               Forgot your password?
+            </button>
+          </form>
+        )}
+
+        {mode === '2fa' && (
+          <form onSubmit={handleTwoFaSubmit} style={styles.form}>
+            <div style={styles.hint}>
+              Enter the 6-digit code from your authenticator app.
+            </div>
+            <div>
+              <label htmlFor="totp">Authentication code</label>
+              <input
+                id="totp"
+                className="mono"
+                value={twoFaCode}
+                onChange={(e) => setTwoFaCode(e.target.value)}
+                required
+                autoFocus
+                inputMode="numeric"
+                maxLength={8}
+                style={styles.input}
+              />
+            </div>
+
+            {error && <div style={styles.error}>{error}</div>}
+
+            <button type="submit" className="btn btn-stamp" disabled={loading} style={{ width: '100%', justifyContent: 'center' }}>
+              {loading ? 'Verifying…' : 'Verify'}
+            </button>
+            <button type="button" onClick={() => switchMode('login')} style={styles.linkBtn}>
+              Back to sign in
             </button>
           </form>
         )}

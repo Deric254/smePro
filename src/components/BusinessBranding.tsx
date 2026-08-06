@@ -1,0 +1,120 @@
+import React, { useState, useEffect } from 'react';
+import { getToken } from '../api';
+
+const API = 'http://127.0.0.1:8080';
+
+export default function BusinessBranding() {
+  const [slogan, setSlogan] = useState('');
+  const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    fetch(`${API}/business/branding`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      .then(r => r.json())
+      .then(data => {
+        if (data.slogan) { setSlogan(data.slogan); }
+        if (data.logo_path) setLogoPreview(`${API}/uploads/${data.logo_path.split('/').pop()}`);
+      });
+  }, []);
+
+  const handleLogoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      setMessage('Logo must be under 2MB');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      setLogoPreview(result); // data:url for preview
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setMessage('');
+
+    const body: any = { slogan: slogan.trim() };
+    if (logoPreview && logoPreview.startsWith('data:')) {
+      body.logo_base64 = logoPreview.split(',')[1];
+    }
+
+    try {
+      const res = await fetch(`${API}/business/branding`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setMessage('Branding updated successfully');
+    } catch (err: any) {
+      setMessage(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 480, padding: 20 }}>
+      <h2 style={{ fontFamily: "Newsreader, Georgia, serif", fontSize: 22, marginBottom: 16 }}>Business Branding</h2>
+
+      {message && (
+        <div style={{
+          padding: '10px 14px', borderRadius: 8, marginBottom: 16,
+          background: message.includes('Error') || message.includes('must') ? '#fdeaea' : '#eafaf1',
+          color: message.includes('Error') || message.includes('must') ? '#c0392b' : '#27ae60',
+          fontSize: 13,
+        }}>{message}</div>
+      )}
+
+      <form onSubmit={handleSubmit}>
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display:'block', fontSize:13, fontWeight:600, marginBottom:6 }}>Business Logo</label>
+          {logoPreview && (
+            <img src={logoPreview} alt="Preview" style={{ maxHeight:80, marginBottom:8, borderRadius:6, border:'1px solid #ddd' }} />
+          )}
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/svg+xml"
+            onChange={handleLogoChange}
+            style={{ fontSize:13 }}
+          />
+          <p style={{ fontSize:11, color:'#888', marginTop:4 }}>PNG, JPG, or SVG. Max 2MB.</p>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display:'block', fontSize:13, fontWeight:600, marginBottom:6 }}>Slogan</label>
+          <input
+            type="text"
+            value={slogan}
+            onChange={e => setSlogan(e.target.value)}
+            placeholder="e.g. Quality you can trust"
+            maxLength={200}
+            style={{
+              width:'100%', padding:'10px 12px', borderRadius:8, border:'1px solid #ccc',
+              fontSize:14, fontFamily:"'IBM Plex Sans', system-ui, sans-serif",
+            }}
+          />
+          <p style={{ fontSize:11, color:'#888', marginTop:4, textAlign:'right' }}>{slogan.length}/200</p>
+        </div>
+
+        <button
+          type="submit"
+          disabled={loading}
+          style={{
+            padding:'10px 20px', borderRadius:8, border:'none', background:'#1a1a1a',
+            color:'#fff', fontSize:13, fontWeight:600, cursor: loading ? 'not-allowed' : 'pointer',
+            opacity: loading ? 0.6 : 1,
+          }}
+        >
+          {loading ? 'Saving…' : 'Save Branding'}
+        </button>
+      </form>
+    </div>
+  );
+}

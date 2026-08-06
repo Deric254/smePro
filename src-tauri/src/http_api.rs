@@ -1,7 +1,6 @@
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Response, Server};
 
@@ -13,6 +12,7 @@ use std::time::Duration;
 enum ApiResponse {
     Json(u16, Value),
     Xlsx(u16, Vec<u8>, String), // status, bytes, filename
+    Image(u16, Vec<u8>, String), // status, bytes, mime type
 }
 
 pub fn serve(conn: Connection, addr: &str) {
@@ -43,6 +43,13 @@ pub fn serve(conn: Connection, addr: &str) {
         let mut body_str = String::new();
         let _ = request.as_reader().read_to_string(&mut body_str);
 
+        if let Err(e) = crate::security::check_body_size(body_str.as_bytes()) {
+            let response = Response::from_string(json!({"error": e.to_string()}).to_string()).with_status_code(413);
+            let response = cors_headers().into_iter().fold(response, |r, h| r.with_header(h));
+            let _ = request.respond(response);
+            continue;
+        }
+
         let bearer = header_value(request.headers(), "Authorization")
             .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
         let business_id_header = header_value(request.headers(), "X-Business-Id");
@@ -68,8 +75,15 @@ pub fn serve(conn: Connection, addr: &str) {
                 ).unwrap();
                 Response::from_data(bytes).with_status_code(status).with_header(ctype).with_header(disposition)
             }
+            ApiResponse::Image(status, bytes, mime) => {
+                let ctype = Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap();
+                Response::from_data(bytes).with_status_code(status).with_header(ctype)
+            }
         };
         let http_response = cors_headers().into_iter().fold(http_response, |r, h| r.with_header(h));
+        let http_response = crate::security::security_headers().into_iter().fold(http_response, |r, (name, value)| {
+            r.with_header(Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap())
+        });
         let _ = request.respond(http_response);
     }
 }
@@ -193,8 +207,8 @@ fn route(
         if business_name.is_empty() || owner_username.is_empty() || owner_password.is_empty() {
             return json_err(400, "business_name, owner_username, and owner_password are all required");
         }
-        if owner_password.len() < 8 {
-            return json_err(400, "owner_password must be at least 8 characters");
+        if let Err(e) = crate::security::validate_password(owner_password) {
+            return json_err(400, &format!("owner_password {e}"));
         }
         if sq1.is_empty() || sa1.is_empty() || sq2.is_empty() || sa2.is_empty() {
             return json_err(400, "both security questions and answers are required — this is the account's forgot-password path");
@@ -276,21 +290,57 @@ fn route(
         if let Err(retry_after) = auth_limiter.check(&limiter_key) {
             return json_err(429, &format!("too many login attempts, try again in {retry_after} seconds"));
         }
-        return match auth::login(conn, biz, username, password) {
-            Ok(token) => {
-                auth_limiter.reset(&limiter_key);
-                // Best-effort: look up the user_id this token belongs to
-                // so the audit entry names who logged in, not just that
-                // "someone" did.
-                if let Ok((logged_in_user_id, _)) = auth::current_user(conn, &token) {
-                    let _ = audit::log(conn, biz, Some(&logged_in_user_id), "_auth", "login_success", None, None);
-                }
-                ApiResponse::Json(200, json!({"token": token}))
-            }
+        let logged_in_user_id = match auth::verify_password(conn, biz, username, password) {
+            Ok(id) => id,
             Err(e) => {
                 let _ = audit::log(conn, biz, None, "_auth", "login_failed", None, Some(&json!({"username": username})));
-                json_err(401, &e.to_string())
+                return json_err(401, &e.to_string());
             }
+        };
+        auth_limiter.reset(&limiter_key);
+
+        // If this user has 2FA enabled, don't issue a real session yet —
+        // hand back a short-lived pending token instead. The frontend
+        // then calls /auth/2fa/login with that token + a TOTP code to
+        // actually get a session.
+        if crate::totp::status(conn, &logged_in_user_id).map(|s| s.enabled).unwrap_or(false) {
+            let temp_token = crate::totp::issue_pending_token(&logged_in_user_id, biz);
+            return ApiResponse::Json(202, json!({"requires_2fa": true, "temp_token": temp_token}));
+        }
+
+        return match auth::create_session(conn, &logged_in_user_id, biz) {
+            Ok(token) => {
+                let _ = audit::log(conn, biz, Some(&logged_in_user_id), "_auth", "login_success", None, None);
+                ApiResponse::Json(200, json!({"token": token}))
+            }
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["auth", "2fa", "login"] && *method == Method::Post {
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let temp_token = obj.get("temp_token").and_then(Value::as_str).unwrap_or("");
+        let code = obj.get("code").and_then(Value::as_str).unwrap_or("");
+
+        let (pending_user_id, pending_business_id) = match crate::totp::resolve_pending_token(temp_token) {
+            Some(pair) => pair,
+            None => return json_err(401, "2FA login expired or already used — please log in again"),
+        };
+
+        let valid = match crate::totp::verify_login(conn, &pending_user_id, code) {
+            Ok(v) => v,
+            Err(e) => return json_err(400, &e.to_string()),
+        };
+        if !valid {
+            let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "2fa_login_failed", None, None);
+            return json_err(401, "invalid TOTP code");
+        }
+
+        return match auth::create_session(conn, &pending_user_id, &pending_business_id) {
+            Ok(token) => {
+                let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "login_success", None, None);
+                ApiResponse::Json(200, json!({"token": token}))
+            }
+            Err(e) => json_err(500, &e.to_string()),
         };
     }
     if parts.as_slice() == ["auth", "recover", "security-questions"] && *method == Method::Post {
@@ -361,6 +411,11 @@ fn route(
 
     // ---- Protected routes ----
     let token = match bearer { Some(t) => t, None => return json_err(401, "missing Authorization: Bearer <token>") };
+    match crate::security::check_session_expired(conn, token) {
+        Ok(true) => return json_err(401, "session expired due to inactivity, please log in again"),
+        Ok(false) => {}
+        Err(e) => return json_err(500, &e.to_string()),
+    }
     let (user_id, business_id) = match auth::current_user(conn, token) {
         Ok(pair) => pair,
         Err(e) => return json_err(401, &e.to_string()),
@@ -1114,6 +1169,196 @@ fn route(
         };
         return match result {
             Ok(r) => ApiResponse::Json(200, json!(r)),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+
+    // ---- Receipts ----
+    if parts.len() == 3 && parts[0] == "pos" && parts[1] == "receipt" && *method == Method::Get {
+        let order_id = parts[2];
+        return match crate::receipt::generate(conn, &business_id, &user_id, order_id) {
+            Ok(receipt) => ApiResponse::Json(200, json!(receipt)),
+            Err(e) => json_err(404, &e.to_string()),
+        };
+    }
+
+    // ---- Invoices ----
+    if parts.as_slice() == ["invoices"] && *method == Method::Post {
+        let req: crate::invoice::CreateInvoiceRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return json_err(400, &format!("invalid invoice request: {e}")),
+        };
+        return match crate::invoice::create_invoice(conn, &business_id, &user_id, req) {
+            Ok(v) => ApiResponse::Json(201, v),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    if parts.len() == 3 && parts[0] == "invoices" && parts[2] == "send" && *method == Method::Post {
+        return match crate::invoice::mark_sent(conn, &business_id, &user_id, parts[1]) {
+            Ok(()) => ApiResponse::Json(200, json!({"status": "sent"})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    if parts.len() == 3 && parts[0] == "invoices" && parts[2] == "pay" && *method == Method::Post {
+        return match crate::invoice::mark_paid(conn, &business_id, &user_id, parts[1]) {
+            Ok(()) => ApiResponse::Json(200, json!({"status": "paid"})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    if parts.len() == 3 && parts[0] == "invoices" && parts[2] == "cancel" && *method == Method::Post {
+        return match crate::invoice::mark_cancelled(conn, &business_id, &user_id, parts[1]) {
+            Ok(()) => ApiResponse::Json(200, json!({"status": "cancelled"})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+
+    // ---- Business branding (logo + slogan) ----
+    if parts.as_slice() == ["business", "branding"] && *method == Method::Get {
+        return match crate::business_branding::get_branding(conn, &business_id) {
+            Ok(v) => ApiResponse::Json(200, v),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["business", "branding"] && *method == Method::Put {
+        if let Err(e) = rbac::require_admin_tier(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let logo_b64 = obj.get("logo_base64").and_then(|v| v.as_str());
+        let slogan = obj.get("slogan").and_then(|v| v.as_str());
+        let app_data_dir = std::path::PathBuf::from(
+            std::env::var("SME_APP_DATA_DIR").unwrap_or_else(|_| "./".to_string())
+        );
+        return match crate::business_branding::update_branding(conn, &business_id, logo_b64, slogan, &app_data_dir) {
+            Ok(path) => {
+                let _ = audit::log(conn, &business_id, Some(&user_id), "_business", "branding_update", None, None);
+                ApiResponse::Json(200, json!({"updated": true, "logo_path": path}))
+            }
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    if parts.len() == 2 && parts[0] == "uploads" && *method == Method::Get {
+        let app_data_dir = std::path::PathBuf::from(
+            std::env::var("SME_APP_DATA_DIR").unwrap_or_else(|_| "./".to_string())
+        );
+        let file_path = app_data_dir.join("uploads").join(parts[1]);
+        return match crate::business_branding::serve_logo(&file_path.to_string_lossy(), &app_data_dir) {
+            Ok((mime, bytes)) => ApiResponse::Image(200, bytes, mime),
+            Err(e) => json_err(404, &e.to_string()),
+        };
+    }
+
+    // ---- 2FA management (setup/verify/status/disable — the login-time
+    // check is up in the public routes section above, alongside
+    // /auth/login and /auth/2fa/login) ----
+    if parts.as_slice() == ["auth", "2fa", "setup"] && *method == Method::Post {
+        let username: String = conn.query_row(
+            "SELECT username FROM users WHERE id = ?1", rusqlite::params![user_id], |r| r.get(0)
+        ).unwrap_or_default();
+        return match crate::totp::generate_secret(conn, &user_id, &username) {
+            Ok(setup) => ApiResponse::Json(200, json!(setup)),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["auth", "2fa", "verify"] && *method == Method::Post {
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let code = obj.get("code").and_then(Value::as_str).unwrap_or("");
+        return match crate::totp::verify_and_enable(conn, &user_id, code) {
+            Ok(true) => ApiResponse::Json(200, json!({"enabled": true})),
+            Ok(false) => json_err(400, "invalid TOTP code — 2FA not enabled"),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["auth", "2fa", "status"] && *method == Method::Get {
+        return match crate::totp::status(conn, &user_id) {
+            Ok(s) => ApiResponse::Json(200, json!(s)),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["auth", "2fa", "disable"] && *method == Method::Post {
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let code = obj.get("code").and_then(Value::as_str).unwrap_or("");
+        return match crate::totp::disable(conn, &user_id, code) {
+            Ok(()) => ApiResponse::Json(200, json!({"disabled": true})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+
+    // ---- Tax engine ----
+    if parts.as_slice() == ["tax", "rates"] && *method == Method::Get {
+        return match crate::tax::list_rates(conn, &business_id) {
+            Ok(rates) => ApiResponse::Json(200, json!({"rates": rates})),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["tax", "rates"] && *method == Method::Post {
+        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let category = obj.get("category").and_then(Value::as_str).unwrap_or("");
+        let rate = obj.get("rate").and_then(Value::as_f64).unwrap_or(0.0);
+        return match crate::tax::set_category_rate(conn, &business_id, &user_id, category, rate) {
+            Ok(()) => ApiResponse::Json(200, json!({"ok": true})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["tax", "compute"] && *method == Method::Post {
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let empty = Vec::new();
+        let items = obj.get("items").and_then(Value::as_array).unwrap_or(&empty);
+        let tax_inclusive = obj.get("tax_inclusive").and_then(Value::as_bool).unwrap_or(false);
+        let parsed: Vec<(String, f64, i64)> = items.iter().filter_map(|v| {
+            let cat = v.get("category")?.as_str()?.to_string();
+            let price = v.get("unit_price")?.as_f64()?;
+            let qty = v.get("quantity")?.as_i64()?;
+            Some((cat, price, qty))
+        }).collect();
+        return match crate::tax::compute(conn, &business_id, &parsed, tax_inclusive) {
+            Ok(summary) => ApiResponse::Json(200, json!(summary)),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+
+    // ---- Currency exchange ----
+    if parts.as_slice() == ["currency", "rates"] && *method == Method::Get {
+        let q = query_params(url);
+        let base = q.get("base").map(|s| s.as_str()).unwrap_or("USD");
+        return match crate::currency::list_rates(conn, base) {
+            Ok(rates) => ApiResponse::Json(200, json!({"rates": rates, "stale": crate::currency::rates_stale(conn, base).unwrap_or(true)})),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["currency", "convert"] && *method == Method::Post {
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let from = obj.get("from").and_then(Value::as_str).unwrap_or("USD");
+        let to = obj.get("to").and_then(Value::as_str).unwrap_or("USD");
+        let amount = obj.get("amount").and_then(Value::as_f64).unwrap_or(0.0);
+        return match crate::currency::convert(conn, from, to, amount) {
+            Ok(result) => ApiResponse::Json(200, json!({"from": from, "to": to, "amount": amount, "result": result})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    if parts.as_slice() == ["currency", "refresh"] && *method == Method::Post {
+        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let q = query_params(url);
+        let base = q.get("base").map(|s| s.as_str()).unwrap_or("USD").to_string();
+        return match crate::currency::refresh_rates(conn, &base) {
+            Ok(()) => ApiResponse::Json(200, json!({"refreshed": true})),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+
+    // ---- Module registry: enable an additional module beyond the
+    // business-type preset (e.g. turning on Invoices after setup) ----
+    if parts.len() == 3 && parts[0] == "modules" && parts[2] == "enable" && *method == Method::Post {
+        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let module_id = parts[1];
+        let path = crate::modules_dir().join(format!("{module_id}.json"));
+        if !path.exists() {
+            return json_err(404, &format!("unknown module '{module_id}'"));
+        }
+        return match crate::business_panel::enable_module(conn, &business_id, &path.to_string_lossy()) {
+            Ok(()) => {
+                let _ = audit::log(conn, &business_id, Some(&user_id), "_modules", "enable", None, Some(&json!({"module_id": module_id})));
+                ApiResponse::Json(200, json!({"enabled": module_id}))
+            }
             Err(e) => json_err(400, &e.to_string()),
         };
     }

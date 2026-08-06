@@ -1,0 +1,9 @@
+@media print {
+  body * { visibility: hidden; }
+  .invoice-print-area, .invoice-print-area * { visibility: visible; }
+  .invoice-print-area {
+    position: absolute; left: 0; top: 0; width: 100%;
+    padding: 24px; box-shadow: none; border: none;
+  }
+  .no-print { display: none !important; }
+}

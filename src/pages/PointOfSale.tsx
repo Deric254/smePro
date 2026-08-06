@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listRecords, checkout, ApiError } from '../api';
+import ReceiptView from '../components/ReceiptView';
 import type { Record_ } from '../types';
 
 interface CartLine {
@@ -26,6 +27,7 @@ export default function PointOfSale() {
     order_id: string; subtotal: number; customer?: string; payment_method?: string; on_credit?: boolean;
     items: { name: string; sku: string; quantity: number; unit_price: number; line_total: number; remaining_stock: number }[];
   } | null>(null);
+  const [showReceipt, setShowReceipt] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -89,6 +91,7 @@ export default function PointOfSale() {
 
   function newSale() {
     setReceipt(null);
+    setShowReceipt(false);
     setError(null);
   }
 
@@ -114,7 +117,11 @@ export default function PointOfSale() {
           {receipt.on_credit && <div style={{ fontSize: '0.8rem', color: 'var(--stamp)', marginTop: '0.2rem' }}>Sold on credit — added to Debt &amp; Credit</div>}
           {!receipt.on_credit && receipt.payment_method && <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: '0.2rem' }}>Paid via {receipt.payment_method}</div>}
         </div>
-        <button className="btn btn-stamp" style={{ marginTop: '1.2rem' }} onClick={newSale}>New sale</button>
+        <div style={{ display: 'flex', gap: '0.6rem', marginTop: '1.2rem' }}>
+          <button className="btn btn-stamp" onClick={newSale}>New sale</button>
+          <button className="btn btn-outline" onClick={() => setShowReceipt(true)}>Print receipt</button>
+        </div>
+        {showReceipt && <ReceiptView orderId={receipt.order_id} onClose={() => setShowReceipt(false)} />}
       </div>
     );
   }

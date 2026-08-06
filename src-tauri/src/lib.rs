@@ -1,13 +1,19 @@
 pub mod ai_assistant;
 pub mod ai_context;
+pub mod android_service;
 pub mod audit;
 pub mod auth;
 pub mod backup;
+pub mod business_branding;
 pub mod business_panel;
+pub mod crash_report;
 pub mod crud;
+pub mod currency;
 pub mod db;
+pub mod db_migrations;
 pub mod forecast;
 pub mod http_api;
+pub mod invoice;
 pub mod license;
 pub mod module;
 pub mod notifications;
@@ -17,9 +23,15 @@ pub mod payment;
 pub mod pos;
 pub mod rate_limit;
 pub mod rbac;
+pub mod receipt;
 pub mod receiving;
 pub mod reference_data;
 pub mod repack;
+pub mod security;
+pub mod tax;
+#[cfg(test)]
+mod tests;
+pub mod totp;
 
 /// Where the bundled `modules/*.json` files actually live at runtime.
 /// Resolved ONCE at startup (see `run()` below) via Tauri's own
@@ -73,7 +85,7 @@ pub mod xlsx_export;
 /// events) to survive the user switching away from the app briefly.
 /// Flagging this now rather than assuming desktop's threading model
 /// transfers over silently.
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(feature = "tauri_shell")]
 pub fn run() {
     let builder = tauri::Builder::default();
 
@@ -142,10 +154,20 @@ pub fn run() {
                 .map_err(|e| format!("could not resolve the resource directory: {e}"))?;
             let _ = MODULES_DIR.set(resource_dir.join("modules"));
 
-            std::thread::spawn(move || {
-                let conn = db::open(&db_path).expect("failed to open local database");
-                http_api::serve(conn, "127.0.0.1:8080");
-            });
+            // Some HTTP handlers (business branding logo upload/serving) run
+            // on a plain thread with no Tauri app handle, same problem
+            // MODULES_DIR solves above — this env var is how they reach the
+            // app data directory too.
+            std::env::set_var("SME_APP_DATA_DIR", app_data_dir.to_string_lossy().to_string());
+
+            let conn = db::open(&db_path).expect("failed to open local database");
+            crate::android_service::start_server_platform(conn, "127.0.0.1:8080", &app_data_dir);
+
+            // Crash reporting is off by default (no DSN configured) — see
+            // crash_report.rs. Flip `None` to `Some("your-sentry-dsn")` once
+            // you have a real endpoint to send to.
+            let version = app.package_info().version.to_string();
+            crate::crash_report::init(None, &version, &app_data_dir);
 
             Ok(())
         })

@@ -39,6 +39,18 @@ fn normalize_answer(a: &str) -> String {
 /// doesn't exist or the password is wrong, so login can't be used to
 /// enumerate valid usernames.
 pub fn login(conn: &Connection, business_id: &str, username: &str, password: &str) -> Result<String> {
+    let user_id = verify_password(conn, business_id, username, password)?;
+    create_session(conn, &user_id, business_id)
+}
+
+/// Verifies username/password ONLY — does not issue a session. This is
+/// the first step of the two-step 2FA login flow (see totp.rs): the
+/// caller checks whether the resolved user has 2FA enabled before
+/// deciding whether to call `create_session` immediately or hold off
+/// until a TOTP code is also verified. Kept separate from `login()`
+/// (which still does both steps for the common non-2FA case) so nothing
+/// about existing non-2FA behavior changes.
+pub fn verify_password(conn: &Connection, business_id: &str, username: &str, password: &str) -> Result<String> {
     let row: Option<(String, String)> = conn
         .query_row(
             "SELECT id, password_hash FROM users WHERE business_id = ?1 AND username = ?2 AND active = 1",
@@ -51,7 +63,14 @@ pub fn login(conn: &Connection, business_id: &str, username: &str, password: &st
     if !verify_secret(password, &hash) {
         return Err(anyhow!("invalid username or password"));
     }
+    Ok(user_id)
+}
 
+/// Issues a new session token for an already-authenticated user. Split
+/// out from `login()` so the 2FA flow can create the real session only
+/// after both factors are verified, instead of ever holding a live
+/// session for a login that hasn't finished.
+pub fn create_session(conn: &Connection, user_id: &str, business_id: &str) -> Result<String> {
     let token = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO sessions (token, user_id, business_id, created_at, expires_at)

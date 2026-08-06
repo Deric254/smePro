@@ -49,9 +49,7 @@ pub fn create_user(
     if username.is_empty() {
         return Err(anyhow!("username cannot be empty"));
     }
-    if password.len() < 8 {
-        return Err(anyhow!("password must be at least 8 characters"));
-    }
+    crate::security::validate_password(password)?;
     if security_q1.is_empty() || security_a1.is_empty() || security_q2.is_empty() || security_a2.is_empty() {
         return Err(anyhow!("both security questions and answers are required"));
     }

@@ -11,13 +11,15 @@ import {
   getAuditLog,
   listNotifications, sendNotification,
   changeBusinessType,
-  listModules, getModuleSchema,
+  listModules, getModuleSchema, enableModule,
   ApiError,
 } from '../api';
 import type { PaymentHistoryEntry, AuditLogEntry, NotificationRecord } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
+import BusinessBranding from '../components/BusinessBranding';
+import TwoFactorSetup from '../components/TwoFactorSetup';
 
-type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'billing' | 'audit' | 'notifications';
+type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'billing' | 'audit' | 'notifications' | 'business' | 'security';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
@@ -25,6 +27,8 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'units', label: 'Units' },
   { id: 'currencies', label: 'Currencies' },
   { id: 'settings', label: 'Theme & Settings' },
+  { id: 'business', label: 'Business' },
+  { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'billing', label: 'Billing' },
   { id: 'license', label: 'Vendor License' },
@@ -53,6 +57,8 @@ export default function AdminPanel() {
       {tab === 'units' && <UnitsTab />}
       {tab === 'currencies' && <CurrenciesTab />}
       {tab === 'settings' && <SettingsTab />}
+      {tab === 'business' && <BusinessTab />}
+      {tab === 'security' && <TwoFactorSetup />}
       {tab === 'notifications' && <NotificationsTab />}
       {tab === 'license' && <VendorLicenseTab />}
       {tab === 'billing' && <BillingTab />}
@@ -505,6 +511,57 @@ const THEMES = [
   { id: 'dark_ledger', label: 'Dark Classic' },
   { id: 'sea_glass', label: 'Sea Glass' },
 ];
+
+function BusinessTab() {
+  const [modules, setModules] = useState<ModuleListItem[]>([]);
+  const [enabling, setEnabling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = () => { listModules().then((r) => setModules(r.modules)).catch(() => {}); };
+  useEffect(refresh, []);
+
+  const invoiceEnabled = modules.some((m) => m.id === 'invoice' && m.enabled);
+
+  async function handleEnableInvoices() {
+    setEnabling(true);
+    setError(null);
+    try {
+      await enableModule('invoice');
+      refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not enable Invoices module');
+    } finally {
+      setEnabling(false);
+    }
+  }
+
+  return (
+    <div>
+      <BusinessBranding />
+
+      <div className="card" style={{ marginTop: '1.2rem' }}>
+        <h3 style={{ marginTop: 0 }}>Additional modules</h3>
+        <p style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
+          Modules beyond your business type's starting set can be turned on individually.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0', borderTop: '1px solid var(--paper-line)' }}>
+          <div>
+            <strong>Invoices</strong>
+            <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)' }}>Create, send, and track customer invoices.</div>
+          </div>
+          {invoiceEnabled ? (
+            <span style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Enabled</span>
+          ) : (
+            <button className="btn" onClick={handleEnableInvoices} disabled={enabling}>
+              {enabling ? 'Enabling…' : 'Enable'}
+            </button>
+          )}
+        </div>
+        {error && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginTop: '0.5rem' }}>{error}</div>}
+      </div>
+    </div>
+  );
+}
 
 function SettingsTab() {
   const [theme, setTheme] = useState('ledger');

@@ -1,0 +1,145 @@
+/* Mobile Responsive Overrides for SME Pro */
+/* Add to your main CSS file or import separately */
+
+/* ── Base responsive rules ── */
+@media (max-width: 768px) {
+  /* Sidebar becomes bottom nav on mobile */
+  .sidebar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+    width: 100%;
+    height: 56px;
+    flex-direction: row;
+    justify-content: space-around;
+    padding: 4px 0;
+    border-top: 1px solid #e5e5e5;
+    border-right: none;
+    z-index: 100;
+  }
+  .sidebar .logo { display: none; }
+  .sidebar nav { flex-direction: row; gap: 0; width: 100%; }
+  .sidebar nav a {
+    flex: 1;
+    padding: 6px 2px;
+    font-size: 11px;
+    text-align: center;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .sidebar nav a svg { width: 20px; height: 20px; }
+  .sidebar nav a span { font-size: 10px; }
+
+  /* Main content padding accounts for bottom nav */
+  .main-content {
+    padding-bottom: 72px;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  /* Tables become cards */
+  .data-table {
+    display: block;
+  }
+  .data-table thead { display: none; }
+  .data-table tbody, .data-table tr, .data-table td {
+    display: block;
+    width: 100%;
+  }
+  .data-table tr {
+    margin-bottom: 12px;
+    padding: 12px;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    background: #fff;
+  }
+  .data-table td {
+    padding: 6px 0;
+    border: none;
+    display: flex;
+    justify-content: space-between;
+  }
+  .data-table td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    font-size: 12px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* Forms stack vertically */
+  .form-row {
+    flex-direction: column;
+    gap: 0;
+  }
+  .form-group {
+    width: 100%;
+  }
+  input, select, textarea {
+    font-size: 16px !important; /* Prevents iOS zoom */
+  }
+
+  /* Modals full-screen on small devices */
+  .modal-overlay .modal {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    border-radius: 0;
+    padding: 20px;
+  }
+
+  /* Admin tabs scroll horizontally */
+  .admin-tabs {
+    overflow-x: auto;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+  .admin-tabs::-webkit-scrollbar { display: none; }
+
+  /* Dashboard cards stack */
+  .dashboard-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* POS checkout */
+  .pos-layout {
+    flex-direction: column;
+  }
+  .pos-cart {
+    order: -1;
+    max-height: 40vh;
+    border-bottom: 1px solid #e5e5e5;
+  }
+}
+
+/* ── Tablet adjustments ── */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .sidebar {
+    width: 64px;
+    padding: 12px 8px;
+  }
+  .sidebar nav a span { display: none; }
+  .sidebar nav a { justify-content: center; }
+  .main-content {
+    margin-left: 64px;
+  }
+  .dashboard-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
+/* ── Touch optimizations ── */
+@media (pointer: coarse) {
+  button, .btn, a {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  input, select, textarea {
+    min-height: 44px;
+  }
+}

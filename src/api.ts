@@ -21,6 +21,10 @@ export function hasSession() {
   return !!authToken;
 }
 
+export function getToken() {
+  return authToken;
+}
+
 export function getBusinessId() {
   return businessId;
 }
@@ -90,6 +94,17 @@ export const login = (username: string, password: string, biz: string) =>
     return res.json();
   });
 
+export const login2fa = (tempToken: string, code: string) =>
+  fetch(`${API_BASE}/auth/2fa/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ temp_token: tempToken, code }),
+  }).then(async (res) => {
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(res.status, body.error || '2FA verification failed');
+    return body;
+  });
+
 export const recoverViaSecurityQuestions = (biz: string, payload: Record<string, string>) =>
   fetch(`${API_BASE}/auth/recover/security-questions`, {
     method: 'POST',
@@ -120,6 +135,7 @@ export const payLicense = () => request('/license/pay', { method: 'POST' });
 // ---- Modules ----
 export const getBusinessInfo = () => request('/business');
 export const listModules = () => request('/modules');
+export const enableModule = (moduleId: string) => request(`/modules/${moduleId}/enable`, { method: 'POST' });
 
 // ---- Point of sale — atomically links Sales and Inventory (and,
 // optionally, Debt & Credit for a sale on credit). See pos.rs. ----

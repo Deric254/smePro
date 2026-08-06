@@ -1,0 +1,29 @@
+{
+  "id": "invoice",
+  "display_name": "Invoices",
+  "fields": [
+    { "name": "invoice_number", "type": "text", "required": true },
+    { "name": "customer", "type": "text", "required": true },
+    { "name": "customer_email", "type": "text", "required": false },
+    { "name": "customer_phone", "type": "text", "required": false },
+    { "name": "issue_date", "type": "date", "required": true },
+    { "name": "due_date", "type": "date", "required": true },
+    { "name": "status", "type": "text", "required": true, "default": "draft" },
+    { "name": "items_json", "type": "text", "required": true },
+    { "name": "subtotal", "type": "real", "required": true, "default": 0.0 },
+    { "name": "tax_rate", "type": "real", "required": true, "default": 0.0 },
+    { "name": "tax_amount", "type": "real", "required": true, "default": 0.0 },
+    { "name": "total", "type": "real", "required": true, "default": 0.0 },
+    { "name": "notes", "type": "text", "required": false },
+    { "name": "source_sale_id", "type": "text", "required": false },
+    { "name": "sent_at", "type": "date", "required": false },
+    { "name": "paid_at", "type": "date", "required": false }
+  ],
+  "actions": ["create", "read", "update", "delete", "export"],
+  "default_roles": {
+    "Owner": ["create", "read", "update", "delete", "export", "approve"],
+    "Manager": ["create", "read", "update", "export"],
+    "Staff": ["read", "create"]
+  },
+  "dashboard_metric": { "measure": "total", "aggregation": "sum", "label": "invoiced" }
+}
