@@ -1,13 +1,13 @@
 {
   "admin_recovery_code": "AC-7F2Q-9KXM",
-  "business_id": "608cf7d2-9899-4a3a-9bcc-e7a7eff4cd97",
-  "manager_id": "5b2796ad-d428-41e4-bdd5-20d31abcb84a",
+  "business_id": "c2994d59-757c-4ee6-a394-31eac0814c47",
+  "manager_id": "49444c57-faa3-4621-9c1c-2e044292d29c",
   "manager_password": "managerpass123",
   "manager_username": "kioko",
-  "owner_id": "78a746bb-2f22-4c79-aa9f-a92d14151f41",
+  "owner_id": "7b79afc5-64ae-4af2-a1fa-9157698242c3",
   "owner_password": "correct horse battery staple",
   "owner_username": "nia",
-  "staff_id": "7d8221ae-ea91-4717-8323-2dcdd72d5733",
+  "staff_id": "29c9439b-c2de-4c93-8d17-8f2d997e9e09",
   "staff_password": "clerkpass123",
   "staff_username": "clerk"
 }

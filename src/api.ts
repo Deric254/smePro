@@ -152,6 +152,17 @@ export const checkout = (req: CheckoutRequest) =>
   request('/pos/checkout', { method: 'POST', body: JSON.stringify(req) });
 export const getOrder = (orderId: string) => request(`/pos/orders/${orderId}`);
 
+// ---- Refunds — the counterpart to checkout. See refund.rs. ----
+export interface RefundRequest {
+  sale_id: string;
+  quantity: number;
+  refund_amount: number;
+  reason?: string;
+  restock?: boolean;
+}
+export const processRefund = (req: RefundRequest) =>
+  request('/sales/refund', { method: 'POST', body: JSON.stringify(req) });
+
 // ---- Receiving stock — the buying-side counterpart. See receiving.rs. ----
 export const receiveStock = (purchaseRecordId: string, quantityReceived?: number) =>
   request('/purchasing/receive', {
@@ -295,17 +306,20 @@ export const getAuditLog = (moduleId?: string, limit = 200): Promise<{ entries: 
   request(`/audit-log?limit=${limit}${moduleId ? `&module_id=${encodeURIComponent(moduleId)}` : ''}`);
 
 // ---- Backup & restore — real disaster recovery, not a suggestion to
-// copy files manually. ----
+// copy files manually. The raw database key is never shipped in the
+// backup itself; a passphrase the owner chooses wraps it instead, so
+// possessing the backup file alone is never enough to open it. ----
 export interface BackupData {
   database_base64: string;
-  key_hex: string;
+  wrapped_key_base64: string;
   created_at: string;
   schema_version: string;
 }
-export const createBackup = (): Promise<BackupData> => request('/admin/backup', { method: 'POST' });
-export const restoreBackup = (data: { database_base64: string; key_hex: string }) =>
+export const createBackup = (passphrase: string): Promise<BackupData> =>
+  request('/admin/backup', { method: 'POST', body: JSON.stringify({ passphrase }) });
+export const restoreBackup = (data: { database_base64: string; wrapped_key_base64: string; passphrase: string }) =>
   request('/admin/restore', { method: 'POST', body: JSON.stringify(data) });
-export const restoreBackupFreshInstall = (data: { database_base64: string; key_hex: string }) =>
+export const restoreBackupFreshInstall = (data: { database_base64: string; wrapped_key_base64: string; passphrase: string }) =>
   request('/setup/restore', { method: 'POST', body: JSON.stringify(data) });
 
 // ---- Real payment collection — Stripe checkout / M-Pesa STK push.

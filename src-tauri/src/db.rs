@@ -55,6 +55,21 @@ pub fn open(path: &str) -> Result<Connection> {
     // deletes just don't cascade. Real consistency gap, now closed.
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+    // Without this, WAL mode's default (synchronous = NORMAL) does not
+    // guarantee the most recently committed transaction survives an OS
+    // crash or power loss at the exact moment of a WAL checkpoint --
+    // for a system recording real money, that gap is not acceptable.
+    // FULL fsyncs on every commit, trading a small amount of write
+    // throughput for the actual guarantee "committed means durable."
+    conn.execute_batch("PRAGMA synchronous = FULL;")?;
+    // Without this, SQLite's default is to fail an operation
+    // immediately with "database is locked" the instant it can't
+    // acquire a write lock -- a near-certainty the moment two real
+    // requests land close together (two POS terminals, or the HTTP API
+    // simply serving two concurrent requests). 5 seconds is enough for
+    // a genuinely concurrent write to wait its turn rather than fail a
+    // real sale for no reason other than bad timing.
+    conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
     conn.execute_batch(SCHEMA)?;
     crate::db_migrations::run(&mut conn)?;
     Ok(conn)

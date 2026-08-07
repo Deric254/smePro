@@ -36,7 +36,7 @@ export default function UpdateChecker() {
         await update.downloadAndInstall();
         await relaunch();
       }
-    } catch (e) {
+    } catch {
       setError('Could not install the update. You can keep using the app normally — try again later.');
       setInstalling(false);
     }

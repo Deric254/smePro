@@ -17,7 +17,8 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const [restoreFile, setRestoreFile] = useState<{ database_base64: string; key_hex: string; created_at?: string; name: string } | null>(null);
+  const [restoreFile, setRestoreFile] = useState<{ database_base64: string; wrapped_key_base64: string; created_at?: string; name: string } | null>(null);
+  const [restorePassphrase, setRestorePassphrase] = useState('');
   const [restoreConfirmText, setRestoreConfirmText] = useState('');
   const [restoreStaged, setRestoreStaged] = useState(false);
 
@@ -54,7 +55,7 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
     reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result as string);
-        if (!parsed.database_base64 || !parsed.key_hex) {
+        if (!parsed.database_base64 || !parsed.wrapped_key_base64) {
           setError('This does not look like a valid SME Pro backup file.');
           return;
         }
@@ -71,7 +72,7 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
     setLoading(true);
     setError(null);
     try {
-      await restoreBackupFreshInstall({ database_base64: restoreFile.database_base64, key_hex: restoreFile.key_hex });
+      await restoreBackupFreshInstall({ database_base64: restoreFile.database_base64, wrapped_key_base64: restoreFile.wrapped_key_base64, passphrase: restorePassphrase });
       setRestoreStaged(true);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not restore this backup');
@@ -207,6 +208,15 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
                       )}
                     </div>
                     <label style={{ display: 'block', marginTop: '0.8rem' }}>
+                      Backup passphrase
+                    </label>
+                    <input
+                      type="password"
+                      value={restorePassphrase}
+                      onChange={(e) => setRestorePassphrase(e.target.value)}
+                      style={styles.input}
+                    />
+                    <label style={{ display: 'block', marginTop: '0.8rem' }}>
                       Type <span className="mono">RESTORE</span> to confirm
                     </label>
                     <input value={restoreConfirmText} onChange={(e) => setRestoreConfirmText(e.target.value)} style={styles.input} />
@@ -214,7 +224,7 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
                       className="btn btn-stamp"
                       type="button"
                       style={{ marginTop: '0.8rem', width: '100%', justifyContent: 'center' }}
-                      disabled={restoreConfirmText !== 'RESTORE' || loading}
+                      disabled={restoreConfirmText !== 'RESTORE' || loading || !restorePassphrase}
                       onClick={handleRestoreSubmit}
                     >
                       {loading ? 'Restoring…' : 'Restore this backup'}

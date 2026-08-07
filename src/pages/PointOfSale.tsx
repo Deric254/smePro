@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { listRecords, checkout, ApiError } from '../api';
+import { listRecords, checkout, getOrder, processRefund, ApiError } from '../api';
 import ReceiptView from '../components/ReceiptView';
 import type { Record_ } from '../types';
 
@@ -12,7 +12,19 @@ interface CartLine {
   quantity: number;
 }
 
+interface OrderLookupItem {
+  sale_id: string;
+  item_name: string;
+  quantity: number;
+  revenue: number;
+  unit_price?: number;
+  customer?: string;
+  payment_method?: string;
+  created_at: string;
+}
+
 export default function PointOfSale() {
+  const [mode, setMode] = useState<'sell' | 'refund'>('sell');
   const [products, setProducts] = useState<Record_[]>([]);
   const [search, setSearch] = useState('');
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -28,6 +40,73 @@ export default function PointOfSale() {
     items: { name: string; sku: string; quantity: number; unit_price: number; line_total: number; remaining_stock: number }[];
   } | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
+
+  // ---- Refund flow state ----
+  const [orderIdInput, setOrderIdInput] = useState('');
+  const [orderLookup, setOrderLookup] = useState<{ order_id: string; subtotal: number; items: OrderLookupItem[] } | null>(null);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [refundingSaleId, setRefundingSaleId] = useState<string | null>(null);
+  const [refundQty, setRefundQty] = useState(1);
+  const [refundAmount, setRefundAmount] = useState(0);
+  const [refundReason, setRefundReason] = useState('');
+  const [refundRestock, setRefundRestock] = useState(true);
+  const [refundError, setRefundError] = useState<string | null>(null);
+  const [refundSubmitting, setRefundSubmitting] = useState(false);
+  const [refundSuccess, setRefundSuccess] = useState<string | null>(null);
+
+  async function lookupOrder() {
+    if (!orderIdInput.trim()) return;
+    setLookupLoading(true);
+    setLookupError(null);
+    setOrderLookup(null);
+    setRefundSuccess(null);
+    try {
+      const result = await getOrder(orderIdInput.trim());
+      setOrderLookup(result as { order_id: string; subtotal: number; items: OrderLookupItem[] });
+    } catch (err) {
+      setLookupError(err instanceof ApiError ? err.message : 'Could not find that order.');
+    } finally {
+      setLookupLoading(false);
+    }
+  }
+
+  function startRefund(item: OrderLookupItem) {
+    setRefundingSaleId(item.sale_id);
+    setRefundQty(item.quantity);
+    // A sensible default -- the full line's original value -- but
+    // always editable, since a real refund isn't always full price
+    // back (a restocking fee, a partial goodwill adjustment).
+    setRefundAmount(item.revenue);
+    setRefundReason('');
+    setRefundRestock(true);
+    setRefundError(null);
+  }
+
+  async function submitRefund() {
+    if (!refundingSaleId) return;
+    setRefundSubmitting(true);
+    setRefundError(null);
+    try {
+      await processRefund({
+        sale_id: refundingSaleId,
+        quantity: refundQty,
+        refund_amount: refundAmount,
+        reason: refundReason || undefined,
+        restock: refundRestock,
+      });
+      setRefundSuccess(`Refunded ${refundQty} unit(s), ${refundAmount.toFixed(2)} returned.`);
+      setRefundingSaleId(null);
+      // Re-look-up the order so the screen reflects what's now
+      // actually left refundable, rather than showing stale numbers.
+      const refreshed = await getOrder(orderIdInput.trim());
+      setOrderLookup(refreshed as { order_id: string; subtotal: number; items: OrderLookupItem[] });
+    } catch (err) {
+      setRefundError(err instanceof ApiError ? err.message : 'Refund failed.');
+    } finally {
+      setRefundSubmitting(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -95,7 +174,7 @@ export default function PointOfSale() {
     setError(null);
   }
 
-  if (receipt) {
+  if (mode === 'sell' && receipt) {
     return (
       <div>
         <h1>Sale complete</h1>
@@ -129,6 +208,117 @@ export default function PointOfSale() {
   return (
     <div>
       <h1>Point of Sale</h1>
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+        <button className={mode === 'sell' ? 'btn' : 'btn btn-outline'} onClick={() => setMode('sell')}>Sell</button>
+        <button className={mode === 'refund' ? 'btn' : 'btn btn-outline'} onClick={() => setMode('refund')}>Refund</button>
+      </div>
+
+      {mode === 'refund' && (
+        <div style={{ maxWidth: 560 }}>
+          <div className="card">
+            <label>Order ID</label>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <input
+                value={orderIdInput}
+                onChange={(e) => setOrderIdInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && lookupOrder()}
+                placeholder="Paste or type the order ID from the receipt…"
+                style={{ flex: 1 }}
+              />
+              <button className="btn btn-outline" onClick={lookupOrder} disabled={lookupLoading || !orderIdInput.trim()}>
+                {lookupLoading ? 'Looking up…' : 'Find order'}
+              </button>
+            </div>
+            {lookupError && (
+              <div style={{ background: 'var(--stamp-wash)', color: 'var(--stamp)', padding: '0.5em 0.7em', borderRadius: 3, fontSize: '0.85rem', marginTop: '0.7rem' }}>
+                {lookupError}
+              </div>
+            )}
+          </div>
+
+          {refundSuccess && (
+            <div className="card" style={{ marginTop: '0.8rem', color: 'var(--stamp)', fontWeight: 600 }}>
+              {refundSuccess}
+            </div>
+          )}
+
+          {orderLookup && (
+            <div className="card" style={{ marginTop: '0.8rem' }}>
+              <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.6rem' }}>
+                Order {orderLookup.order_id.slice(0, 8)} · subtotal {orderLookup.subtotal.toFixed(2)}
+              </div>
+              {orderLookup.items.map((item) => (
+                <div key={item.sale_id} style={{ borderBottom: '1px solid var(--paper-line)', padding: '0.6rem 0' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{item.item_name}</div>
+                      <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>
+                        {item.quantity} sold · {item.revenue.toFixed(2)} total
+                      </div>
+                    </div>
+                    {refundingSaleId !== item.sale_id && (
+                      <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => startRefund(item)}>
+                        Refund
+                      </button>
+                    )}
+                  </div>
+
+                  {refundingSaleId === item.sale_id && (
+                    <div style={{ marginTop: '0.7rem', paddingTop: '0.7rem', borderTop: '1px dashed var(--paper-line)' }}>
+                      <div style={{ display: 'flex', gap: '0.6rem' }}>
+                        <div style={{ flex: 1 }}>
+                          <label>Quantity to refund</label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={item.quantity}
+                            value={refundQty}
+                            onChange={(e) => setRefundQty(parseInt(e.target.value, 10) || 0)}
+                          />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label>Amount to return</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            value={refundAmount}
+                            onChange={(e) => setRefundAmount(parseFloat(e.target.value) || 0)}
+                          />
+                        </div>
+                      </div>
+                      <label style={{ marginTop: '0.5rem', display: 'block' }}>Reason (optional)</label>
+                      <input value={refundReason} onChange={(e) => setRefundReason(e.target.value)} style={{ width: '100%' }} />
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', textTransform: 'none', fontSize: '0.82rem', marginTop: '0.6rem', cursor: 'pointer' }}>
+                        <input type="checkbox" checked={refundRestock} onChange={(e) => setRefundRestock(e.target.checked)} />
+                        Put this quantity back into sellable stock
+                      </label>
+                      {!refundRestock && (
+                        <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)', marginTop: '0.2rem' }}>
+                          Leave unchecked for damaged, expired, or otherwise unsellable returns.
+                        </div>
+                      )}
+                      {refundError && (
+                        <div style={{ background: 'var(--stamp-wash)', color: 'var(--stamp)', padding: '0.5em 0.7em', borderRadius: 3, fontSize: '0.85rem', marginTop: '0.6rem' }}>
+                          {refundError}
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.7rem' }}>
+                        <button className="btn btn-stamp" onClick={submitRefund} disabled={refundSubmitting || refundQty <= 0}>
+                          {refundSubmitting ? 'Processing…' : 'Confirm refund'}
+                        </button>
+                        <button className="btn btn-outline" onClick={() => setRefundingSaleId(null)}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {mode === 'sell' && (
       <div className="pos-layout">
         <div>
           <input
@@ -231,6 +421,7 @@ export default function PointOfSale() {
           </button>
         </div>
       </div>
+      )}
     </div>
   );
 }

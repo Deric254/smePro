@@ -31,6 +31,47 @@ permissions:
 
 jobs:
   # ------------------------------------------------------------------
+  # The actual quality gate. Without this job, nothing in this
+  # pipeline ever ran a test, a lint check, or even confirmed the code
+  # compiles before bumping the version, tagging it, and building real
+  # installers -- a broken commit could reach a real release. Runs on
+  # every trigger this workflow has (a normal push to main AND a
+  # direct tag push), not just one of them, since a manually-cut
+  # release deserves the same guarantee as an automatic one.
+  # ------------------------------------------------------------------
+  test-and-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Lint frontend
+        run: npm run lint
+
+      - name: Type-check and build frontend
+        run: npm run build
+
+      - name: Run backend tests
+        working-directory: src-tauri
+        run: cargo test --lib
+
+  # ------------------------------------------------------------------
   # Figures out the version for this run. If triggered by a direct tag
   # push, uses that tag as-is (manual release path). If triggered by a
   # normal push to main, computes the next version from the commit
@@ -40,6 +81,7 @@ jobs:
   # where those files disagree with each other or with the tag.
   # ------------------------------------------------------------------
   bump-version:
+    needs: test-and-lint
     if: ${{ github.ref_type == 'tag' || !contains(github.event.head_commit.message, 'chore(release):') }}
     runs-on: ubuntu-24.04
     outputs:

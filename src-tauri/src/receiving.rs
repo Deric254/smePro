@@ -19,6 +19,14 @@
 //! every purchase received through the intended flow is atomically
 //! correct — the risk that's left is a workaround, not a hole in the
 //! main path.
+//!
+//! SECOND FIX, same file: `receive()` used to update Inventory's
+//! `quantity` but never touch `unit_cost` at all — the recorded cost
+//! silently went stale the moment a supplier's price changed on any
+//! repeat order, with nothing to warn anyone it had. It now computes a
+//! real weighted average across the stock already on hand and what
+//! just arrived, the same correctness this crate already applies to
+//! stock and money everywhere else.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -53,17 +61,17 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
 
     let tx = conn.transaction()?;
 
-    let row: Option<(String, i64, bool, Option<String>, String)> = tx
+    let row: Option<(String, i64, bool, Option<String>, String, f64)> = tx
         .query_row(
             &format!(
-                "SELECT item_name, quantity, received, inventory_record_id, supplier
+                "SELECT item_name, quantity, received, inventory_record_id, supplier, unit_cost
                  FROM {purchasing_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
             ),
             params![req.purchase_record_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .optional()?;
-    let Some((item_name, ordered_qty, already_received, inventory_record_id, supplier)) = row else {
+    let Some((item_name, ordered_qty, already_received, inventory_record_id, supplier, po_unit_cost)) = row else {
         return Err(anyhow!("purchase order not found: {}", req.purchase_record_id));
     };
 
@@ -82,21 +90,31 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
         return Err(anyhow!("quantity received must be greater than zero"));
     }
 
-    let inv_row: Option<(String, i64)> = tx
+    let inv_row: Option<(String, i64, f64)> = tx
         .query_row(
-            &format!("SELECT name, quantity FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+            &format!("SELECT name, quantity, unit_cost FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
             params![inventory_record_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((inventory_name, current_qty)) = inv_row else {
+    let Some((inventory_name, current_qty, current_unit_cost)) = inv_row else {
         return Err(anyhow!("linked inventory item not found: {inventory_record_id}"));
     };
 
     let new_qty = current_qty + quantity_received;
+    // A real weighted average, not a silent overwrite -- if this
+    // exact item was already in stock at one cost and this delivery
+    // came in at a different one (supplier price changes, a different
+    // batch, anything), the recorded cost after this needs to reflect
+    // both quantities fairly, not just whichever one was written most
+    // recently. When current_qty is 0 (first-ever receipt, or fully
+    // sold out before now), this naturally reduces to exactly the new
+    // delivery's cost -- no special case needed, the zero contributes
+    // nothing to the weighted sum.
+    let new_unit_cost = ((current_qty as f64 * current_unit_cost) + (quantity_received as f64 * po_unit_cost)) / new_qty as f64;
     tx.execute(
-        &format!("UPDATE {inventory_table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
-        params![new_qty, inventory_record_id, business_id],
+        &format!("UPDATE {inventory_table} SET quantity = ?1, unit_cost = ?2, updated_at = datetime('now') WHERE id = ?3 AND business_id = ?4"),
+        params![new_qty, new_unit_cost, inventory_record_id, business_id],
     )?;
 
     tx.execute(
@@ -118,6 +136,8 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
         "quantity_received": quantity_received,
         "new_stock_level": new_qty,
         "partial_delivery": quantity_received != ordered_qty,
+        "received_at_unit_cost": po_unit_cost,
+        "new_weighted_average_cost": new_unit_cost,
     });
 
     let _ = crate::audit::log(conn, business_id, Some(user_id), "_receiving", "receive", Some(&req.purchase_record_id), Some(&summary));

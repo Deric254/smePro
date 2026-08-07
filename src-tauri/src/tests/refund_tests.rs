@@ -1,0 +1,174 @@
+use super::common::*;
+
+fn make_inventory_item(conn: &mut rusqlite::Connection, biz: &str, uid: &str, sku: &str, name: &str, qty: i64, cost: f64, price: f64) -> String {
+    let mut item = serde_json::Map::new();
+    item.insert("sku".into(), serde_json::json!(sku));
+    item.insert("name".into(), serde_json::json!(name));
+    item.insert("quantity".into(), serde_json::json!(qty));
+    item.insert("unit_cost".into(), serde_json::json!(cost));
+    item.insert("unit_price".into(), serde_json::json!(price));
+    crate::crud::create(conn, biz, uid, "inventory", &item).unwrap()
+}
+
+fn checkout_one(conn: &mut rusqlite::Connection, biz: &str, uid: &str, inv_id: &str, qty: i64) -> serde_json::Value {
+    let req = crate::pos::CheckoutRequest {
+        items: vec![crate::pos::CartItem { inventory_record_id: inv_id.to_string(), quantity: qty }],
+        payment_method: Some("Cash".into()),
+        customer: None,
+        allow_oversell: false,
+        on_credit: false,
+        due_date: None,
+    };
+    crate::pos::checkout(conn, biz, uid, req).unwrap()
+}
+
+#[test]
+fn test_refund_restocks_and_records_correctly() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "FLOUR-001", "Flour", 50, 20.0, 30.0);
+    let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 10);
+    let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
+
+    let list_before = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(list_before[0]["quantity"].as_i64().unwrap(), 40);
+
+    let req = crate::refund::RefundRequest {
+        sale_id: sale_id.clone(),
+        quantity: 4,
+        refund_amount: 120.0,
+        reason: Some("customer changed mind".into()),
+        restock: true,
+    };
+    let result = crate::refund::process_refund(&mut conn, &biz, &uid, req).unwrap();
+    assert_eq!(result["quantity_refunded"].as_i64().unwrap(), 4);
+    assert_eq!(result["new_stock_level"].as_i64().unwrap(), 44);
+
+    let list_after = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(list_after[0]["quantity"].as_i64().unwrap(), 44);
+}
+
+#[test]
+fn test_refund_without_restock_leaves_inventory_untouched() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "EGGS-001", "Eggs", 30, 5.0, 8.0);
+    let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 6);
+    let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
+
+    let req = crate::refund::RefundRequest {
+        sale_id,
+        quantity: 6,
+        refund_amount: 48.0,
+        reason: Some("broken on arrival, not sellable".into()),
+        restock: false,
+    };
+    crate::refund::process_refund(&mut conn, &biz, &uid, req).unwrap();
+
+    // Stock stays at 24 (30 - 6 sold), never goes back up -- a
+    // deliberately unsellable return must not silently become stock.
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(list[0]["quantity"].as_i64().unwrap(), 24);
+}
+
+#[test]
+fn test_refunding_more_than_was_sold_is_blocked() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "OIL-001", "Cooking Oil", 20, 100.0, 150.0);
+    let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 3);
+    let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
+
+    let req = crate::refund::RefundRequest {
+        sale_id,
+        quantity: 5, // more than the 3 actually sold
+        refund_amount: 750.0,
+        reason: None,
+        restock: true,
+    };
+    let result = crate::refund::process_refund(&mut conn, &biz, &uid, req);
+    assert!(result.is_err());
+
+    // And stock must be completely unaffected by the rejected attempt.
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(list[0]["quantity"].as_i64().unwrap(), 17); // 20 - 3, refund never happened
+}
+
+#[test]
+fn test_repeated_partial_refunds_correctly_accumulate() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "SOAP-001", "Bar Soap", 100, 10.0, 15.0);
+    let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 10);
+    let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
+
+    // First partial refund: 4 of the 10 -- must succeed.
+    let first = crate::refund::RefundRequest {
+        sale_id: sale_id.clone(),
+        quantity: 4,
+        refund_amount: 60.0,
+        reason: None,
+        restock: true,
+    };
+    crate::refund::process_refund(&mut conn, &biz, &uid, first).unwrap();
+
+    // Second refund against the SAME sale: only 6 remains refundable
+    // (10 - 4 already refunded). Asking for 7 must be rejected --
+    // proving the check is a real running total, not resettable.
+    let second_too_much = crate::refund::RefundRequest {
+        sale_id: sale_id.clone(),
+        quantity: 7,
+        refund_amount: 105.0,
+        reason: None,
+        restock: true,
+    };
+    assert!(crate::refund::process_refund(&mut conn, &biz, &uid, second_too_much).is_err());
+
+    // Exactly the remaining 6 must succeed.
+    let second_exact = crate::refund::RefundRequest {
+        sale_id: sale_id.clone(),
+        quantity: 6,
+        refund_amount: 90.0,
+        reason: None,
+        restock: true,
+    };
+    crate::refund::process_refund(&mut conn, &biz, &uid, second_exact).unwrap();
+
+    // Now fully refunded -- even quantity 1 more must be rejected.
+    let third = crate::refund::RefundRequest {
+        sale_id,
+        quantity: 1,
+        refund_amount: 15.0,
+        reason: None,
+        restock: true,
+    };
+    assert!(crate::refund::process_refund(&mut conn, &biz, &uid, third).is_err());
+
+    // Stock: 100 - 10 sold + 4 + 6 restocked = 100.
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(list[0]["quantity"].as_i64().unwrap(), 100);
+}
+
+#[test]
+fn test_refund_requires_a_real_sale() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let req = crate::refund::RefundRequest {
+        sale_id: "not-a-real-sale-id".into(),
+        quantity: 1,
+        refund_amount: 10.0,
+        reason: None,
+        restock: false,
+    };
+    assert!(crate::refund::process_refund(&mut conn, &biz, &uid, req).is_err());
+}

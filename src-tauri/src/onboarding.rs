@@ -10,10 +10,10 @@ use crate::business_panel;
 /// screen or workflow.
 fn preset_modules(business_type: &str) -> Result<Vec<&'static str>> {
     match business_type {
-        "retail" => Ok(vec!["inventory", "sales", "debt_credit", "accounting"]),
-        "food" => Ok(vec!["inventory", "sales", "purchasing", "debt_credit", "accounting"]),
-        "services" => Ok(vec!["hr", "sales", "debt_credit", "accounting"]),
-        "manufacturing" => Ok(vec!["inventory", "purchasing", "hr", "sales", "accounting"]),
+        "retail" => Ok(vec!["inventory", "sales", "refunds", "debt_credit", "accounting"]),
+        "food" => Ok(vec!["inventory", "sales", "purchasing", "refunds", "debt_credit", "accounting"]),
+        "services" => Ok(vec!["hr", "sales", "refunds", "debt_credit", "accounting"]),
+        "manufacturing" => Ok(vec!["inventory", "purchasing", "hr", "sales", "refunds", "accounting"]),
         other => Err(anyhow!(
             "unknown business type '{other}', expected one of: retail, food, services, manufacturing"
         )),

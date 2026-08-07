@@ -902,8 +902,10 @@ function BackupTab() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [downloaded, setDownloaded] = useState(false);
+  const [backupPassphrase, setBackupPassphrase] = useState('');
 
-  const [restoreFile, setRestoreFile] = useState<{ database_base64: string; key_hex: string; created_at?: string; name: string } | null>(null);
+  const [restoreFile, setRestoreFile] = useState<{ database_base64: string; wrapped_key_base64: string; created_at?: string; name: string } | null>(null);
+  const [restorePassphrase, setRestorePassphrase] = useState('');
   const [confirmText, setConfirmText] = useState('');
   const [restoring, setRestoring] = useState(false);
   const [restoreStaged, setRestoreStaged] = useState(false);
@@ -914,7 +916,7 @@ function BackupTab() {
     setError(null);
     setDownloaded(false);
     try {
-      const data = await createBackup();
+      const data = await createBackup(backupPassphrase);
       const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -926,6 +928,7 @@ function BackupTab() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       setDownloaded(true);
+      setBackupPassphrase('');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not create the backup');
     } finally {
@@ -937,13 +940,14 @@ function BackupTab() {
     setRestoreError(null);
     setRestoreStaged(false);
     setConfirmText('');
+    setRestorePassphrase('');
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result as string);
-        if (!parsed.database_base64 || !parsed.key_hex) {
+        if (!parsed.database_base64 || !parsed.wrapped_key_base64) {
           setRestoreError('This does not look like a valid SME Pro backup file.');
           return;
         }
@@ -960,7 +964,7 @@ function BackupTab() {
     setRestoring(true);
     setRestoreError(null);
     try {
-      await restoreBackup({ database_base64: restoreFile.database_base64, key_hex: restoreFile.key_hex });
+      await restoreBackup({ database_base64: restoreFile.database_base64, wrapped_key_base64: restoreFile.wrapped_key_base64, passphrase: restorePassphrase });
       setRestoreStaged(true);
     } catch (err) {
       setRestoreError(err instanceof ApiError ? err.message : 'Could not restore this backup');
@@ -991,7 +995,21 @@ function BackupTab() {
         </p>
         <ErrorBox error={error} />
         {downloaded && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.7rem' }}>Backup downloaded.</div>}
-        <button className="btn btn-stamp" onClick={handleCreateBackup} disabled={creating}>
+        <label style={{ display: 'block', marginBottom: '0.4rem' }}>
+          Backup passphrase (at least 8 characters)
+        </label>
+        <p style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: 0, marginBottom: '0.5rem' }}>
+          Protects this specific file — not your login password. Anyone who ever gets hold of the
+          downloaded file cannot open it without this passphrase too. Write it down somewhere
+          separate from the file itself; there is no way to recover it if it's lost.
+        </p>
+        <input
+          type="password"
+          value={backupPassphrase}
+          onChange={(e) => setBackupPassphrase(e.target.value)}
+          style={{ width: '100%', marginBottom: '0.8rem' }}
+        />
+        <button className="btn btn-stamp" onClick={handleCreateBackup} disabled={creating || backupPassphrase.length < 8}>
           {creating ? 'Creating backup…' : 'Download backup now'}
         </button>
       </div>
@@ -1018,13 +1036,22 @@ function BackupTab() {
                   )}
                 </div>
                 <label style={{ display: 'block', marginTop: '0.8rem' }}>
+                  Backup passphrase
+                </label>
+                <input
+                  type="password"
+                  value={restorePassphrase}
+                  onChange={(e) => setRestorePassphrase(e.target.value)}
+                  style={{ width: '100%', marginTop: '0.3rem' }}
+                />
+                <label style={{ display: 'block', marginTop: '0.8rem' }}>
                   Type <span className="mono">RESTORE</span> to confirm — this cannot be undone
                 </label>
                 <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} style={{ width: '100%', marginTop: '0.3rem' }} />
                 <button
                   className="btn btn-stamp"
                   style={{ marginTop: '0.8rem' }}
-                  disabled={confirmText !== 'RESTORE' || restoring}
+                  disabled={confirmText !== 'RESTORE' || restoring || !restorePassphrase}
                   onClick={handleRestore}
                 >
                   {restoring ? 'Restoring…' : 'Restore this backup'}

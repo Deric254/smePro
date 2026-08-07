@@ -1,0 +1,75 @@
+{
+  "id": "refunds",
+  "display_name": "Refunds",
+  "fields": [
+    {
+      "name": "sale_id",
+      "type": "text",
+      "required": true
+    },
+    {
+      "name": "order_id",
+      "type": "text",
+      "required": false
+    },
+    {
+      "name": "item_name",
+      "type": "text",
+      "required": true
+    },
+    {
+      "name": "inventory_record_id",
+      "type": "text",
+      "required": false
+    },
+    {
+      "name": "quantity_refunded",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "refund_amount",
+      "type": "real",
+      "required": true
+    },
+    {
+      "name": "reason",
+      "type": "text",
+      "required": false
+    },
+    {
+      "name": "restocked",
+      "type": "boolean",
+      "required": false,
+      "default": false
+    },
+    {
+      "name": "customer",
+      "type": "text",
+      "required": false
+    }
+  ],
+  "actions": [
+    "read",
+    "export"
+  ],
+  "default_roles": {
+    "Owner": [
+      "read",
+      "export",
+      "approve"
+    ],
+    "Manager": [
+      "read",
+      "export"
+    ],
+    "Staff": [
+      "read"
+    ]
+  },
+  "dashboard_metric": {
+    "measure": "refund_amount",
+    "aggregation": "sum",
+    "label": "total refunded"
+  }
+}

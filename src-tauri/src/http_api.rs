@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, audit, auth, backup, crud, forecast, license, notifications, ocr_import, onboarding, payment, pos, rbac, receiving, reference_data, report, repack, roles, settings, users, xlsx_export};
+use crate::{ai_assistant, audit, auth, backup, crud, forecast, license, notifications, ocr_import, onboarding, payment, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -477,7 +477,11 @@ fn route(
     // ---- Backup & restore — Owner-only, real disaster recovery. ----
     if parts.as_slice() == ["admin", "backup"] && *method == Method::Post {
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
-        return match backup::create_backup(conn) {
+        let passphrase = match json_body(body).and_then(|o| o.get("passphrase").and_then(|v| v.as_str()).map(String::from)) {
+            Some(p) => p,
+            None => return json_err(400, "a passphrase is required to create a backup"),
+        };
+        return match backup::create_backup(conn, &passphrase) {
             Ok(data) => {
                 let _ = audit::log(conn, &business_id, Some(&user_id), "_backup", "create", None, None);
                 match serde_json::to_value(&data) {
@@ -879,6 +883,20 @@ fn route(
         return match pos::get_order(conn, &business_id, order_id) {
             Ok(order) => ApiResponse::Json(200, order),
             Err(e) => json_err(404, &e.to_string()),
+        };
+    }
+
+    // ---- Refunds: the counterpart to POS checkout — see refund.rs
+    // for why this is its own module rather than the generic create
+    // endpoint. ----
+    if parts.as_slice() == ["sales", "refund"] && *method == Method::Post {
+        let req: refund::RefundRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return json_err(400, &format!("invalid refund request: {e}")),
+        };
+        return match refund::process_refund(conn, &business_id, &user_id, req) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
         };
     }
 

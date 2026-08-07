@@ -26,6 +26,7 @@ pub mod rbac;
 pub mod receipt;
 pub mod receiving;
 pub mod reference_data;
+pub mod refund;
 pub mod repack;
 pub mod security;
 pub mod tax;
