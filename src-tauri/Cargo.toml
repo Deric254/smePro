@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.22"
+version = "0.1.21"
 edition = "2021"
 
 [lib]
@@ -65,6 +65,9 @@ required-features = ["dev-tools"]
 
 [features]
 dev-tools = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 rusqlite = { version = "=0.31.0", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
