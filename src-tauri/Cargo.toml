@@ -68,6 +68,7 @@ dev-tools = []
 
 [build-dependencies]
 tauri-build = { version = "=2.0.0", features = [] }
+tauri-utils = "=2.0.0"
 
 [dependencies]
 rusqlite = { version = "=0.31.0", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
