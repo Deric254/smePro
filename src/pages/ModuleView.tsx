@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   getModuleSchema, listRecords, createRecord, deleteRecord, exportModule,
-  runReport, exportReport, listUnits, listCurrencies, runForecast, ApiError,
+  runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, ApiError,
 } from '../api';
+import type { NewInvoiceItem } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
 import OcrImport from './OcrImport';
+import InvoiceView from '../components/InvoiceView';
 
 export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [schema, setSchema] = useState<ModuleSchema | null>(null);
@@ -38,15 +40,51 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       .finally(() => setLoading(false));
   }, [moduleId]);
 
+  const [searching, setSearching] = useState(false);
+  const [viewingInvoiceId, setViewingInvoiceId] = useState<string | null>(null);
+  const [showInvoiceForm, setShowInvoiceForm] = useState(false);
+  const skipNextSearch = useRef(true);
+
   async function refreshRecords(searchTerm?: string) {
     const r = await listRecords(moduleId, searchTerm);
     setRecords(r.records);
   }
 
-  async function handleSearch(e: React.FormEvent) {
-    e.preventDefault();
-    await refreshRecords(search || undefined);
-  }
+  // The initial module load (above) already fetches records once for
+  // the empty-search state — without this, opening a module would
+  // trigger a second, redundant fetch of the exact same data 300ms
+  // later. Reset whenever the module changes, since that's a genuinely
+  // new "initial load" this same logic applies to again.
+  useEffect(() => { skipNextSearch.current = true; }, [moduleId]);
+
+  // Live search: fires automatically ~300ms after typing stops, not on
+  // Enter/submit. Debounced rather than firing on every keystroke —
+  // typing "milk" shouldn't be four separate requests for "m", "mi",
+  // "mil", "milk". Cancels a still-pending timer if the user keeps
+  // typing before it fires, and ignores a stale in-flight response
+  // that resolves after a newer search has already started (the
+  // classic "typed fast, an old slow response overwrites new results"
+  // race a naive debounce misses).
+  useEffect(() => {
+    if (!schema) return; // don't search before the module has even loaded
+    if (skipNextSearch.current) { skipNextSearch.current = false; return; }
+    let cancelled = false;
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const r = await listRecords(moduleId, search || undefined);
+        if (!cancelled) setRecords(r.records);
+      } catch {
+        // A failed live search shouldn't blank the list or show an
+        // error banner for what's often just a mid-typing hiccup —
+        // the existing records just stay as they were.
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, moduleId, schema]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -102,21 +140,34 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       {tab === 'records' ? (
         <>
           <div style={styles.toolbar}>
-            <form onSubmit={handleSearch} style={{ display: 'flex', gap: '0.5rem', flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1, position: 'relative' }}>
               <input
                 placeholder="Search…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 style={{ flex: 1, maxWidth: 260 }}
               />
-              <button className="btn btn-outline" type="submit">Search</button>
-            </form>
+              {searching && <span style={{ fontSize: '0.75rem', color: 'var(--ink-faint)' }}>searching…</span>}
+            </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
               {canExport && <button className="btn btn-outline" onClick={() => exportModule(moduleId)}>Export to Excel</button>}
-              {canCreate && <button className="btn btn-outline" onClick={() => setShowOcrImport(true)}>Import from photo</button>}
-              {canCreate && <button className="btn btn-stamp" onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ New'}</button>}
+              {moduleId === 'invoice' ? (
+                canCreate && <button className="btn btn-stamp" onClick={() => setShowInvoiceForm((v) => !v)}>{showInvoiceForm ? 'Cancel' : '+ New invoice'}</button>
+              ) : (
+                <>
+                  {canCreate && <button className="btn btn-outline" onClick={() => setShowOcrImport(true)}>Import from photo</button>}
+                  {canCreate && <button className="btn btn-stamp" onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ New'}</button>}
+                </>
+              )}
             </div>
           </div>
+
+          {moduleId === 'invoice' && showInvoiceForm && (
+            <NewInvoiceForm
+              onCreated={() => { setShowInvoiceForm(false); refreshRecords(); }}
+              onCancel={() => setShowInvoiceForm(false)}
+            />
+          )}
 
           {showOcrImport && schema && (
             <OcrImport
@@ -127,7 +178,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             />
           )}
 
-          {showForm && (
+          {showForm && moduleId !== 'invoice' && (
             <form onSubmit={handleCreate} className="card" style={styles.form}>
               <div style={styles.formGrid}>
                 {schema.fields.map((f) => (
@@ -157,6 +208,13 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                         {formatCell(r[c])}
                       </td>
                     ))}
+                    {moduleId === 'invoice' && (
+                      <td style={styles.td}>
+                        <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => setViewingInvoiceId(r.id)}>
+                          View
+                        </button>
+                      </td>
+                    )}
                     {canDelete && (
                       <td style={styles.td}>
                         <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => handleDelete(r.id)}>Delete</button>
@@ -170,6 +228,10 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         </>
       ) : (
         <ReportPanel moduleId={moduleId} schema={schema} canExport={!!canExport} />
+      )}
+
+      {viewingInvoiceId && (
+        <InvoiceView invoiceId={viewingInvoiceId} onClose={() => setViewingInvoiceId(null)} />
       )}
     </div>
   );
@@ -352,6 +414,132 @@ function ReportPanel({ moduleId, schema, canExport }: { moduleId: string; schema
       </div>
       {numericFields.length > 0 && <ForecastPanel moduleId={moduleId} numericFields={numericFields} />}
     </>
+  );
+}
+
+function NewInvoiceForm({ onCreated, onCancel }: { onCreated: () => void; onCancel: () => void }) {
+  const [customer, setCustomer] = useState('');
+  const [customerEmail, setCustomerEmail] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
+  const [dueDate, setDueDate] = useState('');
+  const [notes, setNotes] = useState('');
+  const [items, setItems] = useState<NewInvoiceItem[]>([{ description: '', quantity: 1, unit_price: 0 }]);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const subtotal = items.reduce((sum, it) => sum + (it.quantity || 0) * (it.unit_price || 0), 0);
+
+  function updateItem(i: number, patch: Partial<NewInvoiceItem>) {
+    setItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
+  }
+  function addItem() {
+    setItems((prev) => [...prev, { description: '', quantity: 1, unit_price: 0 }]);
+  }
+  function removeItem(i: number) {
+    setItems((prev) => prev.filter((_, idx) => idx !== i));
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const cleanItems = items.filter((it) => it.description.trim() && it.quantity > 0);
+    if (cleanItems.length === 0) {
+      setError('Add at least one line item with a description and quantity.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await createInvoice({
+        customer,
+        customer_email: customerEmail || undefined,
+        customer_phone: customerPhone || undefined,
+        due_date: dueDate,
+        items: cleanItems,
+        notes: notes || undefined,
+      });
+      onCreated();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not create the invoice');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="card" style={{ marginBottom: '1rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.8rem', marginBottom: '0.8rem' }}>
+        <div>
+          <label>Customer</label>
+          <input value={customer} onChange={(e) => setCustomer(e.target.value)} required style={{ width: '100%' }} />
+        </div>
+        <div>
+          <label>Email (optional)</label>
+          <input type="email" value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)} style={{ width: '100%' }} />
+        </div>
+        <div>
+          <label>Phone (optional)</label>
+          <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} style={{ width: '100%' }} />
+        </div>
+        <div>
+          <label>Due date</label>
+          <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} required style={{ width: '100%' }} />
+        </div>
+      </div>
+
+      <label>Line items</label>
+      {items.map((it, i) => (
+        <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', alignItems: 'center' }}>
+          <input
+            placeholder="Description"
+            value={it.description}
+            onChange={(e) => updateItem(i, { description: e.target.value })}
+            style={{ flex: 2 }}
+          />
+          <input
+            type="number"
+            min={1}
+            placeholder="Qty"
+            value={it.quantity}
+            onChange={(e) => updateItem(i, { quantity: Number(e.target.value) })}
+            style={{ width: 70 }}
+          />
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            placeholder="Unit price"
+            value={it.unit_price}
+            onChange={(e) => updateItem(i, { unit_price: Number(e.target.value) })}
+            style={{ width: 110 }}
+          />
+          <span className="mono" style={{ width: 90, textAlign: 'right', fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+            {((it.quantity || 0) * (it.unit_price || 0)).toFixed(2)}
+          </span>
+          {items.length > 1 && (
+            <button type="button" className="btn btn-outline" style={{ padding: '0.2em 0.5em', fontSize: '0.75rem' }} onClick={() => removeItem(i)}>×</button>
+          )}
+        </div>
+      ))}
+      <button type="button" className="btn btn-outline" style={{ fontSize: '0.8rem', marginBottom: '0.8rem' }} onClick={addItem}>+ Add line item</button>
+
+      <div>
+        <label>Notes (optional)</label>
+        <input value={notes} onChange={(e) => setNotes(e.target.value)} style={{ width: '100%' }} />
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem', paddingTop: '0.8rem', borderTop: '1px solid var(--paper-line)' }}>
+        <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>
+          Subtotal: <span className="mono">{subtotal.toFixed(2)}</span>
+          <span style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--ink-soft)', marginLeft: '0.5rem' }}>(tax applied automatically at your business's rate)</span>
+        </div>
+        <div style={{ display: 'flex', gap: '0.6rem' }}>
+          <button type="button" className="btn btn-outline" onClick={onCancel}>Cancel</button>
+          <button type="submit" className="btn btn-stamp" disabled={saving}>{saving ? 'Creating…' : 'Create invoice'}</button>
+        </div>
+      </div>
+
+      {error && <div style={styles.error}>{error}</div>}
+    </form>
   );
 }
 

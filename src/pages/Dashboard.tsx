@@ -1,6 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, lazy, Suspense } from 'react';
 import { listModules, listRecords, getModuleSchema, runReport, listUsers, getVendorLicenseStatus, getSettings, setSetting } from '../api';
 import type { ModuleListItem } from '../types';
+
+// Lazy-loaded specifically because it's the only thing in the app that
+// pulls in recharts, which roughly doubles the JS bundle on its own —
+// no reason every screen (login, POS, admin) should pay that cost just
+// because the Dashboard exists somewhere in the app. This chunk only
+// downloads the moment someone actually views the dashboard with sales
+// data, not before.
+const AnalyticsSection = lazy(() => import('../components/AnalyticsSection'));
 
 function initials(name: string) {
   const words = name.split(/[\s/]+/).filter(Boolean);
@@ -89,6 +97,12 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
         <div style={styles.eyebrow}>Welcome back</div>
         <h1 style={{ margin: '0.15rem 0 0' }}>{businessName || 'Your business'}</h1>
       </div>
+
+      {stats.some((s) => s.module.id === 'sales') && (
+        <Suspense fallback={<div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem', marginBottom: '1.6rem' }}>Loading analytics…</div>}>
+          <AnalyticsSection />
+        </Suspense>
+      )}
 
       {showChecklist && (
         <div className="card" style={styles.checklistCard}>

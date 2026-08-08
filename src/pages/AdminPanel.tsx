@@ -5,6 +5,7 @@ import {
   listUnits, createUnit, deleteUnit,
   listCurrencies, createCurrency, deleteCurrency,
   getSettings, setSetting,
+  getAiSettings,
   getVendorLicenseStatus, redeemVendorKey,
   createBackup, restoreBackup,
   getPaymentHistory, initiateStripeCheckout, initiateMpesaPayment,
@@ -14,12 +15,12 @@ import {
   listModules, getModuleSchema, enableModule,
   ApiError,
 } from '../api';
-import type { PaymentHistoryEntry, AuditLogEntry, NotificationRecord } from '../api';
+import type { PaymentHistoryEntry, AuditLogEntry, NotificationRecord, AiSettingsStatus } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
 import BusinessBranding from '../components/BusinessBranding';
 import TwoFactorSetup from '../components/TwoFactorSetup';
 
-type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'billing' | 'audit' | 'notifications' | 'business' | 'security';
+type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'billing' | 'audit' | 'notifications' | 'business' | 'security' | 'ai';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
@@ -28,6 +29,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'currencies', label: 'Currencies' },
   { id: 'settings', label: 'Theme & Settings' },
   { id: 'business', label: 'Business' },
+  { id: 'ai', label: 'AI Settings' },
   { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'billing', label: 'Billing' },
@@ -59,6 +61,7 @@ export default function AdminPanel() {
       {tab === 'settings' && <SettingsTab />}
       {tab === 'business' && <BusinessTab />}
       {tab === 'security' && <TwoFactorSetup />}
+      {tab === 'ai' && <AiSettingsTab />}
       {tab === 'notifications' && <NotificationsTab />}
       {tab === 'license' && <VendorLicenseTab />}
       {tab === 'billing' && <BillingTab />}
@@ -1258,6 +1261,132 @@ function NotificationsTab() {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------- AI Settings
+
+const PROVIDERS = [
+  { id: 'nvidia', label: 'NVIDIA NIM', free: true, url: 'https://build.nvidia.com', keyField: 'nvidia_key_set' as const },
+  { id: 'gemini', label: 'Google Gemini', free: true, url: 'https://aistudio.google.com', keyField: 'gemini_key_set' as const },
+  { id: 'openai', label: 'OpenAI', free: false, url: 'https://platform.openai.com/api-keys', keyField: 'openai_key_set' as const },
+  { id: 'claude', label: 'Claude (Anthropic)', free: false, url: 'https://console.anthropic.com', keyField: 'claude_key_set' as const },
+];
+
+function AiSettingsTab() {
+  const [status, setStatus] = useState<AiSettingsStatus | null>(null);
+  const [provider, setProvider] = useState('nvidia');
+  const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getAiSettings()
+      .then((s) => { setStatus(s); setProvider(s.provider); })
+      .catch(() => setError('Could not load AI settings'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function saveProvider(id: string) {
+    setSaving('provider');
+    setError(null);
+    try {
+      await setSetting('ai_provider', id);
+      setProvider(id);
+      setStatus((s) => (s ? { ...s, provider: id } : s));
+      setSaved('provider');
+      setTimeout(() => setSaved(null), 2000);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function saveKey(providerId: string) {
+    const key = keyInputs[providerId]?.trim();
+    if (!key) return;
+    setSaving(providerId);
+    setError(null);
+    try {
+      await setSetting(`ai_${providerId}_api_key`, key);
+      setKeyInputs((k) => ({ ...k, [providerId]: '' }));
+      const fresh = await getAiSettings();
+      setStatus(fresh);
+      setSaved(providerId);
+      setTimeout(() => setSaved(null), 2000);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save key');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  if (loading) return <div style={{ color: 'var(--ink-soft)' }}>Loading…</div>;
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <h3 style={{ marginTop: 0 }}>AI assistant</h3>
+        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+          The AI assistant answers questions grounded in this business's own real data — it sees
+          your actual inventory, sales, and records, not just a general description of the app.
+          Pick a provider below and add its key. NVIDIA and Google both offer genuinely free tiers,
+          no card required, if you want to try this at zero cost first.
+        </p>
+        <ErrorBox error={error} />
+
+        <label>Active provider</label>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+          {PROVIDERS.map((p) => (
+            <button
+              key={p.id}
+              className={provider === p.id ? 'btn btn-stamp' : 'btn btn-outline'}
+              onClick={() => saveProvider(p.id)}
+              disabled={saving === 'provider'}
+            >
+              {p.label}{p.free && <span style={{ fontSize: '0.7rem', opacity: 0.8 }}> · free</span>}
+            </button>
+          ))}
+        </div>
+        {saved === 'provider' && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.8rem' }}>Provider saved.</div>}
+      </div>
+
+      {PROVIDERS.map((p) => {
+        const isSet = status?.[p.keyField];
+        return (
+          <div key={p.id} className="card" style={{ marginBottom: '0.8rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+              <div style={{ fontWeight: 600 }}>
+                {p.label}
+                {!p.free && <span style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', fontWeight: 400 }}> — paid, no ongoing free tier</span>}
+              </div>
+              <span className={`status-pill ${isSet ? 'status-active' : 'status-inactive'}`}>
+                {isSet ? 'Key configured' : 'Not configured'}
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <input
+                type="password"
+                placeholder={isSet ? 'Enter a new key to replace it' : 'Paste your API key here'}
+                value={keyInputs[p.id] ?? ''}
+                onChange={(e) => setKeyInputs((k) => ({ ...k, [p.id]: e.target.value }))}
+                style={{ flex: 1 }}
+              />
+              <button className="btn btn-outline" onClick={() => saveKey(p.id)} disabled={saving === p.id || !keyInputs[p.id]?.trim()}>
+                {saving === p.id ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+            {saved === p.id && <div style={{ color: 'var(--ok)', fontSize: '0.82rem', marginTop: '0.4rem' }}>Key saved.</div>}
+            <a href={p.url} target="_blank" rel="noreferrer" style={{ fontSize: '0.78rem', display: 'inline-block', marginTop: '0.5rem' }}>
+              Get a {p.free ? 'free' : ''} key at {p.url.replace('https://', '')} →
+            </a>
+          </div>
+        );
+      })}
     </div>
   );
 }

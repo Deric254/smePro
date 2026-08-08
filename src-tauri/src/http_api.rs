@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, audit, auth, backup, crud, forecast, license, notifications, ocr_import, onboarding, payment, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
+use crate::{ai_assistant, audit, auth, backup, crud, excel_import, forecast, license, notifications, ocr_import, onboarding, payment, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -179,6 +179,58 @@ fn route(
         return match crate::business_panel::resolve_single_business_id(conn) {
             Ok(id) => ApiResponse::Json(200, json!({"business_id": id})),
             Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+
+    // GET /setup/branding — public and pre-auth on purpose: the login
+    // screen needs to show a business's own logo and name BEFORE
+    // anyone has signed in (that's the entire point — a returning
+    // owner should see their own shop's identity looking back at them
+    // on the sign-in screen, not a generic placeholder). Not a
+    // security concern to expose without a session — a business's own
+    // logo/name isn't sensitive, same reasoning already applied to
+    // resolving the business ID itself above.
+    if parts.as_slice() == ["setup", "branding"] && *method == Method::Get {
+        let business_id = match crate::business_panel::resolve_single_business_id(conn) {
+            Ok(Some(id)) => id,
+            Ok(None) => return ApiResponse::Json(200, json!({"name": null, "logo_url": null, "slogan": null})),
+            Err(e) => return json_err(500, &e.to_string()),
+        };
+        return match crate::business_branding::get_branding(conn, &business_id) {
+            Ok(v) => {
+                // get_branding() returns the full stored filesystem
+                // path in logo_path — not directly usable by a
+                // frontend <img> tag. The /uploads/{filename} route
+                // only wants the filename portion, joining it with the
+                // real app data dir itself — so that's what this
+                // derives and exposes as logo_url instead of leaking
+                // the raw filesystem path to the client.
+                let logo_url = v.get("logo_path").and_then(|p| p.as_str()).and_then(|p| {
+                    std::path::Path::new(p).file_name().map(|f| format!("/uploads/{}", f.to_string_lossy()))
+                });
+                ApiResponse::Json(200, json!({
+                    "name": v.get("name"),
+                    "slogan": v.get("slogan"),
+                    "logo_url": logo_url,
+                }))
+            }
+            Err(_) => ApiResponse::Json(200, json!({"name": null, "logo_url": null, "slogan": null})),
+        };
+    }
+
+    // GET /uploads/{filename} — serves the actual logo image bytes.
+    // Public for the same reason /setup/branding above is: the login
+    // screen's <img> tag has no way to attach an Authorization header,
+    // and a business's own logo file isn't sensitive data. Path
+    // traversal is guarded inside serve_logo() itself, not here.
+    if parts.len() == 2 && parts[0] == "uploads" && *method == Method::Get {
+        let app_data_dir = std::path::PathBuf::from(
+            std::env::var("SME_APP_DATA_DIR").unwrap_or_else(|_| "./".to_string())
+        );
+        let file_path = app_data_dir.join("uploads").join(parts[1]);
+        return match crate::business_branding::serve_logo(&file_path.to_string_lossy(), &app_data_dir) {
+            Ok((mime, bytes)) => ApiResponse::Image(200, bytes, mime),
+            Err(e) => json_err(404, &e.to_string()),
         };
     }
 
@@ -714,6 +766,29 @@ fn route(
         };
     }
 
+    // GET /ai/settings — admin-only (unlike GET /settings above, which
+    // deliberately excludes API keys and stays open to every role).
+    // Returns which providers have a key configured, never the key
+    // itself — same "never show a raw secret back" discipline as any
+    // real settings screen. Saving still goes through the existing
+    // PUT /settings, already admin-gated, using keys like
+    // "ai_nvidia_api_key" — no separate write endpoint needed.
+    if parts.as_slice() == ["ai", "settings"] && *method == Method::Get {
+        if let Err(e) = rbac::require_admin_tier(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let all = match settings::get_all_including_keys(conn, &business_id) {
+            Ok(v) => v,
+            Err(e) => return json_err(500, &e.to_string()),
+        };
+        let has = |k: &str| all.get(k).and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false);
+        return ApiResponse::Json(200, json!({
+            "provider": all.get("ai_provider").and_then(Value::as_str).unwrap_or("nvidia"),
+            "nvidia_key_set": has("ai_nvidia_api_key"),
+            "gemini_key_set": has("ai_gemini_api_key"),
+            "openai_key_set": has("ai_openai_api_key"),
+            "claude_key_set": has("ai_claude_api_key"),
+        }));
+    }
+
     // ---- Payments: initiate a real checkout (Stripe) or STK push (M-Pesa) ----
     if parts.as_slice() == ["payments", "checkout"] && *method == Method::Post {
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
@@ -863,6 +938,53 @@ fn route(
             }
         }
         return ApiResponse::Json(200, json!({"created": created, "errors": errors}));
+    }
+
+    // GET /modules/{id}/import-template — a downloadable .xlsx with
+    // this module's real field names as headers, so what comes back
+    // via /import-excel below is unambiguous.
+    if parts.len() == 3 && parts[0] == "modules" && parts[2] == "import-template" && *method == Method::Get {
+        let module_id = parts[1];
+        let module = match crud::load_module(conn, &business_id, module_id) {
+            Ok(m) => m,
+            Err(e) => return json_err(404, &e.to_string()),
+        };
+        return match excel_import::generate_template(&module) {
+            Ok(bytes) => ApiResponse::Xlsx(200, bytes, format!("{module_id}_import_template.xlsx")),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+
+    // POST /modules/{id}/import-excel {"file_base64": "...", "key_field": "sku"}
+    // See excel_import.rs — creates new records or updates matching
+    // ones by key_field, same validation as a hand-typed record.
+    if parts.len() == 3 && parts[0] == "modules" && parts[2] == "import-excel" && *method == Method::Post {
+        let module_id = parts[1];
+        let module = match crud::load_module(conn, &business_id, module_id) {
+            Ok(m) => m,
+            Err(e) => return json_err(404, &e.to_string()),
+        };
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let file_b64 = match obj.get("file_base64").and_then(Value::as_str) {
+            Some(s) => s,
+            None => return json_err(400, "'file_base64' is required"),
+        };
+        let key_field = obj.get("key_field").and_then(Value::as_str).unwrap_or_else(|| {
+            module.fields.first().map(|f| f.name.as_str()).unwrap_or("id")
+        });
+        use base64::Engine;
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(file_b64) {
+            Ok(b) => b,
+            Err(e) => return json_err(400, &format!("invalid base64 file data: {e}")),
+        };
+        return match excel_import::import(conn, &business_id, &user_id, &module, bytes, key_field) {
+            Ok(result) => {
+                let _ = audit::log(conn, &business_id, Some(&user_id), module_id, "excel_import",
+                    None, Some(&json!({"created": result.created, "updated": result.updated, "error_count": result.errors.len()})));
+                ApiResponse::Json(200, json!({"created": result.created, "updated": result.updated, "errors": result.errors}))
+            }
+            Err(e) => json_err(400, &e.to_string()),
+        };
     }
 
     // ---- Point of sale: the real link between Sales and Inventory —
@@ -1200,6 +1322,24 @@ fn route(
         };
     }
 
+    // ---- Customers & lifetime value — see customers.rs. Read-only
+    // from the HTTP layer on purpose: a customer record is only ever
+    // created as a side effect of a real POS checkout, never directly. ----
+    if parts.as_slice() == ["customers"] && *method == Method::Get {
+        if let Err(e) = rbac::require(conn, &user_id, "sales", "read") { return json_err(403, &e.to_string()); }
+        return match crate::customers::list(conn, &business_id) {
+            Ok(v) => ApiResponse::Json(200, v),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    if parts.len() == 2 && parts[0] == "customers" && *method == Method::Get {
+        if let Err(e) = rbac::require(conn, &user_id, "sales", "read") { return json_err(403, &e.to_string()); }
+        return match crate::customers::detail(conn, &business_id, parts[1]) {
+            Ok(v) => ApiResponse::Json(200, v),
+            Err(e) => json_err(404, &e.to_string()),
+        };
+    }
+
     // ---- Invoices ----
     if parts.as_slice() == ["invoices"] && *method == Method::Post {
         let req: crate::invoice::CreateInvoiceRequest = match serde_json::from_str(body) {
@@ -1253,17 +1393,6 @@ fn route(
             Err(e) => json_err(400, &e.to_string()),
         };
     }
-    if parts.len() == 2 && parts[0] == "uploads" && *method == Method::Get {
-        let app_data_dir = std::path::PathBuf::from(
-            std::env::var("SME_APP_DATA_DIR").unwrap_or_else(|_| "./".to_string())
-        );
-        let file_path = app_data_dir.join("uploads").join(parts[1]);
-        return match crate::business_branding::serve_logo(&file_path.to_string_lossy(), &app_data_dir) {
-            Ok((mime, bytes)) => ApiResponse::Image(200, bytes, mime),
-            Err(e) => json_err(404, &e.to_string()),
-        };
-    }
-
     // ---- 2FA management (setup/verify/status/disable — the login-time
     // check is up in the public routes section above, alongside
     // /auth/login and /auth/2fa/login) ----

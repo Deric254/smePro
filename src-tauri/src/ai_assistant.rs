@@ -6,32 +6,69 @@ use crate::ai_context;
 
 /// Which AI backend to call. NVIDIA NIM is the default because it's
 /// genuinely free (no credit card, ~40 requests/min) and OpenAI-
-/// compatible, which keeps its request/response shape simple. Gemini
-/// and Claude are drop-in alternatives — same `ask()` function, same
-/// context-grounding behavior, just a different HTTP call underneath.
+/// compatible, which keeps its request/response shape simple. Gemini,
+/// OpenAI, and Claude are drop-in alternatives — same `ask()`
+/// function, same context-grounding behavior, just a different HTTP
+/// call underneath.
 #[derive(Debug, Clone, Copy)]
 enum Provider {
     NvidiaNim,
     Gemini,
+    OpenAi,
     Claude,
 }
 
 impl Provider {
-    fn from_env() -> Self {
-        match std::env::var("AI_PROVIDER").unwrap_or_default().to_lowercase().as_str() {
+    /// Resolves the configured provider — checks the business's own
+    /// stored setting first (set via Admin → AI Settings, the only
+    /// path a real customer can actually reach), falling back to the
+    /// AI_PROVIDER environment variable for local development
+    /// convenience, and finally to the free default if neither is set.
+    fn resolve(conn: &Connection, business_id: &str) -> Self {
+        let stored = crate::settings::get(conn, business_id, "ai_provider");
+        let raw = stored.unwrap_or_else(|| std::env::var("AI_PROVIDER").unwrap_or_default());
+        match raw.to_lowercase().as_str() {
             "gemini" => Provider::Gemini,
+            "openai" => Provider::OpenAi,
             "claude" | "anthropic" => Provider::Claude,
             _ => Provider::NvidiaNim, // default: free, no card required
         }
     }
 }
 
-/// Answers a free-form business question, grounded in a real snapshot of
-/// the business's own data (see ai_context.rs). The provider is chosen
-/// by the AI_PROVIDER env var (defaults to NVIDIA NIM, which is free).
-/// Every other feature in the app works with zero AI configuration —
-/// this function returns a clear, actionable error if the selected
-/// provider's API key isn't set, rather than crashing.
+/// Reads an API key for `provider_key` (e.g. "nvidia") — the stored
+/// setting first (Admin → AI Settings), then the matching environment
+/// variable as a fallback for local dev. Returns a clear, actionable
+/// error naming exactly where to go fix it, rather than a bare "not
+/// configured."
+fn resolve_key(conn: &Connection, business_id: &str, provider_key: &str, env_var: &str, free_url: Option<&str>) -> Result<String> {
+    let setting_key = format!("ai_{provider_key}_api_key");
+    if let Some(k) = crate::settings::get(conn, business_id, &setting_key) {
+        if !k.trim().is_empty() {
+            return Ok(k);
+        }
+    }
+    if let Ok(k) = std::env::var(env_var) {
+        if !k.trim().is_empty() {
+            return Ok(k);
+        }
+    }
+    let hint = free_url
+        .map(|u| format!(" — free, no credit card, get one at {u}"))
+        .unwrap_or_default();
+    Err(anyhow!(
+        "AI assistant not configured for this provider{hint}. Add a key under Admin → AI Settings. \
+         Everything else in the app works without this."
+    ))
+}
+
+/// Answers a free-form business question, grounded in a real snapshot
+/// of the business's own data (see ai_context.rs) — the assistant
+/// genuinely sees real current numbers, not a static description of
+/// what the app can do. The provider and its key are resolved from
+/// this business's own AI Settings, not a shared/global config, so
+/// each business brings its own key to its own account with whichever
+/// provider they've chosen.
 pub fn ask(conn: &Connection, business_id: &str, user_id: &str, question: &str) -> Result<String> {
     let snapshot = ai_context::build_snapshot(conn, business_id, user_id)?;
     let system_prompt = format!(
@@ -44,10 +81,11 @@ pub fn ask(conn: &Connection, business_id: &str, user_id: &str, question: &str) 
         serde_json::to_string_pretty(&snapshot)?
     );
 
-    match Provider::from_env() {
-        Provider::NvidiaNim => ask_nvidia_nim(&system_prompt, question),
-        Provider::Gemini => ask_gemini(&system_prompt, question),
-        Provider::Claude => ask_claude(&system_prompt, question),
+    match Provider::resolve(conn, business_id) {
+        Provider::NvidiaNim => ask_nvidia_nim(conn, business_id, &system_prompt, question),
+        Provider::Gemini => ask_gemini(conn, business_id, &system_prompt, question),
+        Provider::OpenAi => ask_openai(conn, business_id, &system_prompt, question),
+        Provider::Claude => ask_claude(conn, business_id, &system_prompt, question),
     }
 }
 
@@ -57,17 +95,14 @@ fn tls_agent() -> Result<ureq::Agent> {
     Ok(ureq::AgentBuilder::new().build())
 }
 
+fn model_for(conn: &Connection, business_id: &str, provider_key: &str, default: &str) -> String {
+    crate::settings::get(conn, business_id, &format!("ai_{provider_key}_model")).unwrap_or_else(|| default.to_string())
+}
+
 /// NVIDIA NIM — free tier, OpenAI-compatible chat completions API.
-/// Get a key (no credit card) at https://build.nvidia.com
-fn ask_nvidia_nim(system_prompt: &str, question: &str) -> Result<String> {
-    let api_key = std::env::var("NVIDIA_API_KEY").map_err(|_| {
-        anyhow!(
-            "AI assistant not configured: set NVIDIA_API_KEY (free, no credit card, get one at \
-             https://build.nvidia.com) or switch AI_PROVIDER to 'gemini'/'claude'. \
-             Everything else in the app works without this."
-        )
-    })?;
-    let model = std::env::var("NVIDIA_MODEL").unwrap_or_else(|_| "deepseek-ai/deepseek-v4-pro".to_string());
+fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
+    let api_key = resolve_key(conn, business_id, "nvidia", "NVIDIA_API_KEY", Some("https://build.nvidia.com"))?;
+    let model = model_for(conn, business_id, "nvidia", "deepseek-ai/deepseek-v4-pro");
 
     let body = json!({
         "model": model,
@@ -103,16 +138,10 @@ fn ask_nvidia_nim(system_prompt: &str, question: &str) -> Result<String> {
 /// Google Gemini — free tier (Flash / Flash-Lite), no credit card.
 /// Note: on the free tier, Google's terms allow using your prompts to
 /// improve their models — flag this to the business owner if the data
-/// they're asking about is sensitive. Get a key at https://aistudio.google.com
-fn ask_gemini(system_prompt: &str, question: &str) -> Result<String> {
-    let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| {
-        anyhow!(
-            "AI assistant not configured: set GOOGLE_API_KEY (free tier, get one at \
-             https://aistudio.google.com) or switch AI_PROVIDER to 'nvidia_nim'/'claude'. \
-             Everything else in the app works without this."
-        )
-    })?;
-    let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string());
+/// they're asking about is sensitive.
+fn ask_gemini(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
+    let api_key = resolve_key(conn, business_id, "gemini", "GOOGLE_API_KEY", Some("https://aistudio.google.com"))?;
+    let model = model_for(conn, business_id, "gemini", "gemini-2.5-flash");
 
     let body = json!({
         "systemInstruction": { "parts": [{ "text": system_prompt }] },
@@ -138,16 +167,50 @@ fn ask_gemini(system_prompt: &str, question: &str) -> Result<String> {
     }
 }
 
-/// Claude — paid, no free tier, but included since it's Anthropic's own
-/// model and may be worth it once the business is generating revenue.
-fn ask_claude(system_prompt: &str, question: &str) -> Result<String> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-        anyhow!(
-            "AI assistant not configured: set ANTHROPIC_API_KEY or switch AI_PROVIDER to \
-             'nvidia_nim' (free) or 'gemini' (free tier). Everything else in the app works without this."
-        )
-    })?;
-    let model = std::env::var("CLAUDE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+/// OpenAI — paid (has a small free trial credit for new accounts, not
+/// an ongoing free tier). Chat completions API, same shape as NVIDIA
+/// NIM since NIM deliberately mirrors it.
+fn ask_openai(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
+    let api_key = resolve_key(conn, business_id, "openai", "OPENAI_API_KEY", None)?;
+    let model = model_for(conn, business_id, "openai", "gpt-4o-mini");
+
+    let body = json!({
+        "model": model,
+        "max_tokens": 500,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": question }
+        ]
+    });
+
+    let agent = tls_agent()?;
+    let response = agent
+        .post("https://api.openai.com/v1/chat/completions")
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("content-type", "application/json")
+        .send_json(body);
+
+    match response {
+        Ok(resp) => {
+            let parsed: serde_json::Value = resp.into_json()?;
+            parsed["choices"][0]["message"]["content"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow!("unexpected response shape from OpenAI"))
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            Err(anyhow!("OpenAI API returned {code}: {}", resp.into_string().unwrap_or_default()))
+        }
+        Err(e) => Err(anyhow!("failed to reach OpenAI API: {e}")),
+    }
+}
+
+/// Claude — paid, no ongoing free tier, but included since it's
+/// Anthropic's own model and may be worth it once the business is
+/// generating revenue.
+fn ask_claude(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
+    let api_key = resolve_key(conn, business_id, "claude", "ANTHROPIC_API_KEY", None)?;
+    let model = model_for(conn, business_id, "claude", "claude-sonnet-4-6");
 
     let body = json!({
         "model": model,

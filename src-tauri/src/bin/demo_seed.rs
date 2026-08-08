@@ -18,6 +18,7 @@ fn main() -> Result<()> {
     business_panel::enable_module(&mut conn, &business_id, "modules/purchasing.json")?;
     business_panel::enable_module(&mut conn, &business_id, "modules/debt_credit.json")?;
     business_panel::enable_module(&mut conn, &business_id, "modules/refunds.json")?;
+    business_panel::enable_module(&mut conn, &business_id, "modules/invoice.json")?;
 
     let owner_password_hash = auth::hash_secret("correct horse battery staple")?;
     let owner_id = business_panel::add_user(&conn, &business_id, "nia", &owner_password_hash, "Owner")?;

@@ -60,6 +60,12 @@ pub struct CheckoutRequest {
     pub on_credit: bool,
     #[serde(default)]
     pub due_date: Option<String>,
+    /// Optional — most sales stay anonymous, this only activates when
+    /// a phone number is actually given. When present, finds-or-creates
+    /// a customer record and links this sale to it (see customers.rs),
+    /// which is what makes lifetime value tracking possible at all.
+    #[serde(default)]
+    pub customer_phone: Option<String>,
 }
 
 /// Runs the whole checkout as one atomic transaction. On success,
@@ -97,6 +103,17 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     let mut subtotal = 0.0_f64;
 
     let tx = conn.transaction()?;
+
+    // Same transaction as everything else below — if the customer
+    // gets created/updated but the sale itself fails partway through,
+    // the whole thing rolls back together, not a customer record left
+    // behind with no matching purchase.
+    let customer_id = match &req.customer_phone {
+        Some(phone) if !phone.trim().is_empty() => {
+            Some(crate::customers::find_or_create(&tx, business_id, req.customer.as_deref(), phone)?)
+        }
+        _ => None,
+    };
 
     for item in &req.items {
         if item.quantity <= 0 {
@@ -137,6 +154,11 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         record.insert("order_id".into(), json!(order_id));
         if let Some(c) = &req.customer {
             record.insert("customer".into(), json!(c));
+        }
+        if let Some(phone) = &req.customer_phone {
+            if !phone.trim().is_empty() {
+                record.insert("customer_phone".into(), json!(phone.trim()));
+            }
         }
         if let Some(p) = &req.payment_method {
             record.insert("payment_method".into(), json!(p));
@@ -203,6 +225,7 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     let summary = json!({
         "order_id": order_id,
         "customer": req.customer,
+        "customer_id": customer_id,
         "payment_method": req.payment_method,
         "subtotal": subtotal,
         "item_count": req.items.len(),

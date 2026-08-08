@@ -111,6 +111,7 @@ sha2 = "=0.10.8"
 hex = "=0.4.3"
 totp-rs = { version = "=5.7.2", default-features = false, features = ["gen_secret", "otpauth"] }
 regex = "1.10"
+calamine = "=0.26.1"
 
 [dependencies.base64ct]
 version = "=1.6.0"

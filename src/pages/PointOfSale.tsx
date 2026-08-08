@@ -30,6 +30,7 @@ export default function PointOfSale() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [customer, setCustomer] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
   const [onCredit, setOnCredit] = useState(false);
   const [dueDate, setDueDate] = useState('');
   const [allowOversell, setAllowOversell] = useState(false);
@@ -110,10 +111,24 @@ export default function PointOfSale() {
 
   useEffect(() => {
     let cancelled = false;
-    listRecords('inventory', search || undefined)
-      .then((r) => { if (!cancelled) setProducts(r.records); })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    const timer = setTimeout(() => {
+      listRecords('inventory', search || undefined)
+        .then((r) => {
+          if (cancelled) return;
+          // Highest stock first by default — the products a cashier is
+          // most likely to be selling right now, front and center,
+          // without having to search for them. A search term still
+          // takes over the ordering the backend itself returns for
+          // that search, this sort only applies to the "browse
+          // everything" no-search-term view.
+          const sorted = search
+            ? r.records
+            : [...r.records].sort((a, b) => Number(b.quantity ?? 0) - Number(a.quantity ?? 0));
+          setProducts(sorted);
+        })
+        .catch(() => {});
+    }, search ? 250 : 0); // instant on initial load / cleared search, debounced while typing
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [search]);
 
   function addToCart(p: Record_) {
@@ -143,6 +158,33 @@ export default function PointOfSale() {
 
   const subtotal = cart.reduce((sum, c) => sum + c.unit_price * c.quantity, 0);
 
+  // Enter finalizes the sale; Enter again (once the receipt is
+  // showing) starts the next one — the actual, honest version of "one
+  // key does the next thing," without pretending this can also fire a
+  // printer silently with no dialog, which isn't something a webview
+  // can do on any platform.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Enter') return;
+      if (mode !== 'sell') return;
+      const target = e.target as HTMLElement;
+      // Typing in the product search box: Enter shouldn't hijack that
+      // into finalizing a sale mid-search.
+      if (target?.tagName === 'INPUT' && target.getAttribute('placeholder') === 'Search products…') return;
+
+      if (receipt) {
+        e.preventDefault();
+        newSale();
+      } else if (cart.length > 0 && !loading) {
+        e.preventDefault();
+        handleCheckout();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, cart, receipt, loading]);
+
   async function handleCheckout() {
     if (cart.length === 0) return;
     setError(null);
@@ -152,6 +194,7 @@ export default function PointOfSale() {
         items: cart.map((c) => ({ inventory_record_id: c.inventory_record_id, quantity: c.quantity })),
         payment_method: onCredit ? undefined : paymentMethod,
         customer: customer || undefined,
+        customer_phone: customerPhone || undefined,
         allow_oversell: allowOversell,
         on_credit: onCredit,
         due_date: onCredit ? (dueDate || undefined) : undefined,
@@ -159,6 +202,7 @@ export default function PointOfSale() {
       setReceipt(result);
       setCart([]);
       setCustomer('');
+      setCustomerPhone('');
       setDueDate('');
       setOnCredit(false);
     } catch (err) {
@@ -377,10 +421,21 @@ export default function PointOfSale() {
             <span>{subtotal.toFixed(2)}</span>
           </div>
 
-          <div style={{ marginTop: '1rem' }}>
-            <label>Customer (optional)</label>
-            <input value={customer} onChange={(e) => setCustomer(e.target.value)} style={{ width: '100%' }} />
+          <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem' }}>
+            <div>
+              <label>Customer name (optional)</label>
+              <input value={customer} onChange={(e) => setCustomer(e.target.value)} style={{ width: '100%' }} />
+            </div>
+            <div>
+              <label>Phone (optional)</label>
+              <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} style={{ width: '100%' }} placeholder="e.g. 0712345678" />
+            </div>
           </div>
+          {customerPhone.trim() && (
+            <div style={{ fontSize: '0.75rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
+              Saved to your customer list — see their full purchase history under Admin → Customers.
+            </div>
+          )}
 
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', textTransform: 'none', fontSize: '0.85rem', marginTop: '0.8rem', cursor: 'pointer' }}>
             <input type="checkbox" checked={onCredit} onChange={(e) => setOnCredit(e.target.checked)} />

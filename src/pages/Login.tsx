@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { login, login2fa, setSession, getResolvedBusinessId, recoverViaSecurityQuestions, recoverViaAdminCode, ApiError } from '../api';
+import { login, login2fa, setSession, getResolvedBusinessId, getPublicBranding, recoverViaSecurityQuestions, recoverViaAdminCode, API_BASE, ApiError } from '../api';
 
 type Mode = 'login' | '2fa' | 'recover-questions' | 'recover-admin-code' | 'recover-success';
 
@@ -24,6 +24,12 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [adminCode, setAdminCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
+
+  const [branding, setBranding] = useState<{ name: string | null; logo_url: string | null; slogan: string | null }>({ name: null, logo_url: null, slogan: null });
+
+  useEffect(() => {
+    getPublicBranding().then(setBranding).catch(() => {});
+  }, []);
 
   useEffect(() => {
     // The overwhelmingly common case: one installed copy of this app,
@@ -119,12 +125,23 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     <div style={styles.wrap}>
       <div className="card" style={styles.card}>
         <div style={styles.stampRow}>
-          <div className="stamp-badge" style={{ color: 'var(--stamp)', width: '3.2rem', height: '3.2rem', fontSize: '1.3rem' }}>
-            SP
-          </div>
+          {branding.logo_url ? (
+            <img
+              src={`${API_BASE}${branding.logo_url}`}
+              alt={branding.name || 'Business logo'}
+              style={{ width: '3.2rem', height: '3.2rem', objectFit: 'contain', borderRadius: 6, background: '#fff', border: '1px solid var(--paper-line)' }}
+            />
+          ) : (
+            <div className="stamp-badge" style={{ color: 'var(--stamp)', width: '3.2rem', height: '3.2rem', fontSize: '1.3rem' }}>
+              SP
+            </div>
+          )}
           <div>
-            <div style={styles.eyebrow}>SME Pro</div>
+            <div style={styles.eyebrow}>{branding.name || 'SME Pro'}</div>
             <h1 style={{ margin: 0 }}>{mode === 'login' ? 'Sign in' : mode === '2fa' ? 'Verify your identity' : 'Reset your password'}</h1>
+            {branding.slogan && mode === 'login' && (
+              <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', fontStyle: 'italic', marginTop: '0.15rem' }}>{branding.slogan}</div>
+            )}
           </div>
         </div>
 

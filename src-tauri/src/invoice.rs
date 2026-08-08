@@ -85,11 +85,9 @@ pub fn create_invoice(
     let items_json = serde_json::to_string(&req.items)?;
     let today = chrono::Utc::now().date_naive().to_string();
 
-    let record = serde_json::Map::from_iter([
+    let mut record = serde_json::Map::from_iter([
         ("invoice_number".into(), json!(invoice_number)),
         ("customer".into(), json!(req.customer.trim())),
-        ("customer_email".into(), json!(req.customer_email)),
-        ("customer_phone".into(), json!(req.customer_phone)),
         ("issue_date".into(), json!(today)),
         ("due_date".into(), json!(req.due_date)),
         ("status".into(), json!("draft")),
@@ -98,9 +96,19 @@ pub fn create_invoice(
         ("tax_rate".into(), json!(tax_rate)),
         ("tax_amount".into(), json!(tax_amount)),
         ("total".into(), json!(total)),
-        ("notes".into(), json!(req.notes)),
-        ("source_sale_id".into(), json!(req.source_sale_id)),
     ]);
+    // Optional fields are only inserted when actually present — an
+    // explicit JSON null (what `json!(None::<String>)` produces) is a
+    // PRESENT key holding the wrong type as far as validation is
+    // concerned, not an absent one. The validator correctly treats a
+    // genuinely missing key as "optional, nothing given" but correctly
+    // rejects null where a text value was expected — this is what was
+    // breaking creation of every invoice that left any optional field
+    // blank, which in practice was nearly all of them.
+    if let Some(v) = &req.customer_email { record.insert("customer_email".into(), json!(v)); }
+    if let Some(v) = &req.customer_phone { record.insert("customer_phone".into(), json!(v)); }
+    if let Some(v) = &req.notes { record.insert("notes".into(), json!(v)); }
+    if let Some(v) = &req.source_sale_id { record.insert("source_sale_id".into(), json!(v)); }
 
     let id = crud::create(conn, business_id, user_id, "invoice", &record)?;
 

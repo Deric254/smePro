@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { ModuleListItem } from '../types';
 
 function initials(name: string) {
@@ -21,6 +22,20 @@ export default function Sidebar({
   mobileOpen?: boolean;
   onCloseMobile?: () => void;
 }) {
+  // Remembers whether "Operations" is expanded across visits — a
+  // once-off collapse shouldn't reset itself every time the app opens.
+  const [operationsOpen, setOperationsOpen] = useState(() => {
+    try { return localStorage.getItem('sidebar_operations_open') !== 'false'; } catch { return true; }
+  });
+
+  function toggleOperations() {
+    setOperationsOpen((prev) => {
+      const next = !prev;
+      try { localStorage.setItem('sidebar_operations_open', String(next)); } catch { /* not critical */ }
+      return next;
+    });
+  }
+
   // Tapping any nav item closes the drawer on mobile — on desktop
   // onCloseMobile is either absent or a harmless no-op, since the
   // sidebar isn't a drawer there in the first place.
@@ -28,6 +43,13 @@ export default function Sidebar({
     onSelect(id);
     onCloseMobile?.();
   }
+
+  const enabledModules = modules.filter((m) => m.enabled);
+  // A module stays visible in its group even while collapsed, IF it's
+  // the one currently open — collapsing "Operations" while you're
+  // sitting inside Inventory shouldn't make Inventory disappear from
+  // the nav and leave you with no way to tell where you are.
+  const activeModuleIsHidden = !operationsOpen && enabledModules.some((m) => m.id === selected);
 
   return (
     <nav className={`app-sidebar${mobileOpen ? ' mobile-open' : ''}`}>
@@ -69,24 +91,49 @@ export default function Sidebar({
           <span>Sell</span>
         </button>
 
-        {modules.filter((m) => m.enabled).map((m) => (
-          <button
-            key={m.id}
-            onClick={() => select(m.id)}
-            style={{ ...styles.item, ...(selected === m.id ? styles.itemActive : {}) }}
+        <button
+          onClick={() => select('__customers__')}
+          style={{ ...styles.item, ...(selected === '__customers__' ? styles.itemActive : {}) }}
+        >
+          <span
+            className="stamp-badge"
+            style={{
+              width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
+              color: selected === '__customers__' ? 'var(--stamp)' : 'var(--ink-faint)',
+            }}
           >
-            <span
-              className="stamp-badge"
-              style={{
-                width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
-                color: selected === m.id ? 'var(--stamp)' : 'var(--ink-faint)',
-              }}
-            >
-              {initials(m.display_name)}
-            </span>
-            <span>{m.display_name}</span>
-          </button>
-        ))}
+            ♥
+          </span>
+          <span>Customers</span>
+        </button>
+
+        {enabledModules.length > 0 && (
+          <>
+            <button onClick={toggleOperations} style={styles.groupHeader}>
+              <span style={{ transform: operationsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s ease', display: 'inline-block', fontSize: '0.7rem' }}>▶</span>
+              <span>Operations</span>
+            </button>
+
+            {(operationsOpen || activeModuleIsHidden) && enabledModules.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => select(m.id)}
+                style={{ ...styles.item, ...styles.subItem, ...(selected === m.id ? styles.itemActive : {}) }}
+              >
+                <span
+                  className="stamp-badge"
+                  style={{
+                    width: '1.7rem', height: '1.7rem', fontSize: '0.65rem',
+                    color: selected === m.id ? 'var(--stamp)' : 'var(--ink-faint)',
+                  }}
+                >
+                  {initials(m.display_name)}
+                </span>
+                <span>{m.display_name}</span>
+              </button>
+            ))}
+          </>
+        )}
       </div>
 
       <div style={styles.footer}>
@@ -121,5 +168,12 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'transparent', border: 'none', borderRadius: 3, padding: '0.5rem 0.6rem',
     fontSize: '0.88rem', color: 'var(--ink)', fontFamily: 'var(--font-body)',
   },
+  subItem: { paddingLeft: '0.9rem' },
   itemActive: { background: 'var(--stamp-wash)', fontWeight: 600 },
+  groupHeader: {
+    display: 'flex', alignItems: 'center', gap: '0.5rem', textAlign: 'left',
+    background: 'transparent', border: 'none', padding: '0.7rem 0.6rem 0.35rem',
+    fontSize: '0.7rem', color: 'var(--ink-faint)', fontFamily: 'var(--font-body)',
+    textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginTop: '0.3rem',
+  },
 };

@@ -199,3 +199,23 @@ CREATE TABLE IF NOT EXISTS business_settings (
     updated_at    TEXT NOT NULL,
     PRIMARY KEY (business_id, key)
 );
+
+-- Captured automatically from POS checkout when a cashier enters a
+-- name/phone (both optional — most sales are still fully anonymous,
+-- this only exists for the ones where a customer's own details were
+-- given). Phone is the dedup key: the same phone number on a later
+-- sale updates this row rather than creating a duplicate customer,
+-- since a name alone is not reliably unique ("John" shows up a lot).
+-- Lifetime value itself is NOT stored here — it's computed on read
+-- from the sales records matching this phone number, so it's always
+-- exactly correct against the real transaction history, never a
+-- cached number that can drift out of sync with reality.
+CREATE TABLE IF NOT EXISTS customers (
+    id            TEXT PRIMARY KEY,
+    business_id   TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    name          TEXT,
+    phone         TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    UNIQUE(business_id, phone)
+);
