@@ -44,6 +44,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Same system libraries the desktop (ubuntu-24.04) build already
+      # installs, and for the same reason: this job now compiles the
+      # real `tauri` crate too (via `cargo test --lib`, which builds
+      # the whole crate including its real GUI dependencies, not just
+      # the test code) — without these, gtk/glib-related sys crates
+      # fail at their own build-script step looking for system
+      # libraries that were never installed on this runner.
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
