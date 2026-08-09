@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, audit, auth, backup, crud, excel_import, forecast, license, notifications, ocr_import, onboarding, payment, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
+use crate::{ai_assistant, audit, auth, backup, crud, excel_import, forecast, notifications, ocr_import, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -53,10 +53,9 @@ pub fn serve(conn: Connection, addr: &str) {
         let bearer = header_value(request.headers(), "Authorization")
             .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
         let business_id_header = header_value(request.headers(), "X-Business-Id");
-        let stripe_sig_header = header_value(request.headers(), "Stripe-Signature");
 
         let mut conn_guard = conn.lock().unwrap();
-        let response = route(&mut conn_guard, &method, &url, &body_str, bearer.as_deref(), business_id_header.as_deref(), stripe_sig_header.as_deref(), &auth_limiter);
+        let response = route(&mut conn_guard, &method, &url, &body_str, bearer.as_deref(), business_id_header.as_deref(), &auth_limiter);
         drop(conn_guard);
 
         let http_response = match response {
@@ -150,7 +149,6 @@ fn route(
     body: &str,
     bearer: Option<&str>,
     business_id_header: Option<&str>,
-    stripe_sig_header: Option<&str>,
     auth_limiter: &RateLimiter,
 ) -> ApiResponse {
     let path = url.split('?').next().unwrap_or("");
@@ -429,38 +427,6 @@ fn route(
     // token). Stripe's request is authenticated instead by its own
     // signature header; M-Pesa's is trusted based on the CheckoutRequestID
     // matching a pending intent we ourselves created.
-    if parts.as_slice() == ["payments", "webhook", "stripe"] && *method == Method::Post {
-        let secret = match std::env::var("STRIPE_WEBHOOK_SECRET") {
-            Ok(s) => s,
-            Err(_) => return json_err(501, "Stripe webhook secret not configured"),
-        };
-        let sig_header = match stripe_sig_header {
-            Some(h) => h,
-            None => return json_err(400, "missing Stripe-Signature header"),
-        };
-        if let Err(e) = payment::stripe::verify_webhook_signature(body, sig_header, &secret) {
-            return json_err(400, &e.to_string());
-        }
-        let event: Value = match serde_json::from_str(body) {
-            Ok(v) => v,
-            Err(_) => return json_err(400, "invalid JSON body"),
-        };
-        return match payment::stripe::handle_webhook_event(conn, &event) {
-            Ok(()) => ApiResponse::Json(200, json!({"received": true})),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["payments", "webhook", "mpesa"] && *method == Method::Post {
-        let parsed: Value = match serde_json::from_str(body) {
-            Ok(v) => v,
-            Err(_) => return json_err(400, "invalid JSON body"),
-        };
-        return match payment::mpesa::handle_callback(conn, &parsed) {
-            Ok(()) => ApiResponse::Json(200, json!({"ResultCode": 0, "ResultDesc": "Accepted"})),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-
     // ---- Protected routes ----
     let token = match bearer { Some(t) => t, None => return json_err(401, "missing Authorization: Bearer <token>") };
     match crate::security::check_session_expired(conn, token) {
@@ -476,30 +442,10 @@ fn route(
     if parts.as_slice() == ["auth", "logout"] && *method == Method::Post {
         return match auth::logout(conn, token) { Ok(()) => ApiResponse::Json(200, json!({"logged_out": true})), Err(e) => json_err(400, &e.to_string()) };
     }
-    if parts.as_slice() == ["license", "activate"] && *method == Method::Post {
-        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
-        return match license::activate(conn, &business_id) {
-            Ok(()) => {
-                let _ = audit::log(conn, &business_id, Some(&user_id), "_license", "activate", None, None);
-                ApiResponse::Json(200, json!({"activated": true}))
-            }
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["license", "pay"] && *method == Method::Post {
-        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
-        return match license::record_payment(conn, &business_id) {
-            Ok(()) => {
-                let _ = audit::log(conn, &business_id, Some(&user_id), "_license", "manual_payment", None, None);
-                ApiResponse::Json(200, json!({"paid": true}))
-            }
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-    // POST /license/vendor/redeem {"key": "LKC-...."} — one-time
-    // activation of a vendor-issued license key, locked to this device by
-    // the vendor's own authority server (VENDOR_LICENSE_URL). Owner-only,
-    // same tier as every other license/billing action.
+    // POST /license/vendor/redeem {"key": "SPK-...."} — one-time,
+    // fully offline activation of a vendor-issued license key. See
+    // vendor_license.rs for the full design and its honest trade-off.
+    // Owner-only.
     if parts.as_slice() == ["license", "vendor", "redeem"] && *method == Method::Post {
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
         let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
@@ -569,10 +515,6 @@ fn route(
             Ok((name, currency, logo_path)) => ApiResponse::Json(200, json!({"name": name, "currency": currency, "logo_path": logo_path})),
             Err(e) => json_err(500, &e.to_string()),
         };
-    }
-
-    if parts.as_slice() == ["license", "status"] && *method == Method::Get {
-        return match license::check_status(conn, &business_id) { Ok(s) => ApiResponse::Json(200, license_status_json(s)), Err(e) => json_err(400, &e.to_string()) };
     }
 
     // ---- Users — Owner-only. Missing entirely before this: the only
@@ -790,87 +732,6 @@ fn route(
     }
 
     // ---- Payments: initiate a real checkout (Stripe) or STK push (M-Pesa) ----
-    if parts.as_slice() == ["payments", "checkout"] && *method == Method::Post {
-        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let purpose = match obj.get("purpose").and_then(Value::as_str).map(payment::Purpose::parse) {
-            Some(Ok(p)) => p,
-            Some(Err(e)) => return json_err(400, &e.to_string()),
-            None => return json_err(400, "'purpose' is required: 'activation' or 'subscription'"),
-        };
-        let amount = match obj.get("amount").and_then(Value::as_f64) {
-            Some(a) if a > 0.0 => a,
-            _ => return json_err(400, "'amount' is required and must be positive"),
-        };
-        let provider = obj.get("provider").and_then(Value::as_str)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| std::env::var("PAYMENT_PROVIDER").unwrap_or_else(|_| "stripe".to_string()));
-
-        return match provider.as_str() {
-            "stripe" => {
-                let currency = obj.get("currency").and_then(Value::as_str).unwrap_or("usd");
-                let success_url = obj.get("success_url").and_then(Value::as_str).unwrap_or("https://example.com/payment-success");
-                let cancel_url = obj.get("cancel_url").and_then(Value::as_str).unwrap_or("https://example.com/payment-cancelled");
-                match payment::stripe::create_checkout_session(conn, &business_id, purpose, amount, currency, success_url, cancel_url) {
-                    Ok(checkout_url) => {
-                        let _ = audit::log(conn, &business_id, Some(&user_id), "_payments", "checkout_initiated",
-                            None, Some(&json!({"provider": "stripe", "purpose": purpose.as_str(), "amount": amount, "currency": currency})));
-                        ApiResponse::Json(200, json!({"provider": "stripe", "checkout_url": checkout_url}))
-                    }
-                    Err(e) => json_err(502, &e.to_string()),
-                }
-            }
-            "mpesa" => {
-                let phone = match obj.get("phone").and_then(Value::as_str) {
-                    Some(p) => p,
-                    None => return json_err(400, "'phone' is required for M-Pesa (format: 2547XXXXXXXX)"),
-                };
-                let callback_url = std::env::var("MPESA_CALLBACK_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:8080/payments/webhook/mpesa".to_string());
-                match payment::mpesa::initiate_stk_push(conn, &business_id, purpose, amount, phone, &callback_url) {
-                    Ok(checkout_request_id) => {
-                        let _ = audit::log(conn, &business_id, Some(&user_id), "_payments", "checkout_initiated",
-                            None, Some(&json!({"provider": "mpesa", "purpose": purpose.as_str(), "amount": amount, "phone": phone})));
-                        ApiResponse::Json(200, json!({
-                            "provider": "mpesa",
-                            "checkout_request_id": checkout_request_id,
-                            "message": "Check your phone to complete the M-Pesa payment"
-                        }))
-                    }
-                    Err(e) => json_err(502, &e.to_string()),
-                }
-            }
-            other => json_err(400, &format!("unknown provider '{other}', expected 'stripe' or 'mpesa'")),
-        };
-    }
-
-    if parts.as_slice() == ["payments", "history"] && *method == Method::Get {
-        if let Err(e) = rbac::require_admin_tier(conn, &user_id) { return json_err(403, &e.to_string()); }
-        let mut stmt = match conn.prepare(
-            "SELECT provider, provider_reference, purpose, amount, currency, status, created_at, completed_at
-             FROM payment_intents WHERE business_id = ?1 ORDER BY created_at DESC LIMIT 50",
-        ) {
-            Ok(s) => s,
-            Err(e) => return json_err(500, &e.to_string()),
-        };
-        let rows = stmt.query_map(rusqlite::params![business_id], |r| {
-            Ok(json!({
-                "provider": r.get::<_, String>(0)?,
-                "reference": r.get::<_, String>(1)?,
-                "purpose": r.get::<_, String>(2)?,
-                "amount": r.get::<_, f64>(3)?,
-                "currency": r.get::<_, String>(4)?,
-                "status": r.get::<_, String>(5)?,
-                "created_at": r.get::<_, String>(6)?,
-                "completed_at": r.get::<_, Option<String>>(7)?,
-            }))
-        });
-        return match rows.and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>()) {
-            Ok(list) => ApiResponse::Json(200, json!({"payments": list})),
-            Err(e) => json_err(500, &e.to_string()),
-        };
-    }
-
     // ---- OCR import: photograph a paper ledger, extract text, propose candidate records ----
     if parts.as_slice() == ["import", "ocr", "extract"] && *method == Method::Post {
         let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "body must include 'image_base64'") };
@@ -1214,12 +1075,9 @@ fn route(
         };
     }
 
-    // ---- Raw data export: /modules/{id}/export — real .xlsx, license-gated ----
+    // ---- Raw data export: /modules/{id}/export — real .xlsx ----
     if parts.len() == 3 && parts[0] == "modules" && parts[2] == "export" && *method == Method::Get {
         let module_id = parts[1];
-        if let Err(e) = license::require_export_allowed(conn, &business_id) {
-            return json_err(402, &e.to_string());
-        }
         return match crud::list(conn, &business_id, &user_id, module_id, None, 100000, 0) {
             Ok(records) => match xlsx_export::records_to_xlsx(&records, module_id) {
                 Ok(bytes) => {
@@ -1243,12 +1101,9 @@ fn route(
         };
     }
 
-    // ---- Report export: same params, but returns .xlsx, license-gated ----
+    // ---- Report export: same params, but returns .xlsx ----
     if parts.len() == 4 && parts[0] == "modules" && parts[2] == "report" && parts[3] == "export" && *method == Method::Get {
         let module_id = parts[1];
-        if let Err(e) = license::require_export_allowed(conn, &business_id) {
-            return json_err(402, &e.to_string());
-        }
         let q = query_params(url);
         return match build_report(conn, &business_id, &user_id, module_id, &q) {
             Ok(points) => {
@@ -1557,14 +1412,4 @@ fn crud_error(e: &anyhow::Error) -> ApiResponse {
     let msg = e.to_string();
     let status = if msg.starts_with(rbac::PERMISSION_DENIED_PREFIX) { 403 } else { 400 };
     ApiResponse::Json(status, json!({"error": msg}))
-}
-
-fn license_status_json(status: license::LicenseStatus) -> Value {
-    use license::LicenseStatus::*;
-    match status {
-        Active => json!({"status": "active"}),
-        Inactive => json!({"status": "inactive"}),
-        Grace { days_left } => json!({"status": "grace", "days_left": days_left}),
-        Locked { days_overdue } => json!({"status": "locked", "days_overdue": days_overdue}),
-    }
 }

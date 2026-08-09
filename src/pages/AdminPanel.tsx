@@ -8,19 +8,18 @@ import {
   getAiSettings,
   getVendorLicenseStatus, redeemVendorKey,
   createBackup, restoreBackup,
-  getPaymentHistory, initiateStripeCheckout, initiateMpesaPayment,
   getAuditLog,
   listNotifications, sendNotification,
   changeBusinessType,
   listModules, getModuleSchema, enableModule,
   ApiError,
 } from '../api';
-import type { PaymentHistoryEntry, AuditLogEntry, NotificationRecord, AiSettingsStatus } from '../api';
+import type { AuditLogEntry, NotificationRecord, AiSettingsStatus } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
 import BusinessBranding from '../components/BusinessBranding';
 import TwoFactorSetup from '../components/TwoFactorSetup';
 
-type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'billing' | 'audit' | 'notifications' | 'business' | 'security' | 'ai';
+type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'audit' | 'notifications' | 'business' | 'security' | 'ai';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
@@ -32,7 +31,6 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'ai', label: 'AI Settings' },
   { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
-  { id: 'billing', label: 'Billing' },
   { id: 'license', label: 'Vendor License' },
   { id: 'backup', label: 'Backup & Restore' },
   { id: 'audit', label: 'Audit Log' },
@@ -64,7 +62,6 @@ export default function AdminPanel() {
       {tab === 'ai' && <AiSettingsTab />}
       {tab === 'notifications' && <NotificationsTab />}
       {tab === 'license' && <VendorLicenseTab />}
-      {tab === 'billing' && <BillingTab />}
       {tab === 'backup' && <BackupTab />}
       {tab === 'audit' && <AuditLogTab />}
     </div>
@@ -754,147 +751,6 @@ function VendorLicenseTab() {
           <button className="btn btn-stamp" type="submit" disabled={busy}>{busy ? 'Redeeming…' : 'Redeem'}</button>
         </form>
       )}
-    </div>
-  );
-}
-
-// -------------------------------------------------------------- Billing
-
-function BillingTab() {
-  const [history, setHistory] = useState<PaymentHistoryEntry[]>([]);
-  const [loadingHistory, setLoadingHistory] = useState(true);
-  const [provider, setProvider] = useState<'stripe' | 'mpesa'>('stripe');
-  const [purpose, setPurpose] = useState<'activation' | 'subscription'>('subscription');
-  const [amount, setAmount] = useState('');
-  const [currency, setCurrency] = useState('usd');
-  const [phone, setPhone] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [mpesaMessage, setMpesaMessage] = useState<string | null>(null);
-
-  const refreshHistory = () => {
-    setLoadingHistory(true);
-    getPaymentHistory().then((r) => setHistory(r.payments)).catch(() => {}).finally(() => setLoadingHistory(false));
-  };
-  useEffect(() => { refreshHistory(); }, []);
-
-  async function handlePay(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setMpesaMessage(null);
-    const parsedAmount = parseFloat(amount);
-    if (!parsedAmount || parsedAmount <= 0) { setError('Enter a valid amount.'); return; }
-    setBusy(true);
-    try {
-      if (provider === 'stripe') {
-        const res = await initiateStripeCheckout(purpose, parsedAmount, currency);
-        if (res.checkout_url) {
-          // Real payment page — leaves the app deliberately. Opened in
-          // the system browser, not inside the app's own webview, since
-          // that's where a saved card / Apple Pay / etc. already works.
-          try {
-            const { openUrl } = await import('@tauri-apps/plugin-opener');
-            await openUrl(res.checkout_url);
-          } catch {
-            window.open(res.checkout_url, '_blank');
-          }
-        }
-      } else {
-        if (!phone.trim()) { setError('Enter the M-Pesa phone number (format: 2547XXXXXXXX).'); setBusy(false); return; }
-        const res = await initiateMpesaPayment(purpose, parsedAmount, phone.trim());
-        setMpesaMessage(res.message || 'Check your phone to complete the M-Pesa payment.');
-      }
-      setAmount('');
-      refreshHistory();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not start the payment');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div>
-      <div className="card" style={{ marginBottom: '1rem' }}>
-        <h3 style={{ marginTop: 0 }}>Make a payment</h3>
-        <p style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: 0 }}>
-          This is a real charge through Stripe or M-Pesa — different from the free trial or a
-          vendor-issued license key. Use this if your vendor has set up real billing for this
-          install.
-        </p>
-        <ErrorBox error={error} />
-        {mpesaMessage && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginBottom: '0.8rem' }}>{mpesaMessage}</div>}
-        <form onSubmit={handlePay} style={styles.formGrid}>
-          <div>
-            <label>Provider</label>
-            <select value={provider} onChange={(e) => setProvider(e.target.value as 'stripe' | 'mpesa')} style={{ width: '100%' }}>
-              <option value="stripe">Card (Stripe)</option>
-              <option value="mpesa">M-Pesa</option>
-            </select>
-          </div>
-          <div>
-            <label>Purpose</label>
-            <select value={purpose} onChange={(e) => setPurpose(e.target.value as 'activation' | 'subscription')} style={{ width: '100%' }}>
-              <option value="subscription">Monthly subscription</option>
-              <option value="activation">One-time activation</option>
-            </select>
-          </div>
-          <div>
-            <label>Amount</label>
-            <input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} required style={{ width: '100%' }} />
-          </div>
-          {provider === 'stripe' ? (
-            <div>
-              <label>Currency</label>
-              <input value={currency} onChange={(e) => setCurrency(e.target.value.toLowerCase())} maxLength={3} style={{ width: '100%' }} />
-            </div>
-          ) : (
-            <div>
-              <label>M-Pesa phone number</label>
-              <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="2547XXXXXXXX" style={{ width: '100%' }} />
-            </div>
-          )}
-        </form>
-        <button className="btn btn-stamp" style={{ marginTop: '0.8rem' }} onClick={handlePay} disabled={busy}>
-          {busy ? 'Starting…' : provider === 'stripe' ? 'Continue to payment' : 'Send payment request'}
-        </button>
-      </div>
-
-      <h3 style={{ margin: '1.2rem 0 0.8rem' }}>Payment history</h3>
-      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Date</th>
-              <th style={styles.th}>Provider</th>
-              <th style={styles.th}>Purpose</th>
-              <th style={styles.th}>Amount</th>
-              <th style={styles.th}>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loadingHistory ? (
-              <tr><td style={styles.td} colSpan={5}>Loading…</td></tr>
-            ) : history.length === 0 ? (
-              <tr><td style={styles.td} colSpan={5}>No payments yet.</td></tr>
-            ) : (
-              history.map((p) => (
-                <tr key={p.reference}>
-                  <td style={styles.td}>{new Date(p.created_at).toLocaleDateString()}</td>
-                  <td style={styles.td}>{p.provider}</td>
-                  <td style={styles.td}>{p.purpose}</td>
-                  <td className="mono" style={styles.td}>{p.amount.toFixed(2)} {p.currency.toUpperCase()}</td>
-                  <td style={styles.td}>
-                    <span className={`status-pill ${p.status === 'completed' ? 'status-active' : p.status === 'failed' ? 'status-inactive' : ''}`}>
-                      {p.status}
-                    </span>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }

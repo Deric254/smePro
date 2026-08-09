@@ -125,25 +125,6 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_audit_business_time ON audit_log(business_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_permissions_role ON permissions(role_id);
 
--- Tracks every payment attempt initiated through Stripe or M-Pesa, so
--- when their webhook/callback arrives — often with nothing more
--- identifying than a session ID or CheckoutRequestID — we can look up
--- which business and which purpose (activation vs. monthly renewal) it
--- belongs to.
-CREATE TABLE IF NOT EXISTS payment_intents (
-    id                  TEXT PRIMARY KEY,
-    business_id         TEXT NOT NULL,
-    provider            TEXT NOT NULL,       -- 'stripe' | 'mpesa'
-    provider_reference  TEXT NOT NULL,       -- Stripe session id / M-Pesa CheckoutRequestID
-    purpose             TEXT NOT NULL,       -- 'activation' | 'subscription'
-    amount              REAL NOT NULL,
-    currency            TEXT NOT NULL,
-    status              TEXT NOT NULL DEFAULT 'pending', -- pending/completed/failed
-    created_at          TEXT NOT NULL,
-    completed_at        TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_payment_intents_reference ON payment_intents(provider_reference);
-
 -- Vendor-issued license key redemption (see vendor_license.rs and the
 -- separate vendor-authority/ service). This is a distinct mechanism from
 -- the recurring payment license above — it's the classic "one key, one

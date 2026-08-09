@@ -130,11 +130,6 @@ export const recoverViaAdminCode = (biz: string, payload: Record<string, string>
     return body;
   });
 
-// ---- License ----
-export const getLicenseStatus = () => request('/license/status');
-export const activateLicense = () => request('/license/activate', { method: 'POST' });
-export const payLicense = () => request('/license/pay', { method: 'POST' });
-
 // ---- Modules ----
 export const getBusinessInfo = () => request('/business');
 export const listModules = () => request('/modules');
@@ -354,26 +349,6 @@ export const restoreBackup = (data: { database_base64: string; wrapped_key_base6
   request('/admin/restore', { method: 'POST', body: JSON.stringify(data) });
 export const restoreBackupFreshInstall = (data: { database_base64: string; wrapped_key_base64: string; passphrase: string }) =>
   request('/setup/restore', { method: 'POST', body: JSON.stringify(data) });
-
-// ---- Real payment collection — Stripe checkout / M-Pesa STK push.
-// Separate from license/activate and license/pay, which are trust-based
-// manual toggles with no actual charge — these two call real payment
-// providers and money actually moves. ----
-export interface PaymentHistoryEntry {
-  provider: string;
-  reference: string;
-  purpose: string;
-  amount: number;
-  currency: string;
-  status: string;
-  created_at: string;
-  completed_at: string | null;
-}
-export const getPaymentHistory = (): Promise<{ payments: PaymentHistoryEntry[] }> => request('/payments/history');
-export const initiateStripeCheckout = (purpose: 'activation' | 'subscription', amount: number, currency: string) =>
-  request('/payments/checkout', { method: 'POST', body: JSON.stringify({ provider: 'stripe', purpose, amount, currency }) });
-export const initiateMpesaPayment = (purpose: 'activation' | 'subscription', amount: number, phone: string) =>
-  request('/payments/checkout', { method: 'POST', body: JSON.stringify({ provider: 'mpesa', purpose, amount, phone }) });
 
 // ---- Vendor license key redemption ----
 export const getVendorLicenseStatus = () => request('/license/vendor/status');
