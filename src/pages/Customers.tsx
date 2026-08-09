@@ -1,10 +1,7 @@
 import { useEffect, useState } from 'react';
-import { listCustomers, getCustomer } from '../api';
+import { listCustomers, getCustomer, getBusinessInfo } from '../api';
 import type { CustomerSummary, CustomerDetail } from '../api';
-
-function formatMoney(n: number) {
-  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
+import { formatMoney } from '../lib/money';
 
 export default function Customers() {
   const [customers, setCustomers] = useState<CustomerSummary[]>([]);
@@ -14,6 +11,11 @@ export default function Customers() {
   const [detail, setDetail] = useState<CustomerDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [search, setSearch] = useState('');
+  const [currency, setCurrency] = useState('USD');
+
+  useEffect(() => {
+    getBusinessInfo().then((b: any) => { if (b?.currency) setCurrency(b.currency); }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     listCustomers()
@@ -59,7 +61,7 @@ export default function Customers() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.8rem', marginBottom: '1.4rem' }}>
               <div className="card" style={{ padding: '0.9rem 1rem' }}>
                 <div style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', textTransform: 'uppercase' }}>Lifetime value</div>
-                <div style={{ fontSize: '1.5rem', fontWeight: 600, color: 'var(--stamp)' }}>{formatMoney(detail.lifetime_value)}</div>
+                <div style={{ fontSize: '1.5rem', fontWeight: 600, color: 'var(--stamp)' }}>{formatMoney(detail.lifetime_value, currency)}</div>
               </div>
               <div className="card" style={{ padding: '0.9rem 1rem' }}>
                 <div style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', textTransform: 'uppercase' }}>Orders</div>
@@ -82,7 +84,7 @@ export default function Customers() {
                   <tr key={i} style={{ borderBottom: '1px solid var(--paper-line)' }}>
                     <td style={{ padding: '0.5rem' }}>{p.item_name}</td>
                     <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{p.quantity}</td>
-                    <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{formatMoney(p.revenue)}</td>
+                    <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{formatMoney(p.revenue, currency)}</td>
                     <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>{new Date(p.date).toLocaleString()}</td>
                   </tr>
                 ))}
@@ -107,7 +109,7 @@ export default function Customers() {
       {customers.length > 0 && (
         <div className="card" style={{ marginBottom: '1rem', padding: '0.9rem 1rem', display: 'inline-block' }}>
           <div style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', textTransform: 'uppercase' }}>Total tracked lifetime value</div>
-          <div style={{ fontSize: '1.4rem', fontWeight: 600, color: 'var(--stamp)' }}>{formatMoney(totalLtv)}</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: 600, color: 'var(--stamp)' }}>{formatMoney(totalLtv, currency)}</div>
         </div>
       )}
 
@@ -151,7 +153,7 @@ export default function Customers() {
                 <td style={{ padding: '0.5rem', fontWeight: 600 }}>{c.name || <span style={{ color: 'var(--ink-faint)', fontWeight: 400 }}>—</span>}</td>
                 <td style={{ padding: '0.5rem' }} className="mono">{c.phone}</td>
                 <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{c.order_count}</td>
-                <td style={{ textAlign: 'right', padding: '0.5rem', fontWeight: 600, color: 'var(--stamp)' }} className="mono">{formatMoney(c.lifetime_value)}</td>
+                <td style={{ textAlign: 'right', padding: '0.5rem', fontWeight: 600, color: 'var(--stamp)' }} className="mono">{formatMoney(c.lifetime_value, currency)}</td>
                 <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>
                   {c.last_purchase_at ? new Date(c.last_purchase_at).toLocaleDateString() : '—'}
                 </td>

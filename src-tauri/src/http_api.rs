@@ -422,11 +422,6 @@ fn route(
         };
     }
 
-    // ---- Payment webhooks: called directly by Stripe/Safaricom, never
-    // by our own frontend, so these are deliberately public (no bearer
-    // token). Stripe's request is authenticated instead by its own
-    // signature header; M-Pesa's is trusted based on the CheckoutRequestID
-    // matching a pending intent we ourselves created.
     // ---- Protected routes ----
     let token = match bearer { Some(t) => t, None => return json_err(401, "missing Authorization: Bearer <token>") };
     match crate::security::check_session_expired(conn, token) {
@@ -731,7 +726,6 @@ fn route(
         }));
     }
 
-    // ---- Payments: initiate a real checkout (Stripe) or STK push (M-Pesa) ----
     // ---- OCR import: photograph a paper ledger, extract text, propose candidate records ----
     if parts.as_slice() == ["import", "ocr", "extract"] && *method == Method::Post {
         let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "body must include 'image_base64'") };
@@ -1078,8 +1072,16 @@ fn route(
     // ---- Raw data export: /modules/{id}/export — real .xlsx ----
     if parts.len() == 3 && parts[0] == "modules" && parts[2] == "export" && *method == Method::Get {
         let module_id = parts[1];
+        // The module's own field definitions are what tell the
+        // exporter which columns are money (integer cents) so it can
+        // write a proper decimal-formatted currency value instead of
+        // a raw, misleading cents integer.
+        let module_def = match crud::load_module(conn, &business_id, module_id) {
+            Ok(m) => m,
+            Err(e) => return json_err(400, &e.to_string()),
+        };
         return match crud::list(conn, &business_id, &user_id, module_id, None, 100000, 0) {
-            Ok(records) => match xlsx_export::records_to_xlsx(&records, module_id) {
+            Ok(records) => match xlsx_export::records_to_xlsx(&records, module_id, &module_def) {
                 Ok(bytes) => {
                     let _ = audit::log(conn, &business_id, Some(&user_id), module_id, "export",
                         None, Some(&json!({"record_count": records.len()})));
@@ -1306,9 +1308,13 @@ fn route(
         let empty = Vec::new();
         let items = obj.get("items").and_then(Value::as_array).unwrap_or(&empty);
         let tax_inclusive = obj.get("tax_inclusive").and_then(Value::as_bool).unwrap_or(false);
-        let parsed: Vec<(String, f64, i64)> = items.iter().filter_map(|v| {
+        let parsed: Vec<(String, i64, i64)> = items.iter().filter_map(|v| {
             let cat = v.get("category")?.as_str()?.to_string();
-            let price = v.get("unit_price")?.as_f64()?;
+            // Integer minor units (cents) on the wire — see money.rs.
+            // A caller sending a fractional dollar value here is a bug
+            // upstream, not something to coerce; as_i64() correctly
+            // returns None for it rather than silently truncating.
+            let price = v.get("unit_price")?.as_i64()?;
             let qty = v.get("quantity")?.as_i64()?;
             Some((cat, price, qty))
         }).collect();
@@ -1331,7 +1337,8 @@ fn route(
         let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
         let from = obj.get("from").and_then(Value::as_str).unwrap_or("USD");
         let to = obj.get("to").and_then(Value::as_str).unwrap_or("USD");
-        let amount = obj.get("amount").and_then(Value::as_f64).unwrap_or(0.0);
+        // Integer minor units (cents) — see money.rs.
+        let amount = obj.get("amount").and_then(Value::as_i64).unwrap_or(0);
         return match crate::currency::convert(conn, from, to, amount) {
             Ok(result) => ApiResponse::Json(200, json!({"from": from, "to": to, "amount": amount, "result": result})),
             Err(e) => json_err(400, &e.to_string()),

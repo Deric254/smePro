@@ -54,11 +54,6 @@ path = "src/bin/set_due_date.rs"
 required-features = ["dev-tools"]
 
 [[bin]]
-name = "seed_payment_intent"
-path = "src/bin/seed_payment_intent.rs"
-required-features = ["dev-tools"]
-
-[[bin]]
 name = "offline_keygen"
 path = "src/bin/offline_keygen.rs"
 required-features = ["dev-tools"]

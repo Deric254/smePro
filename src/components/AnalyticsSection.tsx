@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { runReport } from '../api';
+import { runReport, getBusinessInfo } from '../api';
 import TimeSlicer, { defaultRange } from './TimeSlicer';
 import type { DateRange } from './TimeSlicer';
+import { formatMoney } from '../lib/money';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 // Deliberately the ONLY file in the app that imports recharts. Kept
@@ -17,6 +18,11 @@ export default function AnalyticsSection() {
   const [avgSale, setAvgSale] = useState<number | null>(null);
   const [series, setSeries] = useState<{ label: string; value: number }[]>([]);
   const [loading, setLoading] = useState(true);
+  const [currency, setCurrency] = useState('USD');
+
+  useEffect(() => {
+    getBusinessInfo().then((b: any) => { if (b?.currency) setCurrency(b.currency); }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,9 +58,9 @@ export default function AnalyticsSection() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.8rem', marginBottom: '0.9rem' }}>
-        <KpiCard label={`Revenue — ${range.label}`} value={revenue} loading={loading} format="money" />
-        <KpiCard label="Sales" value={orderCount} loading={loading} format="count" />
-        <KpiCard label="Average sale" value={avgSale} loading={loading} format="money" />
+        <KpiCard label={`Revenue — ${range.label}`} value={revenue} loading={loading} format="money" currency={currency} />
+        <KpiCard label="Sales" value={orderCount} loading={loading} format="count" currency={currency} />
+        <KpiCard label="Average sale" value={avgSale} loading={loading} format="money" currency={currency} />
       </div>
 
       <div className="card" style={{ height: 220 }}>
@@ -67,8 +73,11 @@ export default function AnalyticsSection() {
             <BarChart data={series}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} />
-              <YAxis tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} />
-              <Tooltip contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }} />
+              <YAxis tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v) => formatMoney(v, currency)} />
+              <Tooltip
+                contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
+                formatter={(v) => [formatMoney(Number(v), currency), 'Revenue']}
+              />
               <Bar dataKey="value" fill="var(--stamp)" radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -78,12 +87,12 @@ export default function AnalyticsSection() {
   );
 }
 
-function KpiCard({ label, value, loading, format }: { label: string; value: number | null; loading: boolean; format: 'money' | 'count' }) {
+function KpiCard({ label, value, loading, format, currency }: { label: string; value: number | null; loading: boolean; format: 'money' | 'count'; currency: string }) {
   return (
     <div className="card" style={{ padding: '0.9rem 1rem' }}>
       <div style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
       <div style={{ fontSize: '1.5rem', fontWeight: 600, color: 'var(--stamp)', marginTop: '0.2rem' }}>
-        {loading || value === null ? '—' : format === 'money' ? value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : value.toLocaleString()}
+        {loading || value === null ? '—' : format === 'money' ? formatMoney(value, currency) : value.toLocaleString()}
       </div>
     </div>
   );

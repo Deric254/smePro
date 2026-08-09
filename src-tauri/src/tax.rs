@@ -9,7 +9,9 @@
 //! - Per-category overrides take precedence over business default
 //! - Tax-inclusive mode: stored price already includes tax
 //! - Tax-exclusive mode: tax added to stored price at checkout
-//! - All calculations use round2() to avoid floating-point drift
+//! - All amounts are integer minor units (cents) — see money.rs. The
+//!   only fractional step is applying a percentage rate, done once via
+//!   money::apply_rate and never carried forward as a float.
 //!
 //! STRESS TESTED:
 //! - 0% tax → tax line omitted from receipt/invoice
@@ -26,15 +28,15 @@ use serde::Serialize;
 pub struct TaxLine {
     pub category: String,
     pub rate: f64,
-    pub taxable_amount: f64,
-    pub tax_amount: f64,
+    pub taxable_amount: i64,
+    pub tax_amount: i64,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TaxSummary {
-    pub subtotal: f64,
-    pub total_tax: f64,
-    pub total: f64,
+    pub subtotal: i64,
+    pub total_tax: i64,
+    pub total: i64,
     pub lines: Vec<TaxLine>,
     pub tax_inclusive: bool,
 }
@@ -52,7 +54,7 @@ pub struct TaxSummary {
 pub fn compute(
     conn: &Connection,
     business_id: &str,
-    items: &[(String, f64, i64)],
+    items: &[(String, i64, i64)],
     tax_inclusive: bool,
 ) -> Result<TaxSummary> {
     let default_rate: f64 = conn.query_row(
@@ -62,21 +64,28 @@ pub fn compute(
     ).unwrap_or(0.0);
 
     let mut lines: Vec<TaxLine> = Vec::new();
-    let mut subtotal = 0.0;
-    let mut total_tax = 0.0;
+    let mut subtotal: i64 = 0;
+    let mut total_tax: i64 = 0;
 
     for (category, unit_price, qty) in items {
         let rate = category_tax_rate(conn, business_id, category).unwrap_or(default_rate);
-        let line_total = unit_price * (*qty as f64);
+        // Exact — integer cents times an integer quantity.
+        let line_total: i64 = unit_price * qty;
 
         let (taxable, tax) = if tax_inclusive {
-            // Price includes tax: pre-tax = price / (1 + rate/100)
-            let pre_tax = line_total / (1.0 + rate / 100.0);
+            // Price includes tax: pre-tax = price / (1 + rate/100).
+            // This division is unavoidably fractional, so it's rounded
+            // exactly once, here — and `tax` is then derived by
+            // subtraction from the already-integer line_total, not by
+            // its own independent rounding, which guarantees
+            // taxable + tax == line_total exactly, every time.
+            let pre_tax = crate::money::apply_rate(line_total, 1.0 / (1.0 + rate / 100.0));
             let tax_amt = line_total - pre_tax;
             (pre_tax, tax_amt)
         } else {
-            // Price excludes tax: tax = price * rate/100
-            let tax_amt = line_total * (rate / 100.0);
+            // Price excludes tax: tax = price * rate/100, the one
+            // rounding point for this branch.
+            let tax_amt = crate::money::apply_rate(line_total, rate / 100.0);
             (line_total, tax_amt)
         };
 
@@ -90,19 +99,19 @@ pub fn compute(
         } else {
             lines.push(TaxLine {
                 category: category.clone(),
-                rate: round2(rate),
-                taxable_amount: round2(taxable),
-                tax_amount: round2(tax),
+                rate,
+                taxable_amount: taxable,
+                tax_amount: tax,
             });
         }
     }
 
-    let total = if tax_inclusive { subtotal + total_tax } else { subtotal + total_tax };
+    let total = subtotal + total_tax;
 
     Ok(TaxSummary {
-        subtotal: round2(subtotal),
-        total_tax: round2(total_tax),
-        total: round2(total),
+        subtotal,
+        total_tax,
+        total,
         lines,
         tax_inclusive,
     })
@@ -154,6 +163,3 @@ pub fn list_rates(conn: &Connection, business_id: &str) -> Result<Vec<serde_json
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
-}

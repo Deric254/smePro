@@ -7,6 +7,8 @@ mod backup_tests;
 #[cfg(test)]
 mod crud_tests;
 #[cfg(test)]
+mod money_migration_tests;
+#[cfg(test)]
 mod pos_tests;
 #[cfg(test)]
 mod receipt_tests;

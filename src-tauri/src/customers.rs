@@ -88,7 +88,7 @@ pub fn list(conn: &Connection, business_id: &str) -> Result<Value> {
             "name": r.get::<_, Option<String>>(1)?,
             "phone": r.get::<_, String>(2)?,
             "customer_since": r.get::<_, String>(3)?,
-            "lifetime_value": r.get::<_, f64>(4)?,
+            "lifetime_value": r.get::<_, i64>(4)?,
             "order_count": r.get::<_, i64>(5)?,
             "last_purchase_at": r.get::<_, Option<String>>(6)?,
         }))
@@ -125,13 +125,13 @@ pub fn detail(conn: &Connection, business_id: &str, customer_id: &str) -> Result
         Ok(json!({
             "item_name": r.get::<_, String>(0)?,
             "quantity": r.get::<_, i64>(1)?,
-            "revenue": r.get::<_, f64>(2)?,
+            "revenue": r.get::<_, i64>(2)?,
             "order_id": r.get::<_, Option<String>>(3)?,
             "date": r.get::<_, String>(4)?,
         }))
     })?;
     let purchases: Vec<Value> = rows.filter_map(|r| r.ok()).collect();
-    let lifetime_value: f64 = purchases.iter().filter_map(|p| p.get("revenue").and_then(|r| r.as_f64())).sum();
+    let lifetime_value: i64 = purchases.iter().filter_map(|p| p.get("revenue").and_then(|r| r.as_i64())).sum();
 
     Ok(json!({
         "id": customer_id,

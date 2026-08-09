@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { getToken } from '../api';
+import { formatMoney } from '../lib/money';
 import '../styles/receipt-print.css';
 
+// unit_price, line_total, subtotal, tax_amount, total below are all
+// integer minor units (cents) — see src/lib/money.ts.
 interface ReceiptLine {
   item_name: string;
   quantity: number;
@@ -51,7 +54,7 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
   function receiptText(): string {
     if (!receipt) return '';
     const lines = receipt.items.map(
-      (i) => `${i.item_name} x${i.quantity} — ${receipt.business_currency} ${i.line_total.toFixed(2)}`
+      (i) => `${i.item_name} x${i.quantity} — ${receipt.business_currency} ${formatMoney(i.line_total, receipt.business_currency)}`
     );
     return [
       receipt.business_name,
@@ -62,7 +65,7 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
       '',
       ...lines,
       '',
-      `Total: ${receipt.business_currency} ${receipt.total.toFixed(2)}`,
+      `Total: ${receipt.business_currency} ${formatMoney(receipt.total, receipt.business_currency)}`,
       receipt.payment_method ? `Paid via ${receipt.payment_method}` : '',
       '',
       'Thank you for your business!',
@@ -139,24 +142,24 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
               <tr key={i} style={tr}>
                 <td style={{...td, textAlign:'left'}}>{item.item_name}</td>
                 <td style={td}>{item.quantity}</td>
-                <td style={td}>{receipt.business_currency} {item.unit_price.toFixed(2)}</td>
-                <td style={td}>{receipt.business_currency} {item.line_total.toFixed(2)}</td>
+                <td style={td}>{receipt.business_currency} {formatMoney(item.unit_price, receipt.business_currency)}</td>
+                <td style={td}>{receipt.business_currency} {formatMoney(item.line_total, receipt.business_currency)}</td>
               </tr>
             ))}
           </tbody>
         </table>
 
         <div style={totals}>
-          <div style={row}><span>Subtotal:</span><span>{receipt.business_currency} {receipt.subtotal.toFixed(2)}</span></div>
+          <div style={row}><span>Subtotal:</span><span>{receipt.business_currency} {formatMoney(receipt.subtotal, receipt.business_currency)}</span></div>
           {receipt.tax_rate > 0 && (
             <div style={row}>
               <span>Tax ({receipt.tax_rate}%):</span>
-              <span>{receipt.business_currency} {receipt.tax_amount.toFixed(2)}</span>
+              <span>{receipt.business_currency} {formatMoney(receipt.tax_amount, receipt.business_currency)}</span>
             </div>
           )}
           <div style={{...row, ...totalRow}}>
             <span>Total:</span>
-            <span>{receipt.business_currency} {receipt.total.toFixed(2)}</span>
+            <span>{receipt.business_currency} {formatMoney(receipt.total, receipt.business_currency)}</span>
           </div>
           {receipt.payment_method && (
             <div style={row}><span>Paid via:</span><span>{receipt.payment_method}</span></div>

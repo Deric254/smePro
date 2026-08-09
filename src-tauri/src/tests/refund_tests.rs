@@ -1,12 +1,12 @@
 use super::common::*;
 
-fn make_inventory_item(conn: &mut rusqlite::Connection, biz: &str, uid: &str, sku: &str, name: &str, qty: i64, cost: f64, price: f64) -> String {
+fn make_inventory_item(conn: &mut rusqlite::Connection, biz: &str, uid: &str, sku: &str, name: &str, qty: i64, cost_cents: i64, price_cents: i64) -> String {
     let mut item = serde_json::Map::new();
     item.insert("sku".into(), serde_json::json!(sku));
     item.insert("name".into(), serde_json::json!(name));
     item.insert("quantity".into(), serde_json::json!(qty));
-    item.insert("unit_cost".into(), serde_json::json!(cost));
-    item.insert("unit_price".into(), serde_json::json!(price));
+    item.insert("unit_cost".into(), serde_json::json!(cost_cents));
+    item.insert("unit_price".into(), serde_json::json!(price_cents));
     crate::crud::create(conn, biz, uid, "inventory", &item).unwrap()
 }
 
@@ -29,7 +29,7 @@ fn test_refund_restocks_and_records_correctly() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "FLOUR-001", "Flour", 50, 20.0, 30.0);
+    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "FLOUR-001", "Flour", 50, 2000, 3000);
     let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 10);
     let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
 
@@ -39,7 +39,7 @@ fn test_refund_restocks_and_records_correctly() {
     let req = crate::refund::RefundRequest {
         sale_id: sale_id.clone(),
         quantity: 4,
-        refund_amount: 120.0,
+        refund_amount: 12000,
         reason: Some("customer changed mind".into()),
         restock: true,
     };
@@ -57,14 +57,14 @@ fn test_refund_without_restock_leaves_inventory_untouched() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "EGGS-001", "Eggs", 30, 5.0, 8.0);
+    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "EGGS-001", "Eggs", 30, 500, 800);
     let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 6);
     let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
 
     let req = crate::refund::RefundRequest {
         sale_id,
         quantity: 6,
-        refund_amount: 48.0,
+        refund_amount: 4800,
         reason: Some("broken on arrival, not sellable".into()),
         restock: false,
     };
@@ -82,14 +82,14 @@ fn test_refunding_more_than_was_sold_is_blocked() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "OIL-001", "Cooking Oil", 20, 100.0, 150.0);
+    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "OIL-001", "Cooking Oil", 20, 10000, 15000);
     let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 3);
     let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
 
     let req = crate::refund::RefundRequest {
         sale_id,
         quantity: 5, // more than the 3 actually sold
-        refund_amount: 750.0,
+        refund_amount: 75000,
         reason: None,
         restock: true,
     };
@@ -107,7 +107,7 @@ fn test_repeated_partial_refunds_correctly_accumulate() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "SOAP-001", "Bar Soap", 100, 10.0, 15.0);
+    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "SOAP-001", "Bar Soap", 100, 1000, 1500);
     let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 10);
     let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
 
@@ -115,7 +115,7 @@ fn test_repeated_partial_refunds_correctly_accumulate() {
     let first = crate::refund::RefundRequest {
         sale_id: sale_id.clone(),
         quantity: 4,
-        refund_amount: 60.0,
+        refund_amount: 6000,
         reason: None,
         restock: true,
     };
@@ -127,7 +127,7 @@ fn test_repeated_partial_refunds_correctly_accumulate() {
     let second_too_much = crate::refund::RefundRequest {
         sale_id: sale_id.clone(),
         quantity: 7,
-        refund_amount: 105.0,
+        refund_amount: 10500,
         reason: None,
         restock: true,
     };
@@ -137,7 +137,7 @@ fn test_repeated_partial_refunds_correctly_accumulate() {
     let second_exact = crate::refund::RefundRequest {
         sale_id: sale_id.clone(),
         quantity: 6,
-        refund_amount: 90.0,
+        refund_amount: 9000,
         reason: None,
         restock: true,
     };
@@ -147,7 +147,7 @@ fn test_repeated_partial_refunds_correctly_accumulate() {
     let third = crate::refund::RefundRequest {
         sale_id,
         quantity: 1,
-        refund_amount: 15.0,
+        refund_amount: 1500,
         reason: None,
         restock: true,
     };
@@ -167,7 +167,7 @@ fn test_refund_requires_a_real_sale() {
     let req = crate::refund::RefundRequest {
         sale_id: "not-a-real-sale-id".into(),
         quantity: 1,
-        refund_amount: 10.0,
+        refund_amount: 1000,
         reason: None,
         restock: false,
     };

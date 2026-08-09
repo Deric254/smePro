@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   getModuleSchema, listRecords, createRecord, deleteRecord, exportModule,
-  runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, ApiError,
+  runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, getBusinessInfo, ApiError,
 } from '../api';
 import type { NewInvoiceItem } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
+import { formatMoney, parseMoneyInput } from '../lib/money';
 import OcrImport from './OcrImport';
 import InvoiceView from '../components/InvoiceView';
 
@@ -20,6 +21,17 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [loading, setLoading] = useState(true);
   const [units, setUnits] = useState<Unit[]>([]);
   const [currencies, setCurrencies] = useState<Currency[]>([]);
+  // The business's own currency — needed everywhere a "money"-typed
+  // field is parsed (form input) or displayed (records table), so
+  // decimal places are correct for e.g. JPY (0dp) or KWD (3dp), not
+  // just assumed to be USD's 2dp. See src/lib/money.ts.
+  const [businessCurrency, setBusinessCurrency] = useState('USD');
+
+  useEffect(() => {
+    getBusinessInfo()
+      .then((b: any) => { if (b?.currency) setBusinessCurrency(b.currency); })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -94,6 +106,15 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       for (const f of schema!.fields) {
         const raw = formValues[f.name];
         if (raw === undefined || raw === '') continue;
+        if (f.type === 'money') {
+          const cents = parseMoneyInput(raw, businessCurrency);
+          if (cents === null) {
+            setError(`"${f.name.replace(/_/g, ' ')}" is not a valid amount.`);
+            return;
+          }
+          payload[f.name] = cents;
+          continue;
+        }
         payload[f.name] = f.type === 'integer' ? parseInt(raw, 10)
           : f.type === 'real' ? parseFloat(raw)
           : f.type === 'boolean' ? raw === 'true'
@@ -182,7 +203,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             <form onSubmit={handleCreate} className="card" style={styles.form}>
               <div style={styles.formGrid}>
                 {schema.fields.map((f) => (
-                  <FieldInput key={f.name} field={f} value={formValues[f.name] ?? ''} units={units} currencies={currencies} onChange={(v) => setFormValues((p) => ({ ...p, [f.name]: v }))} />
+                  <FieldInput key={f.name} field={f} value={formValues[f.name] ?? ''} units={units} currencies={currencies} businessCurrency={businessCurrency} onChange={(v) => setFormValues((p) => ({ ...p, [f.name]: v }))} />
                 ))}
               </div>
               <button className="btn btn-stamp" type="submit" style={{ marginTop: '0.8rem' }}>Save</button>
@@ -205,7 +226,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                   <tr key={r.id}>
                     {columns.map((c) => (
                       <td key={c} className={typeof r[c] === 'number' ? 'mono' : ''} style={styles.td}>
-                        {formatCell(r[c])}
+                        {formatCell(r[c], schema!.fields.find((f) => f.name === c)?.type, businessCurrency)}
                       </td>
                     ))}
                     {moduleId === 'invoice' && (
@@ -227,7 +248,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
           </div>
         </>
       ) : (
-        <ReportPanel moduleId={moduleId} schema={schema} canExport={!!canExport} />
+        <ReportPanel moduleId={moduleId} schema={schema} canExport={!!canExport} businessCurrency={businessCurrency} />
       )}
 
       {viewingInvoiceId && (
@@ -237,12 +258,13 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   );
 }
 
-function formatCell(v: unknown) {
+function formatCell(v: unknown, fieldType?: string, currency?: string) {
   if (v === null || v === undefined) return <span style={{ color: 'var(--ink-faint)' }}>—</span>;
+  if (fieldType === 'money' && typeof v === 'number') return formatMoney(v, currency ?? 'USD');
   return String(v);
 }
 
-function FieldInput({ field, value, units, currencies, onChange }: { field: FieldDef; value: string; units: Unit[]; currencies: Currency[]; onChange: (v: string) => void }) {
+function FieldInput({ field, value, units, currencies, businessCurrency, onChange }: { field: FieldDef; value: string; units: Unit[]; currencies: Currency[]; businessCurrency: string; onChange: (v: string) => void }) {
   const inputType = field.type === 'integer' || field.type === 'real' ? 'number' : field.type === 'date' ? 'date' : 'text';
   if (field.type === 'boolean') {
     return (
@@ -288,6 +310,31 @@ function FieldInput({ field, value, units, currencies, onChange }: { field: Fiel
       </div>
     );
   }
+  if (field.type === 'money') {
+    // Plain text buffer, not a reformatted controlled value — typing
+    // over a value that snaps back to "12.50" on every keystroke
+    // fights the cursor (the same bug fixed in PointOfSale.tsx's
+    // refund field and the invoice form above). Normalizes to a clean
+    // decimal only on blur, and the actual integer-cents conversion
+    // happens once, at submit time, via parseMoneyInput.
+    return (
+      <div>
+        <label>{field.name.replace(/_/g, ' ')}{field.required ? ' *' : ''}</label>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={value}
+          required={field.required}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={() => {
+            const parsed = parseMoneyInput(value, businessCurrency);
+            if (parsed !== null) onChange(formatMoney(parsed, businessCurrency));
+          }}
+          style={{ width: '100%' }}
+        />
+      </div>
+    );
+  }
   return (
     <div>
       <label>{field.name.replace(/_/g, ' ')}{field.required ? ' *' : ''}</label>
@@ -303,8 +350,8 @@ function FieldInput({ field, value, units, currencies, onChange }: { field: Fiel
   );
 }
 
-function ReportPanel({ moduleId, schema, canExport }: { moduleId: string; schema: ModuleSchema; canExport: boolean }) {
-  const numericFields = schema.fields.filter((f) => f.type === 'integer' || f.type === 'real');
+function ReportPanel({ moduleId, schema, canExport, businessCurrency }: { moduleId: string; schema: ModuleSchema; canExport: boolean; businessCurrency: string }) {
+  const numericFields = schema.fields.filter((f) => f.type === 'integer' || f.type === 'real' || f.type === 'money');
   const categoryFields = schema.fields.filter((f) => f.type === 'text' || f.type === 'unit' || f.type === 'currency');
   const [agg, setAgg] = useState<'sum' | 'count' | 'avg'>('sum');
   const [measure, setMeasure] = useState(numericFields[0]?.name ?? '');
@@ -331,6 +378,10 @@ function ReportPanel({ moduleId, schema, canExport }: { moduleId: string; schema
   useEffect(() => { run(); /* eslint-disable-next-line */ }, []);
 
   const max = Math.max(1, ...points.map((p) => p.value));
+  // Only meaningful when agg !== 'count' — a count is always a plain
+  // number regardless of what field was picked as "measure" (which is
+  // ignored for count anyway).
+  const measureIsMoney = agg !== 'count' && numericFields.find((f) => f.name === measure)?.type === 'money';
 
   return (
     <>
@@ -407,14 +458,27 @@ function ReportPanel({ moduleId, schema, canExport }: { moduleId: string; schema
             <div style={styles.barTrack}>
               <div style={{ ...styles.barFill, width: `${(p.value / max) * 100}%` }} />
             </div>
-            <span className="mono" style={{ width: 80, textAlign: 'right', fontSize: '0.82rem' }}>{p.value.toLocaleString()}</span>
+            <span className="mono" style={{ width: 80, textAlign: 'right', fontSize: '0.82rem' }}>
+              {measureIsMoney ? formatMoney(p.value, businessCurrency) : p.value.toLocaleString()}
+            </span>
           </div>
         ))}
       </div>
       </div>
-      {numericFields.length > 0 && <ForecastPanel moduleId={moduleId} numericFields={numericFields} />}
+      {numericFields.length > 0 && <ForecastPanel moduleId={moduleId} numericFields={numericFields} businessCurrency={businessCurrency} />}
     </>
   );
+}
+
+// Editing state keeps the unit price as raw typed text — not
+// integer cents directly — so the input never fights the user's
+// cursor by reformatting mid-keystroke (the same bug class fixed in
+// PointOfSale.tsx's refund amount field). Only converted to actual
+// integer cents (via money.ts's strict parser) at submit time.
+interface EditableInvoiceItem {
+  description: string;
+  quantity: number;
+  unit_price_text: string;
 }
 
 function NewInvoiceForm({ onCreated, onCancel }: { onCreated: () => void; onCancel: () => void }) {
@@ -423,17 +487,28 @@ function NewInvoiceForm({ onCreated, onCancel }: { onCreated: () => void; onCanc
   const [customerPhone, setCustomerPhone] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [notes, setNotes] = useState('');
-  const [items, setItems] = useState<NewInvoiceItem[]>([{ description: '', quantity: 1, unit_price: 0 }]);
+  const [items, setItems] = useState<EditableInvoiceItem[]>([{ description: '', quantity: 1, unit_price_text: '0.00' }]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [currency, setCurrency] = useState('USD');
 
-  const subtotal = items.reduce((sum, it) => sum + (it.quantity || 0) * (it.unit_price || 0), 0);
+  useEffect(() => {
+    getBusinessInfo()
+      .then((b: any) => { if (b?.currency) setCurrency(b.currency); })
+      .catch(() => {}); // default 'USD' stands if this fails
+  }, []);
 
-  function updateItem(i: number, patch: Partial<NewInvoiceItem>) {
+  function lineCents(it: EditableInvoiceItem): number {
+    const price = parseMoneyInput(it.unit_price_text, currency) ?? 0;
+    return (it.quantity || 0) * price;
+  }
+  const subtotal = items.reduce((sum, it) => sum + lineCents(it), 0);
+
+  function updateItem(i: number, patch: Partial<EditableInvoiceItem>) {
     setItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
   }
   function addItem() {
-    setItems((prev) => [...prev, { description: '', quantity: 1, unit_price: 0 }]);
+    setItems((prev) => [...prev, { description: '', quantity: 1, unit_price_text: '0.00' }]);
   }
   function removeItem(i: number) {
     setItems((prev) => prev.filter((_, idx) => idx !== i));
@@ -442,7 +517,16 @@ function NewInvoiceForm({ onCreated, onCancel }: { onCreated: () => void; onCanc
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const cleanItems = items.filter((it) => it.description.trim() && it.quantity > 0);
+    const cleanItems: NewInvoiceItem[] = [];
+    for (const it of items) {
+      if (!it.description.trim() || !(it.quantity > 0)) continue;
+      const cents = parseMoneyInput(it.unit_price_text, currency);
+      if (cents === null || cents < 0) {
+        setError(`"${it.description || 'A line item'}" has an invalid unit price.`);
+        return;
+      }
+      cleanItems.push({ description: it.description, quantity: it.quantity, unit_price: cents });
+    }
     if (cleanItems.length === 0) {
       setError('Add at least one line item with a description and quantity.');
       return;
@@ -504,16 +588,19 @@ function NewInvoiceForm({ onCreated, onCancel }: { onCreated: () => void; onCanc
             style={{ width: 70 }}
           />
           <input
-            type="number"
-            min={0}
-            step="0.01"
+            type="text"
+            inputMode="decimal"
             placeholder="Unit price"
-            value={it.unit_price}
-            onChange={(e) => updateItem(i, { unit_price: Number(e.target.value) })}
+            value={it.unit_price_text}
+            onChange={(e) => updateItem(i, { unit_price_text: e.target.value })}
+            onBlur={() => {
+              const parsed = parseMoneyInput(it.unit_price_text, currency);
+              if (parsed !== null) updateItem(i, { unit_price_text: formatMoney(parsed, currency) });
+            }}
             style={{ width: 110 }}
           />
           <span className="mono" style={{ width: 90, textAlign: 'right', fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-            {((it.quantity || 0) * (it.unit_price || 0)).toFixed(2)}
+            {formatMoney(lineCents(it), currency)}
           </span>
           {items.length > 1 && (
             <button type="button" className="btn btn-outline" style={{ padding: '0.2em 0.5em', fontSize: '0.75rem' }} onClick={() => removeItem(i)}>×</button>
@@ -529,7 +616,7 @@ function NewInvoiceForm({ onCreated, onCancel }: { onCreated: () => void; onCanc
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem', paddingTop: '0.8rem', borderTop: '1px solid var(--paper-line)' }}>
         <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>
-          Subtotal: <span className="mono">{subtotal.toFixed(2)}</span>
+          Subtotal: <span className="mono">{formatMoney(subtotal, currency)}</span>
           <span style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--ink-soft)', marginLeft: '0.5rem' }}>(tax applied automatically at your business's rate)</span>
         </div>
         <div style={{ display: 'flex', gap: '0.6rem' }}>
@@ -543,13 +630,14 @@ function NewInvoiceForm({ onCreated, onCancel }: { onCreated: () => void; onCanc
   );
 }
 
-function ForecastPanel({ moduleId, numericFields }: { moduleId: string; numericFields: FieldDef[] }) {
+function ForecastPanel({ moduleId, numericFields, businessCurrency }: { moduleId: string; numericFields: FieldDef[]; businessCurrency: string }) {
   const [measure, setMeasure] = useState(numericFields[0]?.name ?? '');
   const [bucket, setBucket] = useState('month');
   const [method, setMethod] = useState<'moving_average' | 'exponential_smoothing'>('moving_average');
   const [result, setResult] = useState<{ forecast_next: number; method: string; history: { label: string; value: number }[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const measureIsMoney = numericFields.find((f) => f.name === measure)?.type === 'money';
 
   async function run() {
     setLoading(true);
@@ -602,7 +690,7 @@ function ForecastPanel({ moduleId, numericFields }: { moduleId: string; numericF
       {result && (
         <div style={{ marginTop: '1rem' }}>
           <div style={{ fontSize: '1.6rem', fontWeight: 600, color: 'var(--stamp)' }}>
-            {result.forecast_next.toLocaleString()}
+            {measureIsMoney ? formatMoney(result.forecast_next, businessCurrency) : result.forecast_next.toLocaleString()}
           </div>
           <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)' }}>
             projected for the next {bucket}, based on {result.history.length} periods of history ({result.method})

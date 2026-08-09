@@ -8,7 +8,7 @@ use serde_json::Value;
 pub struct FieldDef {
     pub name: String,
     #[serde(rename = "type")]
-    pub field_type: String, // "text" | "integer" | "real" | "date" | "boolean"
+    pub field_type: String, // "text" | "integer" | "real" | "money" | "date" | "boolean" | "unit" | "currency"
     #[serde(default)]
     pub required: bool,
     #[serde(default)]
@@ -114,9 +114,9 @@ impl ModuleDef {
                     let field = def.fields.iter().find(|f| f.name == field_name).ok_or_else(|| {
                         anyhow!("module '{}': dashboard_metric measure '{field_name}' is not a field on this module", def.id)
                     })?;
-                    if field.field_type != "integer" && field.field_type != "real" {
+                    if field.field_type != "integer" && field.field_type != "real" && field.field_type != "money" {
                         return Err(anyhow!(
-                            "module '{}': dashboard_metric measure '{field_name}' must be numeric (integer/real), got '{}'",
+                            "module '{}': dashboard_metric measure '{field_name}' must be numeric (integer/real/money), got '{}'",
                             def.id, field.field_type
                         ));
                     }
@@ -132,10 +132,42 @@ impl ModuleDef {
     fn sql_type(field_type: &str) -> Result<&'static str> {
         match field_type {
             "text" | "date" | "unit" | "currency" => Ok("TEXT"),
-            "integer" | "boolean" => Ok("INTEGER"),
+            // "money" is deliberately its own type, distinct from
+            // "integer": both map to INTEGER affinity, but "money"
+            // carries the semantic meaning "this is minor-unit
+            // currency" through to validation, the frontend formatter,
+            // and xlsx export, none of which should guess based on a
+            // field's name alone.
+            "integer" | "boolean" | "money" => Ok("INTEGER"),
             "real" => Ok("REAL"),
             other => Err(anyhow!("unsupported field type: {other}")),
         }
+    }
+
+    /// Builds the `"name TYPE [NOT NULL] [UNIQUE]"` column definitions
+    /// for this module's own fields (not the fixed system columns —
+    /// id/business_id/created_at/updated_at/deleted_at are added by
+    /// each caller, since a table rebuild needs to place them at
+    /// specific positions matching the existing table). Shared by
+    /// `create_table` (fresh tables) and the v8 migration's table
+    /// rebuild (existing tables whose column affinity needs to
+    /// change) so both are derived from exactly the same logic —
+    /// nothing for the two to drift apart on.
+    pub(crate) fn field_column_defs(&self) -> Result<Vec<String>> {
+        self.fields
+            .iter()
+            .map(|f| {
+                let sql_ty = Self::sql_type(&f.field_type)?;
+                let mut col = format!("{} {}", f.name, sql_ty);
+                if f.required {
+                    col.push_str(" NOT NULL");
+                }
+                if f.unique {
+                    col.push_str(" UNIQUE");
+                }
+                Ok(col)
+            })
+            .collect()
     }
 
     /// Generates and runs `CREATE TABLE IF NOT EXISTS module_<id> (...)`
@@ -148,18 +180,7 @@ impl ModuleDef {
             "id TEXT PRIMARY KEY".to_string(),
             "business_id TEXT NOT NULL".to_string(),
         ];
-
-        for f in &self.fields {
-            let sql_ty = Self::sql_type(&f.field_type)?;
-            let mut col = format!("{} {}", f.name, sql_ty);
-            if f.required {
-                col.push_str(" NOT NULL");
-            }
-            if f.unique {
-                col.push_str(" UNIQUE");
-            }
-            cols.push(col);
-        }
+        cols.extend(self.field_column_defs()?);
         cols.push("created_at TEXT NOT NULL".to_string());
         cols.push("updated_at TEXT NOT NULL".to_string());
         cols.push("deleted_at TEXT".to_string()); // soft delete, keeps audit trail meaningful
@@ -228,6 +249,16 @@ impl ModuleDef {
                     let ok = match f.field_type.as_str() {
                         "text" | "date" | "unit" | "currency" => v.is_string(),
                         "integer" => v.is_i64() || v.is_u64(),
+                        // Money is ALWAYS integer minor units by the time
+                        // it reaches storage — never a float. Any decimal
+                        // dollar input from a human is converted via
+                        // money::parse_money_input() at the API boundary,
+                        // before it ever gets here. A float arriving at
+                        // this point means something upstream skipped
+                        // that conversion, which is exactly the bug this
+                        // whole migration exists to prevent — so it's
+                        // rejected here, not silently truncated.
+                        "money" => v.is_i64() || v.is_u64(),
                         "real" => v.is_f64() || v.is_i64(),
                         "boolean" => v.is_boolean(),
                         _ => true,

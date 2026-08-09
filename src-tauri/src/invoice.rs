@@ -23,7 +23,8 @@ use serde_json::{json, Value};
 pub struct InvoiceItem {
     pub description: String,
     pub quantity: i64,
-    pub unit_price: f64,
+    /// Integer minor units (cents) — see money.rs.
+    pub unit_price: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,9 +71,9 @@ pub fn create_invoice(
 
     let invoice_number = generate_number(conn, business_id)?;
 
-    let subtotal = req.items.iter()
-        .map(|i| i.quantity as f64 * i.unit_price)
-        .sum::<f64>();
+    let subtotal: i64 = req.items.iter()
+        .map(|i| i.quantity * i.unit_price)
+        .sum();
 
     let tax_rate: f64 = conn.query_row(
         "SELECT tax_rate FROM businesses WHERE id = ?1",
@@ -80,8 +81,12 @@ pub fn create_invoice(
         |r| r.get(0),
     ).unwrap_or(0.0);
 
-    let tax_amount = round2(subtotal * tax_rate / 100.0);
-    let total = round2(subtotal + tax_amount);
+    // tax_rate is a percentage (e.g. 16.0 meaning 16%), stored as a
+    // real-valued rate, not currency — money::apply_rate is the one
+    // deliberate rounding point where that rate meets an actual cents
+    // amount. total is then a plain integer add, exact by construction.
+    let tax_amount = crate::money::apply_rate(subtotal, tax_rate / 100.0);
+    let total = subtotal + tax_amount;
     let items_json = serde_json::to_string(&req.items)?;
     let today = chrono::Utc::now().date_naive().to_string();
 
@@ -192,6 +197,3 @@ fn transition_status(
     Ok(())
 }
 
-fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
-}

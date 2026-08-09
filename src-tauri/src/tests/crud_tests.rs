@@ -11,8 +11,8 @@ fn test_crud_create_and_list() {
     record.insert("sku".into(), json!("TEST-001"));
     record.insert("name".into(), json!("Test Item"));
     record.insert("quantity".into(), json!(10));
-    record.insert("unit_cost".into(), json!(5.0));
-    record.insert("unit_price".into(), json!(10.0));
+    record.insert("unit_cost".into(), json!(500));
+    record.insert("unit_price".into(), json!(1000));
 
     let _id = crate::crud::create(&mut conn, &biz, &uid, "inventory", &record)
         .expect("create record");
@@ -33,8 +33,8 @@ fn test_crud_soft_delete() {
     record.insert("sku".into(), json!("DEL-001"));
     record.insert("name".into(), json!("Delete Me"));
     record.insert("quantity".into(), json!(1));
-    record.insert("unit_cost".into(), json!(1.0));
-    record.insert("unit_price".into(), json!(2.0));
+    record.insert("unit_cost".into(), json!(100));
+    record.insert("unit_price".into(), json!(200));
 
     let id = crate::crud::create(&mut conn, &biz, &uid, "inventory", &record).unwrap();
     crate::crud::delete(&mut conn, &biz, &uid, "inventory", &id).unwrap();

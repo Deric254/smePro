@@ -19,7 +19,7 @@
     },
     {
       "name": "amount",
-      "type": "real",
+      "type": "money",
       "required": true
     },
     {

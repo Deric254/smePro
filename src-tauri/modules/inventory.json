@@ -31,15 +31,15 @@
     },
     {
       "name": "unit_cost",
-      "type": "real",
+      "type": "money",
       "required": true,
-      "default": 0.0
+      "default": 0
     },
     {
       "name": "unit_price",
-      "type": "real",
+      "type": "money",
       "required": true,
-      "default": 0.0
+      "default": 0
     },
     {
       "name": "currency",

@@ -17,6 +17,7 @@ pub mod forecast;
 pub mod http_api;
 pub mod invoice;
 pub mod module;
+pub mod money;
 pub mod notifications;
 pub mod ocr_import;
 pub mod onboarding;

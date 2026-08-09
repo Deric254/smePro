@@ -30,7 +30,7 @@
     },
     {
       "name": "revenue",
-      "type": "real",
+      "type": "money",
       "required": true
     },
     {
@@ -40,7 +40,7 @@
     },
     {
       "name": "unit_price",
-      "type": "real",
+      "type": "money",
       "required": false
     },
     {

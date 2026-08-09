@@ -27,3 +27,4 @@ Thumbs.db
 *.key
 release.keystore
 keystore.properties
+src-tauri/seed_ids.json
