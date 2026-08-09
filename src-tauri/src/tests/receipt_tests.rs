@@ -18,6 +18,7 @@ fn test_receipt_generation() {
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 2 }],
         payment_method: Some("M-Pesa".into()),
         customer: Some("John Doe".into()),
+        customer_phone: None,
         allow_oversell: false, on_credit: false, due_date: None,
     };
     let order = crate::pos::checkout(&mut conn, &biz, &uid, req).unwrap();

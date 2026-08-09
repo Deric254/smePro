@@ -18,6 +18,7 @@ fn test_checkout_deducts_stock() {
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id.clone(), quantity: 5 }],
         payment_method: Some("Cash".into()),
         customer: None,
+        customer_phone: None,
         allow_oversell: false,
         on_credit: false,
         due_date: None,
@@ -45,7 +46,7 @@ fn test_checkout_oversell_blocked() {
 
     let req = crate::pos::CheckoutRequest {
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 5 }],
-        payment_method: None, customer: None,
+        payment_method: None, customer: None, customer_phone: None,
         allow_oversell: false, on_credit: false, due_date: None,
     };
     assert!(crate::pos::checkout(&mut conn, &biz, &uid, req).is_err());

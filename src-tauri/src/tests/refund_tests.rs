@@ -15,6 +15,7 @@ fn checkout_one(conn: &mut rusqlite::Connection, biz: &str, uid: &str, inv_id: &
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id.to_string(), quantity: qty }],
         payment_method: Some("Cash".into()),
         customer: None,
+        customer_phone: None,
         allow_oversell: false,
         on_credit: false,
         due_date: None,
