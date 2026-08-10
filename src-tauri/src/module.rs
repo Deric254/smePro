@@ -245,37 +245,7 @@ impl ModuleDef {
                 None if f.required && f.default.is_none() => {
                     return Err(anyhow!("missing required field: {}", f.name));
                 }
-<<<<<<< HEAD
                 Some(v) => self.validate_field_value(f, v)?,
-=======
-                Some(v) => {
-                    let ok = match f.field_type.as_str() {
-                        "text" | "date" | "unit" | "currency" => v.is_string(),
-                        "integer" => v.is_i64() || v.is_u64(),
-                        // Money is ALWAYS integer minor units by the time
-                        // it reaches storage — never a float. Any decimal
-                        // dollar input from a human is converted via
-                        // money::parse_money_input() at the API boundary,
-                        // before it ever gets here. A float arriving at
-                        // this point means something upstream skipped
-                        // that conversion, which is exactly the bug this
-                        // whole migration exists to prevent — so it's
-                        // rejected here, not silently truncated.
-                        "money" => v.is_i64() || v.is_u64(),
-                        "real" => v.is_f64() || v.is_i64(),
-                        "boolean" => v.is_boolean(),
-                        _ => true,
-                    };
-                    if !ok {
-                        return Err(anyhow!(
-                            "field '{}' expected type {} but got {:?}",
-                            f.name,
-                            f.field_type,
-                            v
-                        ));
-                    }
-                }
->>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
                 None => {} // optional field, no value given — fine
             }
         }
