@@ -1,14 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+<<<<<<< HEAD
   getModuleSchema, listRecords, createRecord, updateRecord, deleteRecord, exportModule,
   runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, getBusinessInfo,
   receiveStock, repackStock, ApiError,
+=======
+  getModuleSchema, listRecords, createRecord, deleteRecord, exportModule,
+  runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, getBusinessInfo, ApiError,
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
 } from '../api';
 import type { NewInvoiceItem } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
 import OcrImport from './OcrImport';
 import InvoiceView from '../components/InvoiceView';
+<<<<<<< HEAD
 
 // Some fields must only ever change through a specific, purpose-built
 // backend action — never through the generic create/edit form — because
@@ -23,6 +29,8 @@ import InvoiceView from '../components/InvoiceView';
 function isActionManagedField(moduleId: string, fieldName: string): boolean {
   return moduleId === 'purchasing' && fieldName === 'received';
 }
+=======
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
 
 export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [schema, setSchema] = useState<ModuleSchema | null>(null);
@@ -85,6 +93,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [showInvoiceForm, setShowInvoiceForm] = useState(false);
   const skipNextSearch = useRef(true);
 
+<<<<<<< HEAD
   // Receiving (purchasing -> inventory) and repacking (bulk -> retail
   // units) are each their own dedicated backend action — see
   // receiving.rs and repack.rs — not something the generic create/edit
@@ -183,6 +192,8 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
 
+=======
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
   async function refreshRecords(searchTerm?: string) {
     const r = await listRecords(moduleId, searchTerm);
     setRecords(r.records);
@@ -194,6 +205,38 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // later. Reset whenever the module changes, since that's a genuinely
   // new "initial load" this same logic applies to again.
   useEffect(() => { skipNextSearch.current = true; }, [moduleId]);
+<<<<<<< HEAD
+=======
+
+  // Live search: fires automatically ~300ms after typing stops, not on
+  // Enter/submit. Debounced rather than firing on every keystroke —
+  // typing "milk" shouldn't be four separate requests for "m", "mi",
+  // "mil", "milk". Cancels a still-pending timer if the user keeps
+  // typing before it fires, and ignores a stale in-flight response
+  // that resolves after a newer search has already started (the
+  // classic "typed fast, an old slow response overwrites new results"
+  // race a naive debounce misses).
+  useEffect(() => {
+    if (!schema) return; // don't search before the module has even loaded
+    if (skipNextSearch.current) { skipNextSearch.current = false; return; }
+    let cancelled = false;
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const r = await listRecords(moduleId, search || undefined);
+        if (!cancelled) setRecords(r.records);
+      } catch {
+        // A failed live search shouldn't blank the list or show an
+        // error banner for what's often just a mid-typing hiccup —
+        // the existing records just stay as they were.
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, moduleId, schema]);
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
 
   // Live search: fires automatically ~300ms after typing stops, not on
   // Enter/submit. Debounced rather than firing on every keystroke —
@@ -351,11 +394,15 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               ) : (
                 <>
                   {canCreate && <button className="btn btn-outline" onClick={() => setShowOcrImport(true)}>Import from photo</button>}
+<<<<<<< HEAD
                   {canCreate && (
                     <button className="btn btn-stamp" onClick={() => (showForm ? cancelForm() : setShowForm(true))}>
                       {showForm ? 'Cancel' : '+ New'}
                     </button>
                   )}
+=======
+                  {canCreate && <button className="btn btn-stamp" onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ New'}</button>}
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
                 </>
               )}
             </div>
@@ -378,12 +425,18 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
           )}
 
           {showForm && moduleId !== 'invoice' && (
+<<<<<<< HEAD
             <form onSubmit={handleSubmit} className="card" style={styles.form}>
               {editingId !== null && (
                 <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginBottom: '0.6rem' }}>Editing record</div>
               )}
               <div style={styles.formGrid}>
                 {schema.fields.filter((f) => !isActionManagedField(moduleId, f.name)).map((f) => (
+=======
+            <form onSubmit={handleCreate} className="card" style={styles.form}>
+              <div style={styles.formGrid}>
+                {schema.fields.map((f) => (
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
                   <FieldInput key={f.name} field={f} value={formValues[f.name] ?? ''} units={units} currencies={currencies} businessCurrency={businessCurrency} onChange={(v) => setFormValues((p) => ({ ...p, [f.name]: v }))} />
                 ))}
               </div>
@@ -414,6 +467,16 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                       </td>
                     ))}
                     {moduleId === 'invoice' && (
+<<<<<<< HEAD
+=======
+                      <td style={styles.td}>
+                        <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => setViewingInvoiceId(r.id)}>
+                          View
+                        </button>
+                      </td>
+                    )}
+                    {canDelete && (
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
                       <td style={styles.td}>
                         <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => setViewingInvoiceId(r.id)}>
                           View
@@ -454,6 +517,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
       {viewingInvoiceId && (
         <InvoiceView invoiceId={viewingInvoiceId} onClose={() => setViewingInvoiceId(null)} />
+<<<<<<< HEAD
       )}
 
       {actionResult && (
@@ -528,6 +592,8 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             </div>
           </div>
         </div>
+=======
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
       )}
     </div>
   );

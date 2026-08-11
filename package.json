@@ -1,7 +1,11 @@
 {
   "name": "sme-pro",
   "private": true,
+<<<<<<< HEAD
   "version": "0.1.24",
+=======
+  "version": "0.1.26",
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -111,6 +111,10 @@ fn model_for(conn: &Connection, business_id: &str, provider_key: &str, default: 
     crate::settings::get(conn, business_id, &format!("ai_{provider_key}_model")).unwrap_or_else(|| default.to_string())
 }
 
+fn model_for(conn: &Connection, business_id: &str, provider_key: &str, default: &str) -> String {
+    crate::settings::get(conn, business_id, &format!("ai_{provider_key}_model")).unwrap_or_else(|| default.to_string())
+}
+
 /// NVIDIA NIM — free tier, OpenAI-compatible chat completions API.
 fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
     let api_key = resolve_key(conn, business_id, "nvidia", "NVIDIA_API_KEY", Some("https://build.nvidia.com"))?;
@@ -170,7 +174,11 @@ fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, que
 /// they're asking about is sensitive.
 fn ask_gemini(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
     let api_key = resolve_key(conn, business_id, "gemini", "GOOGLE_API_KEY", Some("https://aistudio.google.com"))?;
+<<<<<<< HEAD
     let model = model_for(conn, business_id, "gemini", "gemini-3.6-flash");
+=======
+    let model = model_for(conn, business_id, "gemini", "gemini-2.5-flash");
+>>>>>>> 3071f825f10981753eb48b13f905fa2dd375c583
 
     let body = json!({
         "systemInstruction": { "parts": [{ "text": system_prompt }] },
