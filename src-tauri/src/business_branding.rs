@@ -10,7 +10,15 @@
 //! - 2MB file size limit (prevents disk-fill DoS)
 //! - 200-char slogan limit (prevents UI breakage)
 //! - Path traversal prevention (filename derived from business_id only)
-//! - Atomic update: logo file write + DB update in one transaction
+//! - Atomic-in-practice update: every validation (including slogan
+//!   length) runs BEFORE the logo file is written to disk or the DB
+//!   transaction starts — a file write can never truly participate in
+//!   SQL transaction rollback, so the only way to keep this genuinely
+//!   consistent is to make sure nothing that can still fail happens
+//!   after the point of no return. An earlier version validated the
+//!   slogan after already writing the logo file, which could leave an
+//!   orphaned file on disk with no DB row pointing to it if the
+//!   slogan check failed — fixed by reordering, not just documented.
 
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
@@ -38,6 +46,24 @@ pub fn update_branding(
     slogan: Option<&str>,
     app_data_dir: &Path,
 ) -> Result<String> {
+    // Validate EVERYTHING before touching the filesystem or starting
+    // the DB transaction. Writing the logo file is not something SQL
+    // transaction rollback can undo — a file write and a SQL commit
+    // are two different atomicity domains, and the only way to keep
+    // this genuinely atomic in practice is to make sure nothing that
+    // can fail happens after the point of no return. An earlier
+    // version of this function validated the slogan length AFTER
+    // already writing the logo file to disk, so a too-long slogan
+    // left an orphaned logo file behind with no DB row ever pointing
+    // to it — the exact opposite of the "atomic" claim in this file's
+    // header comment.
+    let trimmed_slogan = slogan.map(|s| s.trim().to_string());
+    if let Some(ref t) = trimmed_slogan {
+        if t.len() > MAX_SLOGAN_CHARS {
+            return Err(anyhow!("slogan must be under {} characters", MAX_SLOGAN_CHARS));
+        }
+    }
+
     let tx = conn.transaction()?;
 
     let mut logo_path: Option<String> = None;
@@ -60,12 +86,45 @@ pub fn update_branding(
 
         let is_png = &decoded[0..8] == &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let is_jpg = &decoded[0..3] == &[0xFF, 0xD8, 0xFF];
-        let is_svg = std::str::from_utf8(&decoded[..decoded.len().min(200)])
-            .map(|s| s.trim_start().starts_with("<svg"))
+        let is_svg = std::str::from_utf8(&decoded)
+            .map(|s| {
+                let trimmed = s.trim_start();
+                let looks_like_svg = trimmed.starts_with("<svg")
+                    || (trimmed.starts_with("<?xml") && trimmed[..trimmed.len().min(500)].contains("<svg"));
+                if !looks_like_svg {
+                    return false;
+                }
+                // SVG is a document format, not just an image format —
+                // it can legitimately contain a <script> tag or an
+                // onload=/onclick= event handler that runs JavaScript.
+                // Today, every place this app renders a logo uses a
+                // plain <img src=...>, and browsers specifically refuse
+                // to execute embedded SVG scripts loaded that way — but
+                // that's an accident of how the frontend happens to
+                // render it today, not something this validator should
+                // rely on. The one place a business owner's logo can
+                // originate from an untrusted-ish source (anyone who
+                // can reach this endpoint with a crafted file) is
+                // exactly where "currently safe by luck" isn't good
+                // enough — reject the dangerous content outright so the
+                // file itself is safe regardless of how it's ever
+                // rendered, now or later.
+                let lower = s.to_lowercase();
+                let dangerous = ["<script", "javascript:", "<foreignobject", "<iframe", "<embed"];
+                if dangerous.iter().any(|p| lower.contains(p)) {
+                    return false;
+                }
+                // Event-handler attributes (onload=, onclick=, etc.) —
+                // checked as a pattern rather than an exhaustive list,
+                // since there are dozens of valid `on*` SVG/DOM events.
+                static ON_ATTR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+                let re = ON_ATTR.get_or_init(|| regex::Regex::new(r#"\son\w+\s*="#).unwrap());
+                !re.is_match(&lower)
+            })
             .unwrap_or(false);
 
         if !is_png && !is_jpg && !is_svg {
-            return Err(anyhow!("logo must be PNG, JPG, or SVG"));
+            return Err(anyhow!("logo must be PNG, JPG, or SVG containing no embedded scripts or event handlers"));
         }
 
         let ext = if is_png { "png" } else if is_jpg { "jpg" } else { "svg" };
@@ -80,11 +139,7 @@ pub fn update_branding(
         logo_path = Some(file_path.to_string_lossy().to_string());
     }
 
-    if let Some(s) = slogan {
-        let trimmed = s.trim();
-        if trimmed.len() > MAX_SLOGAN_CHARS {
-            return Err(anyhow!("slogan must be under {} characters", MAX_SLOGAN_CHARS));
-        }
+    if let Some(ref trimmed) = trimmed_slogan {
         tx.execute(
             "UPDATE businesses SET slogan = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![trimmed, business_id],

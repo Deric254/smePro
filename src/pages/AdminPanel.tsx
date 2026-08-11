@@ -5,21 +5,21 @@ import {
   listUnits, createUnit, deleteUnit,
   listCurrencies, createCurrency, deleteCurrency,
   getSettings, setSetting,
+  getAiSettings,
   getVendorLicenseStatus, redeemVendorKey,
   createBackup, restoreBackup,
-  getPaymentHistory, initiateStripeCheckout, initiateMpesaPayment,
   getAuditLog,
-  listNotifications, sendNotification,
+  listNotifications, sendNotification, sendLowStockAlert,
   changeBusinessType,
   listModules, getModuleSchema, enableModule,
   ApiError,
 } from '../api';
-import type { PaymentHistoryEntry, AuditLogEntry, NotificationRecord } from '../api';
+import type { AuditLogEntry, NotificationRecord, AiSettingsStatus } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
 import BusinessBranding from '../components/BusinessBranding';
 import TwoFactorSetup from '../components/TwoFactorSetup';
 
-type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'billing' | 'audit' | 'notifications' | 'business' | 'security';
+type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'audit' | 'notifications' | 'business' | 'security' | 'ai';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
@@ -28,9 +28,9 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'currencies', label: 'Currencies' },
   { id: 'settings', label: 'Theme & Settings' },
   { id: 'business', label: 'Business' },
+  { id: 'ai', label: 'AI Settings' },
   { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
-  { id: 'billing', label: 'Billing' },
   { id: 'license', label: 'Vendor License' },
   { id: 'backup', label: 'Backup & Restore' },
   { id: 'audit', label: 'Audit Log' },
@@ -59,9 +59,9 @@ export default function AdminPanel() {
       {tab === 'settings' && <SettingsTab />}
       {tab === 'business' && <BusinessTab />}
       {tab === 'security' && <TwoFactorSetup />}
+      {tab === 'ai' && <AiSettingsTab />}
       {tab === 'notifications' && <NotificationsTab />}
       {tab === 'license' && <VendorLicenseTab />}
-      {tab === 'billing' && <BillingTab />}
       {tab === 'backup' && <BackupTab />}
       {tab === 'audit' && <AuditLogTab />}
     </div>
@@ -755,147 +755,6 @@ function VendorLicenseTab() {
   );
 }
 
-// -------------------------------------------------------------- Billing
-
-function BillingTab() {
-  const [history, setHistory] = useState<PaymentHistoryEntry[]>([]);
-  const [loadingHistory, setLoadingHistory] = useState(true);
-  const [provider, setProvider] = useState<'stripe' | 'mpesa'>('stripe');
-  const [purpose, setPurpose] = useState<'activation' | 'subscription'>('subscription');
-  const [amount, setAmount] = useState('');
-  const [currency, setCurrency] = useState('usd');
-  const [phone, setPhone] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [mpesaMessage, setMpesaMessage] = useState<string | null>(null);
-
-  const refreshHistory = () => {
-    setLoadingHistory(true);
-    getPaymentHistory().then((r) => setHistory(r.payments)).catch(() => {}).finally(() => setLoadingHistory(false));
-  };
-  useEffect(() => { refreshHistory(); }, []);
-
-  async function handlePay(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setMpesaMessage(null);
-    const parsedAmount = parseFloat(amount);
-    if (!parsedAmount || parsedAmount <= 0) { setError('Enter a valid amount.'); return; }
-    setBusy(true);
-    try {
-      if (provider === 'stripe') {
-        const res = await initiateStripeCheckout(purpose, parsedAmount, currency);
-        if (res.checkout_url) {
-          // Real payment page — leaves the app deliberately. Opened in
-          // the system browser, not inside the app's own webview, since
-          // that's where a saved card / Apple Pay / etc. already works.
-          try {
-            const { openUrl } = await import('@tauri-apps/plugin-opener');
-            await openUrl(res.checkout_url);
-          } catch {
-            window.open(res.checkout_url, '_blank');
-          }
-        }
-      } else {
-        if (!phone.trim()) { setError('Enter the M-Pesa phone number (format: 2547XXXXXXXX).'); setBusy(false); return; }
-        const res = await initiateMpesaPayment(purpose, parsedAmount, phone.trim());
-        setMpesaMessage(res.message || 'Check your phone to complete the M-Pesa payment.');
-      }
-      setAmount('');
-      refreshHistory();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not start the payment');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div>
-      <div className="card" style={{ marginBottom: '1rem' }}>
-        <h3 style={{ marginTop: 0 }}>Make a payment</h3>
-        <p style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: 0 }}>
-          This is a real charge through Stripe or M-Pesa — different from the free trial or a
-          vendor-issued license key. Use this if your vendor has set up real billing for this
-          install.
-        </p>
-        <ErrorBox error={error} />
-        {mpesaMessage && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginBottom: '0.8rem' }}>{mpesaMessage}</div>}
-        <form onSubmit={handlePay} style={styles.formGrid}>
-          <div>
-            <label>Provider</label>
-            <select value={provider} onChange={(e) => setProvider(e.target.value as 'stripe' | 'mpesa')} style={{ width: '100%' }}>
-              <option value="stripe">Card (Stripe)</option>
-              <option value="mpesa">M-Pesa</option>
-            </select>
-          </div>
-          <div>
-            <label>Purpose</label>
-            <select value={purpose} onChange={(e) => setPurpose(e.target.value as 'activation' | 'subscription')} style={{ width: '100%' }}>
-              <option value="subscription">Monthly subscription</option>
-              <option value="activation">One-time activation</option>
-            </select>
-          </div>
-          <div>
-            <label>Amount</label>
-            <input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} required style={{ width: '100%' }} />
-          </div>
-          {provider === 'stripe' ? (
-            <div>
-              <label>Currency</label>
-              <input value={currency} onChange={(e) => setCurrency(e.target.value.toLowerCase())} maxLength={3} style={{ width: '100%' }} />
-            </div>
-          ) : (
-            <div>
-              <label>M-Pesa phone number</label>
-              <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="2547XXXXXXXX" style={{ width: '100%' }} />
-            </div>
-          )}
-        </form>
-        <button className="btn btn-stamp" style={{ marginTop: '0.8rem' }} onClick={handlePay} disabled={busy}>
-          {busy ? 'Starting…' : provider === 'stripe' ? 'Continue to payment' : 'Send payment request'}
-        </button>
-      </div>
-
-      <h3 style={{ margin: '1.2rem 0 0.8rem' }}>Payment history</h3>
-      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Date</th>
-              <th style={styles.th}>Provider</th>
-              <th style={styles.th}>Purpose</th>
-              <th style={styles.th}>Amount</th>
-              <th style={styles.th}>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loadingHistory ? (
-              <tr><td style={styles.td} colSpan={5}>Loading…</td></tr>
-            ) : history.length === 0 ? (
-              <tr><td style={styles.td} colSpan={5}>No payments yet.</td></tr>
-            ) : (
-              history.map((p) => (
-                <tr key={p.reference}>
-                  <td style={styles.td}>{new Date(p.created_at).toLocaleDateString()}</td>
-                  <td style={styles.td}>{p.provider}</td>
-                  <td style={styles.td}>{p.purpose}</td>
-                  <td className="mono" style={styles.td}>{p.amount.toFixed(2)} {p.currency.toUpperCase()}</td>
-                  <td style={styles.td}>
-                    <span className={`status-pill ${p.status === 'completed' ? 'status-active' : p.status === 'failed' ? 'status-inactive' : ''}`}>
-                      {p.status}
-                    </span>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
 // --------------------------------------------------------------- Backup
 
 function BackupTab() {
@@ -1168,6 +1027,13 @@ function NotificationsTab() {
   const [sent, setSent] = useState(false);
   const [history, setHistory] = useState<NotificationRecord[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
+  // Separate submitting/error state from the manual send form above —
+  // the two actions can be triggered independently, and mixing their
+  // in-flight/error state would show a spinner or error message on
+  // the wrong button while the other one is what's actually running.
+  const [sendingLowStock, setSendingLowStock] = useState(false);
+  const [lowStockError, setLowStockError] = useState<string | null>(null);
+  const [lowStockSent, setLowStockSent] = useState(false);
 
   const refresh = () => {
     setLoadingHistory(true);
@@ -1189,6 +1055,29 @@ function NotificationsTab() {
       setError(err instanceof ApiError ? err.message : 'Could not send this message');
     } finally {
       setSending(false);
+    }
+  }
+
+  async function handleSendLowStock() {
+    if (!recipient) {
+      setLowStockError('Enter a recipient phone number above first.');
+      return;
+    }
+    setLowStockError(null);
+    setLowStockSent(false);
+    setSendingLowStock(true);
+    try {
+      // The message itself is composed server-side from the same
+      // low-stock data the AI assistant and Dashboard already use —
+      // see notifications::send_low_stock_alert — so there's nothing
+      // else to gather here beyond channel + recipient.
+      await sendLowStockAlert(channel, recipient);
+      setLowStockSent(true);
+      refresh();
+    } catch (err) {
+      setLowStockError(err instanceof ApiError ? err.message : 'Could not send the low-stock alert');
+    } finally {
+      setSendingLowStock(false);
     }
   }
 
@@ -1225,6 +1114,20 @@ function NotificationsTab() {
         </button>
       </div>
 
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <h3 style={{ marginTop: 0 }}>Send low-stock alert</h3>
+        <p style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: 0 }}>
+          Sends a message to the recipient above listing every item currently at or below its reorder
+          level, across all your modules — the same data the Dashboard and AI assistant already use, so
+          there's nothing else to fill in beyond the channel and recipient above.
+        </p>
+        {lowStockError && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginBottom: '0.6rem' }}>{lowStockError}</div>}
+        {lowStockSent && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.6rem' }}>Sent.</div>}
+        <button className="btn btn-outline" onClick={handleSendLowStock} disabled={sendingLowStock}>
+          {sendingLowStock ? 'Sending…' : 'Send low-stock alert'}
+        </button>
+      </div>
+
       <h3 style={{ margin: '1.2rem 0 0.8rem' }}>Recent messages</h3>
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
         <table style={styles.table}>
@@ -1258,6 +1161,132 @@ function NotificationsTab() {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------- AI Settings
+
+const PROVIDERS = [
+  { id: 'nvidia', label: 'NVIDIA NIM', free: true, url: 'https://build.nvidia.com', keyField: 'nvidia_key_set' as const },
+  { id: 'gemini', label: 'Google Gemini', free: true, url: 'https://aistudio.google.com', keyField: 'gemini_key_set' as const },
+  { id: 'openai', label: 'OpenAI', free: false, url: 'https://platform.openai.com/api-keys', keyField: 'openai_key_set' as const },
+  { id: 'claude', label: 'Claude (Anthropic)', free: false, url: 'https://console.anthropic.com', keyField: 'claude_key_set' as const },
+];
+
+function AiSettingsTab() {
+  const [status, setStatus] = useState<AiSettingsStatus | null>(null);
+  const [provider, setProvider] = useState('nvidia');
+  const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getAiSettings()
+      .then((s) => { setStatus(s); setProvider(s.provider); })
+      .catch(() => setError('Could not load AI settings'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function saveProvider(id: string) {
+    setSaving('provider');
+    setError(null);
+    try {
+      await setSetting('ai_provider', id);
+      setProvider(id);
+      setStatus((s) => (s ? { ...s, provider: id } : s));
+      setSaved('provider');
+      setTimeout(() => setSaved(null), 2000);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function saveKey(providerId: string) {
+    const key = keyInputs[providerId]?.trim();
+    if (!key) return;
+    setSaving(providerId);
+    setError(null);
+    try {
+      await setSetting(`ai_${providerId}_api_key`, key);
+      setKeyInputs((k) => ({ ...k, [providerId]: '' }));
+      const fresh = await getAiSettings();
+      setStatus(fresh);
+      setSaved(providerId);
+      setTimeout(() => setSaved(null), 2000);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save key');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  if (loading) return <div style={{ color: 'var(--ink-soft)' }}>Loading…</div>;
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <h3 style={{ marginTop: 0 }}>AI assistant</h3>
+        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+          The AI assistant answers questions grounded in this business's own real data — it sees
+          your actual inventory, sales, and records, not just a general description of the app.
+          Pick a provider below and add its key. NVIDIA and Google both offer genuinely free tiers,
+          no card required, if you want to try this at zero cost first.
+        </p>
+        <ErrorBox error={error} />
+
+        <label>Active provider</label>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+          {PROVIDERS.map((p) => (
+            <button
+              key={p.id}
+              className={provider === p.id ? 'btn btn-stamp' : 'btn btn-outline'}
+              onClick={() => saveProvider(p.id)}
+              disabled={saving === 'provider'}
+            >
+              {p.label}{p.free && <span style={{ fontSize: '0.7rem', opacity: 0.8 }}> · free</span>}
+            </button>
+          ))}
+        </div>
+        {saved === 'provider' && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.8rem' }}>Provider saved.</div>}
+      </div>
+
+      {PROVIDERS.map((p) => {
+        const isSet = status?.[p.keyField];
+        return (
+          <div key={p.id} className="card" style={{ marginBottom: '0.8rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+              <div style={{ fontWeight: 600 }}>
+                {p.label}
+                {!p.free && <span style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', fontWeight: 400 }}> — paid, no ongoing free tier</span>}
+              </div>
+              <span className={`status-pill ${isSet ? 'status-active' : 'status-inactive'}`}>
+                {isSet ? 'Key configured' : 'Not configured'}
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <input
+                type="password"
+                placeholder={isSet ? 'Enter a new key to replace it' : 'Paste your API key here'}
+                value={keyInputs[p.id] ?? ''}
+                onChange={(e) => setKeyInputs((k) => ({ ...k, [p.id]: e.target.value }))}
+                style={{ flex: 1 }}
+              />
+              <button className="btn btn-outline" onClick={() => saveKey(p.id)} disabled={saving === p.id || !keyInputs[p.id]?.trim()}>
+                {saving === p.id ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+            {saved === p.id && <div style={{ color: 'var(--ok)', fontSize: '0.82rem', marginTop: '0.4rem' }}>Key saved.</div>}
+            <a href={p.url} target="_blank" rel="noreferrer" style={{ fontSize: '0.78rem', display: 'inline-block', marginTop: '0.5rem' }}>
+              Get a {p.free ? 'free' : ''} key at {p.url.replace('https://', '')} →
+            </a>
+          </div>
+        );
+      })}
     </div>
   );
 }

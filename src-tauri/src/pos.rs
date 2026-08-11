@@ -60,6 +60,12 @@ pub struct CheckoutRequest {
     pub on_credit: bool,
     #[serde(default)]
     pub due_date: Option<String>,
+    /// Optional — most sales stay anonymous, this only activates when
+    /// a phone number is actually given. When present, finds-or-creates
+    /// a customer record and links this sale to it (see customers.rs),
+    /// which is what makes lifetime value tracking possible at all.
+    #[serde(default)]
+    pub customer_phone: Option<String>,
 }
 
 /// Runs the whole checkout as one atomic transaction. On success,
@@ -94,16 +100,30 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
 
     let order_id = Uuid::new_v4().to_string();
     let mut lines = Vec::with_capacity(req.items.len());
-    let mut subtotal = 0.0_f64;
+    // Integer cents throughout — see money.rs. This sum is exact by
+    // construction; there is no fractional cent that could ever need
+    // rounding here, unlike the f64 subtotal this replaced.
+    let mut subtotal: i64 = 0;
 
     let tx = conn.transaction()?;
+
+    // Same transaction as everything else below — if the customer
+    // gets created/updated but the sale itself fails partway through,
+    // the whole thing rolls back together, not a customer record left
+    // behind with no matching purchase.
+    let customer_id = match &req.customer_phone {
+        Some(phone) if !phone.trim().is_empty() => {
+            Some(crate::customers::find_or_create(&tx, business_id, req.customer.as_deref(), phone)?)
+        }
+        _ => None,
+    };
 
     for item in &req.items {
         if item.quantity <= 0 {
             return Err(anyhow!("quantity must be greater than zero"));
         }
 
-        let row: Option<(String, i64, f64, String)> = tx
+        let row: Option<(String, i64, i64, String)> = tx
             .query_row(
                 &format!("SELECT name, quantity, unit_price, sku FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
                 params![item.inventory_record_id, business_id],
@@ -126,7 +146,9 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             params![new_qty, item.inventory_record_id, business_id],
         )?;
 
-        let line_total = unit_price * item.quantity as f64;
+        // Exact — integer cents times an integer quantity is still an
+        // exact integer, no rounding step needed or allowed here.
+        let line_total: i64 = unit_price * item.quantity;
         subtotal += line_total;
 
         let mut record: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
@@ -137,6 +159,11 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         record.insert("order_id".into(), json!(order_id));
         if let Some(c) = &req.customer {
             record.insert("customer".into(), json!(c));
+        }
+        if let Some(phone) = &req.customer_phone {
+            if !phone.trim().is_empty() {
+                record.insert("customer_phone".into(), json!(phone.trim()));
+            }
         }
         if let Some(p) = &req.payment_method {
             record.insert("payment_method".into(), json!(p));
@@ -203,6 +230,7 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     let summary = json!({
         "order_id": order_id,
         "customer": req.customer,
+        "customer_id": customer_id,
         "payment_method": req.payment_method,
         "subtotal": subtotal,
         "item_count": req.items.len(),
@@ -234,8 +262,8 @@ pub fn get_order(conn: &Connection, business_id: &str, order_id: &str) -> Result
             "sale_id": r.get::<_, String>(0)?,
             "item_name": r.get::<_, String>(1)?,
             "quantity": r.get::<_, i64>(2)?,
-            "revenue": r.get::<_, f64>(3)?,
-            "unit_price": r.get::<_, Option<f64>>(4)?,
+            "revenue": r.get::<_, i64>(3)?,
+            "unit_price": r.get::<_, Option<i64>>(4)?,
             "customer": r.get::<_, Option<String>>(5)?,
             "payment_method": r.get::<_, Option<String>>(6)?,
             "created_at": r.get::<_, String>(7)?,
@@ -245,6 +273,6 @@ pub fn get_order(conn: &Connection, business_id: &str, order_id: &str) -> Result
     if items.is_empty() {
         return Err(anyhow!("order not found"));
     }
-    let subtotal: f64 = items.iter().filter_map(|v| v.get("revenue").and_then(|r| r.as_f64())).sum();
+    let subtotal: i64 = items.iter().filter_map(|v| v.get("revenue").and_then(|r| r.as_i64())).sum();
     Ok(json!({"order_id": order_id, "subtotal": subtotal, "items": items}))
 }

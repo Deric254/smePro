@@ -61,7 +61,7 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
 
     let tx = conn.transaction()?;
 
-    let row: Option<(String, i64, bool, Option<String>, String, f64)> = tx
+    let row: Option<(String, i64, bool, Option<String>, String, i64)> = tx
         .query_row(
             &format!(
                 "SELECT item_name, quantity, received, inventory_record_id, supplier, unit_cost
@@ -90,7 +90,7 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
         return Err(anyhow!("quantity received must be greater than zero"));
     }
 
-    let inv_row: Option<(String, i64, f64)> = tx
+    let inv_row: Option<(String, i64, i64)> = tx
         .query_row(
             &format!("SELECT name, quantity, unit_cost FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
             params![inventory_record_id, business_id],
@@ -111,7 +111,15 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
     // sold out before now), this naturally reduces to exactly the new
     // delivery's cost -- no special case needed, the zero contributes
     // nothing to the weighted sum.
-    let new_unit_cost = ((current_qty as f64 * current_unit_cost) + (quantity_received as f64 * po_unit_cost)) / new_qty as f64;
+    // Integer cents throughout (see money.rs) — the weighted-average
+    // numerator is an exact i64 product-sum, no float ever involved.
+    // Plain integer division truncates toward zero, which would
+    // silently shave fractions of a cent off the recorded cost every
+    // single time this runs; adding half the divisor before dividing
+    // rounds to the nearest cent instead, the one deliberate rounding
+    // point in this calculation.
+    let numerator = current_qty * current_unit_cost + quantity_received * po_unit_cost;
+    let new_unit_cost = (numerator + new_qty / 2) / new_qty;
     tx.execute(
         &format!("UPDATE {inventory_table} SET quantity = ?1, unit_cost = ?2, updated_at = datetime('now') WHERE id = ?3 AND business_id = ?4"),
         params![new_qty, new_unit_cost, inventory_record_id, business_id],

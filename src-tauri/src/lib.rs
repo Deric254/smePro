@@ -9,17 +9,18 @@ pub mod business_panel;
 pub mod crash_report;
 pub mod crud;
 pub mod currency;
+pub mod customers;
 pub mod db;
 pub mod db_migrations;
+pub mod excel_import;
 pub mod forecast;
 pub mod http_api;
 pub mod invoice;
-pub mod license;
 pub mod module;
+pub mod money;
 pub mod notifications;
 pub mod ocr_import;
 pub mod onboarding;
-pub mod payment;
 pub mod pos;
 pub mod rate_limit;
 pub mod rbac;
@@ -86,7 +87,7 @@ pub mod xlsx_export;
 /// events) to survive the user switching away from the app briefly.
 /// Flagging this now rather than assuming desktop's threading model
 /// transfers over silently.
-#[cfg(feature = "tauri_shell")]
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
 
@@ -162,13 +163,41 @@ pub fn run() {
             std::env::set_var("SME_APP_DATA_DIR", app_data_dir.to_string_lossy().to_string());
 
             let conn = db::open(&db_path).expect("failed to open local database");
-            crate::android_service::start_server_platform(conn, "127.0.0.1:8080", &app_data_dir);
 
             // Crash reporting is off by default (no DSN configured) — see
             // crash_report.rs. Flip `None` to `Some("your-sentry-dsn")` once
-            // you have a real endpoint to send to.
+            // you have a real endpoint to send to. Even then, a business
+            // can turn it off via the crash_reporting_enabled setting.
+            // Must run before conn moves into start_server_platform below
+            // (that function takes ownership of it, not a borrow).
+            let crash_dsn: Option<&str> = None;
             let version = app.package_info().version.to_string();
-            crate::crash_report::init(None, &version, &app_data_dir);
+            crate::crash_report::init(&conn, crash_dsn, &version, &app_data_dir);
+            // flush_queue actually SENDS whatever init's panic hook queued
+            // from a previous session — init() alone only ever writes
+            // reports to disk, it never transmits anything. An earlier
+            // version of this file called init() but never flush_queue()
+            // anywhere, so even a deployer who followed this exact
+            // module's own setup instructions and configured a real DSN
+            // would have crash reports pile up on disk forever and never
+            // actually reach anywhere.
+            if let Some(dsn) = crash_dsn {
+                // Background thread, not inline: this makes real network
+                // calls (10s timeout each, times however many crashes
+                // queued while offline), and app launch shouldn't stall
+                // on that — same "don't block" principle the panic hook
+                // itself already follows for queuing.
+                let dsn = dsn.to_string();
+                let flush_conn = db::open(&db_path);
+                let flush_dir = app_data_dir.clone();
+                if let Ok(flush_conn) = flush_conn {
+                    std::thread::spawn(move || {
+                        crate::crash_report::flush_queue(&flush_conn, &dsn, &flush_dir);
+                    });
+                }
+            }
+
+            crate::android_service::start_server_platform(conn, "127.0.0.1:8080", &app_data_dir);
 
             Ok(())
         })

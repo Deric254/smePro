@@ -69,8 +69,20 @@ pub struct CandidateRecord {
 /// ledgers is messy (see the honest example in the docs); pretending
 /// otherwise would be worse than a small amount of manual cleanup.
 pub fn parse_into_candidates(module: &ModuleDef, raw_text: &str) -> Vec<CandidateRecord> {
+    // "money" fields are guessed here as a plain decimal number (e.g.
+    // 19.99), matching exactly what's printed on the receipt — NOT
+    // converted to integer cents at this stage. This is deliberate:
+    // every OCR candidate is a proposal a human reviews and edits in
+    // a text box before anything is saved (see the module doc above),
+    // and that review box needs to show "19.99" to match the physical
+    // receipt, not a raw cents integer like "1999" that means nothing
+    // next to it. The conversion to actual integer cents happens
+    // exactly once, at the same submission boundary every other
+    // money input in the app goes through (money::parse_money_input
+    // on the frontend) — not duplicated here with no currency context
+    // to do it correctly anyway.
     let numeric_fields: Vec<&str> = module.fields.iter()
-        .filter(|f| f.field_type == "integer" || f.field_type == "real")
+        .filter(|f| f.field_type == "integer" || f.field_type == "real" || f.field_type == "money")
         .map(|f| f.name.as_str())
         .collect();
     let text_fields: Vec<&str> = module.fields.iter()

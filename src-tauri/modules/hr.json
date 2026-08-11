@@ -19,9 +19,9 @@
     },
     {
       "name": "salary",
-      "type": "real",
+      "type": "money",
       "required": false,
-      "default": 0.0
+      "default": 0
     },
     {
       "name": "hire_date",

@@ -11,6 +11,15 @@ use crate::{audit, rbac};
 /// module enabled for the business, past or present, can be operated on
 /// purely from what's stored in the DB.
 pub(crate) fn load_module(conn: &Connection, business_id: &str, module_id: &str) -> Result<ModuleDef> {
+    // Belt-and-suspenders: module_id ultimately becomes part of a raw
+    // SQL table name (see ModuleDef::table_name), and while the
+    // existence-gated query below already means an attacker can't
+    // reach that with arbitrary content (a nonexistent module_id just
+    // returns "not enabled" before any table name is ever built), this
+    // is the one chokepoint every module resolution passes through —
+    // cheap insurance against that invariant ever being relied on
+    // incorrectly by some future code path that isn't as careful.
+    crate::security::validate_table_name(module_id)?;
     let raw: String = conn
         .query_row(
             "SELECT schema_json FROM modules WHERE business_id = ?1 AND id = ?2 AND enabled = 1",
@@ -176,6 +185,15 @@ pub fn update(
     body: &Map<String, Value>,
 ) -> Result<()> {
     rbac::require(conn, user_id, module_id, "update")?;
+    // record_id arrives straight from the URL path — every record ID
+    // this system ever creates is a UUIDv4 (see insert_validated_record),
+    // so anything else is either a typo'd URL or a probe, not a
+    // legitimate request. Rejecting it here gives a clear error
+    // immediately rather than a generic "record not found" further
+    // down, and — same chokepoint reasoning as validate_table_name in
+    // load_module — costs nothing and closes the gap between what
+    // security.rs claims to validate and what actually gets checked.
+    crate::security::validate_uuid(record_id)?;
     let module = load_module(conn, business_id, module_id)?;
     let table = module.table_name();
 
@@ -198,6 +216,14 @@ pub fn update(
     }
 
     let record: std::collections::HashMap<String, Value> = body.clone().into_iter().collect();
+    // Same type enforcement as create — a "money" field being edited
+    // is exactly as forbidden from accepting a float as one being
+    // created. This was previously missing entirely: update() only
+    // checked that field NAMES were valid, never that a provided
+    // value's TYPE matched the field's declared type, which meant a
+    // float dollar amount could bypass the integer-cents contract
+    // simply by going through an edit instead of a create.
+    module.validate_partial(&record)?;
     crate::reference_data::validate_field_references(conn, business_id, &module, &record)?;
 
     sets.push("updated_at = datetime('now')".to_string());
@@ -232,6 +258,7 @@ pub fn delete(
     record_id: &str,
 ) -> Result<()> {
     rbac::require(conn, user_id, module_id, "delete")?;
+    crate::security::validate_uuid(record_id)?;
     let module = load_module(conn, business_id, module_id)?;
     let table = module.table_name();
 

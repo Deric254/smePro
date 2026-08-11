@@ -1,6 +1,15 @@
-import { useEffect, useState } from 'react';
-import { listModules, listRecords, getModuleSchema, runReport, listUsers, getVendorLicenseStatus, getSettings, setSetting } from '../api';
+import { useEffect, useState, lazy, Suspense } from 'react';
+import { listModules, listRecords, getModuleSchema, runReport, listUsers, getVendorLicenseStatus, getBusinessInfo, getSettings, setSetting } from '../api';
 import type { ModuleListItem } from '../types';
+import { formatMoney } from '../lib/money';
+
+// Lazy-loaded specifically because it's the only thing in the app that
+// pulls in recharts, which roughly doubles the JS bundle on its own —
+// no reason every screen (login, POS, admin) should pay that cost just
+// because the Dashboard exists somewhere in the app. This chunk only
+// downloads the moment someone actually views the dashboard with sales
+// data, not before.
+const AnalyticsSection = lazy(() => import('../components/AnalyticsSection'));
 
 function initials(name: string) {
   const words = name.split(/[\s/]+/).filter(Boolean);
@@ -8,10 +17,15 @@ function initials(name: string) {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
-function formatMetricValue(value: number): string {
-  // Whole numbers stay whole (unit counts, headcounts); anything with
-  // meaningful fractional cents (money) keeps 2 decimals. Avoids both
-  // "3.00 team members" and "revenue: 2400" losing its cents silently.
+// Whole numbers stay whole (unit counts, headcounts). A metric whose
+// measure field is "money" is ALWAYS integer cents — see
+// src/lib/money.ts — and must go through formatMoney regardless of
+// whether the raw number happens to look whole (e.g. exactly $4,500.00
+// is stored as 450000, which is itself an integer, so "is this value
+// a whole number" can never be used to detect money — only the
+// field's own declared type can).
+function formatMetricValue(value: number, isMoney: boolean, currency: string): string {
+  if (isMoney) return formatMoney(value, currency);
   return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
@@ -20,6 +34,7 @@ interface ModuleStat {
   recordCount: number | null;
   metricValue: number | null;
   metricLabel: string | null;
+  metricIsMoney: boolean;
 }
 
 export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }: {
@@ -32,6 +47,7 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
   const [userCount, setUserCount] = useState<number | null>(null);
   const [licensed, setLicensed] = useState<boolean | null>(null);
   const [checklistDismissed, setChecklistDismissed] = useState<boolean | null>(null);
+  const [currency, setCurrency] = useState('USD');
 
   useEffect(() => {
     let cancelled = false;
@@ -43,6 +59,7 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
           let recordCount: number | null = null;
           let metricValue: number | null = null;
           let metricLabel: string | null = null;
+          let metricIsMoney = false;
           try {
             const r = await listRecords(module.id);
             recordCount = r.records.length;
@@ -58,13 +75,16 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
               });
               metricValue = report.report?.[0]?.value ?? 0;
               metricLabel = metric.label;
+              metricIsMoney = schema.fields.find((f: { name: string; type: string }) => f.name === metric.measure)?.type === 'money';
             }
           } catch { /* module has no metric, or this role can't read it — falls back to record count below */ }
-          return { module, recordCount, metricValue, metricLabel };
+          return { module, recordCount, metricValue, metricLabel, metricIsMoney };
         })
       );
       if (!cancelled) { setStats(withStats); setLoading(false); }
     }).catch(() => { if (!cancelled) setLoading(false); });
+
+    getBusinessInfo().then((b: any) => { if (!cancelled && b?.currency) setCurrency(b.currency); }).catch(() => {});
 
     // Best-effort — Staff/some roles won't have permission for these,
     // and that's fine, the dashboard just quietly shows less.
@@ -89,6 +109,12 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
         <div style={styles.eyebrow}>Welcome back</div>
         <h1 style={{ margin: '0.15rem 0 0' }}>{businessName || 'Your business'}</h1>
       </div>
+
+      {stats.some((s) => s.module.id === 'sales') && (
+        <Suspense fallback={<div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem', marginBottom: '1.6rem' }}>Loading analytics…</div>}>
+          <AnalyticsSection />
+        </Suspense>
+      )}
 
       {showChecklist && (
         <div className="card" style={styles.checklistCard}>
@@ -127,7 +153,7 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
         </div>
       ) : (
         <div style={styles.grid}>
-          {stats.map(({ module, recordCount, metricValue, metricLabel }) => (
+          {stats.map(({ module, recordCount, metricValue, metricLabel, metricIsMoney }) => (
             <button key={module.id} className="card" style={styles.tile} onClick={() => onSelectModule(module.id)}>
               <span className="stamp-badge" style={{ width: '2.4rem', height: '2.4rem', fontSize: '0.85rem', color: 'var(--stamp)', flexShrink: 0 }}>
                 {initials(module.display_name)}
@@ -136,7 +162,7 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
                 <div style={{ fontWeight: 600, fontSize: '0.92rem' }}>{module.display_name}</div>
                 {metricValue !== null && metricLabel ? (
                   <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--stamp)', marginTop: '0.15rem' }}>
-                    {formatMetricValue(metricValue)}
+                    {formatMetricValue(metricValue, metricIsMoney, currency)}
                     <span style={{ fontWeight: 400, fontSize: '0.76rem', color: 'var(--ink-soft)', marginLeft: '0.35rem' }}>{metricLabel}</span>
                   </div>
                 ) : (

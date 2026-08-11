@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { getToken } from '../api';
+import { formatMoney } from '../lib/money';
 import '../styles/invoice-print.css';
 
+// unit_price, subtotal, tax_amount, total below are all integer minor
+// units (cents) — see src/lib/money.ts.
 interface InvoiceItem {
   description: string;
   quantity: number;
@@ -108,21 +111,21 @@ export default function InvoiceView({ invoiceId, onClose }: { invoiceId: string;
               <tr key={i} style={tr}>
                 <td style={{...td, textAlign:'left'}}>{item.description}</td>
                 <td style={td}>{item.quantity}</td>
-                <td style={td}>{business.currency} {item.unit_price.toFixed(2)}</td>
-                <td style={td}>{business.currency} {(item.quantity * item.unit_price).toFixed(2)}</td>
+                <td style={td}>{business.currency} {formatMoney(item.unit_price, business.currency)}</td>
+                <td style={td}>{business.currency} {formatMoney(item.quantity * item.unit_price, business.currency)}</td>
               </tr>
             ))}
           </tbody>
         </table>
 
         <div style={totals}>
-          <div style={row}><span>Subtotal:</span><span>{business.currency} {invoice.subtotal.toFixed(2)}</span></div>
+          <div style={row}><span>Subtotal:</span><span>{business.currency} {formatMoney(invoice.subtotal, business.currency)}</span></div>
           {invoice.tax_rate > 0 && (
-            <div style={row}><span>Tax ({invoice.tax_rate}%):</span><span>{business.currency} {invoice.tax_amount.toFixed(2)}</span></div>
+            <div style={row}><span>Tax ({invoice.tax_rate}%):</span><span>{business.currency} {formatMoney(invoice.tax_amount, business.currency)}</span></div>
           )}
           <div style={{...row, ...totalRow}}>
             <span>Total:</span>
-            <span>{business.currency} {invoice.total.toFixed(2)}</span>
+            <span>{business.currency} {formatMoney(invoice.total, business.currency)}</span>
           </div>
         </div>
 

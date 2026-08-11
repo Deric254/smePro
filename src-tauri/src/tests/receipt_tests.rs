@@ -10,14 +10,15 @@ fn test_receipt_generation() {
     item.insert("sku".into(), serde_json::json!("MILK-001"));
     item.insert("name".into(), serde_json::json!("Milk"));
     item.insert("quantity".into(), serde_json::json!(20));
-    item.insert("unit_cost".into(), serde_json::json!(40.0));
-    item.insert("unit_price".into(), serde_json::json!(55.0));
+    item.insert("unit_cost".into(), serde_json::json!(4000));
+    item.insert("unit_price".into(), serde_json::json!(5500));
     let inv_id = crate::crud::create(&mut conn, &biz, &uid, "inventory", &item).unwrap();
 
     let req = crate::pos::CheckoutRequest {
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 2 }],
         payment_method: Some("M-Pesa".into()),
         customer: Some("John Doe".into()),
+        customer_phone: None,
         allow_oversell: false, on_credit: false, due_date: None,
     };
     let order = crate::pos::checkout(&mut conn, &biz, &uid, req).unwrap();
@@ -26,10 +27,10 @@ fn test_receipt_generation() {
     let receipt = crate::receipt::generate(&conn, &biz, &uid, order_id).unwrap();
     assert_eq!(receipt.items.len(), 1);
     assert_eq!(receipt.items[0].quantity, 2);
-    assert_eq!(receipt.items[0].line_total, 110.0);
+    assert_eq!(receipt.items[0].line_total, 11000);
     assert_eq!(receipt.customer, Some("John Doe".into()));
     assert_eq!(receipt.payment_method, Some("M-Pesa".into()));
-    assert_eq!(receipt.subtotal, 110.0);
+    assert_eq!(receipt.subtotal, 11000);
 }
 
 #[test]

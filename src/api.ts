@@ -1,4 +1,4 @@
-const API_BASE = 'http://127.0.0.1:8080';
+export const API_BASE = 'http://127.0.0.1:8080';
 
 let authToken: string | null = localStorage.getItem('erp_token');
 let businessId: string | null = localStorage.getItem('erp_business_id');
@@ -67,6 +67,9 @@ export const getSetupStatus = () =>
 export const getResolvedBusinessId = (): Promise<{ business_id: string | null }> =>
   fetch(`${API_BASE}/setup/business-id`).then((res) => res.json());
 
+export const getPublicBranding = (): Promise<{ name: string | null; logo_url: string | null; slogan: string | null }> =>
+  fetch(`${API_BASE}/setup/branding`).then((res) => res.json());
+
 export const createBusiness = (payload: Record<string, string>) =>
   fetch(`${API_BASE}/setup/create-business`, {
     method: 'POST',
@@ -127,11 +130,6 @@ export const recoverViaAdminCode = (biz: string, payload: Record<string, string>
     return body;
   });
 
-// ---- License ----
-export const getLicenseStatus = () => request('/license/status');
-export const activateLicense = () => request('/license/activate', { method: 'POST' });
-export const payLicense = () => request('/license/pay', { method: 'POST' });
-
 // ---- Modules ----
 export const getBusinessInfo = () => request('/business');
 export const listModules = () => request('/modules');
@@ -144,6 +142,7 @@ export interface CheckoutRequest {
   items: CartItem[];
   payment_method?: string;
   customer?: string;
+  customer_phone?: string;
   allow_oversell?: boolean;
   on_credit?: boolean;
   due_date?: string;
@@ -151,6 +150,16 @@ export interface CheckoutRequest {
 export const checkout = (req: CheckoutRequest) =>
   request('/pos/checkout', { method: 'POST', body: JSON.stringify(req) });
 export const getOrder = (orderId: string) => request(`/pos/orders/${orderId}`);
+
+export interface CustomerSummary {
+  id: string; name: string | null; phone: string; customer_since: string;
+  lifetime_value: number; order_count: number; last_purchase_at: string | null;
+}
+export interface CustomerDetail extends CustomerSummary {
+  purchases: { item_name: string; quantity: number; revenue: number; order_id: string | null; date: string }[];
+}
+export const listCustomers = (): Promise<{ customers: CustomerSummary[] }> => request('/customers');
+export const getCustomer = (id: string): Promise<CustomerDetail> => request(`/customers/${id}`);
 
 // ---- Refunds — the counterpart to checkout. See refund.rs. ----
 export interface RefundRequest {
@@ -256,6 +265,15 @@ export const getSettings = () => request('/settings');
 export const setSetting = (key: string, value: string) =>
   request('/settings', { method: 'PUT', body: JSON.stringify({ key, value }) });
 
+export interface AiSettingsStatus {
+  provider: string;
+  nvidia_key_set: boolean;
+  gemini_key_set: boolean;
+  openai_key_set: boolean;
+  claude_key_set: boolean;
+}
+export const getAiSettings = (): Promise<AiSettingsStatus> => request('/ai/settings');
+
 // ---- Notifications ----
 export interface NotificationRecord {
   id: string;
@@ -283,6 +301,16 @@ export const ocrParseCandidates = (moduleId: string, rawText: string): Promise<{
   request('/import/ocr/parse', { method: 'POST', body: JSON.stringify({ module_id: moduleId, raw_text: rawText }) });
 export const bulkCreateRecords = (moduleId: string, records: Record<string, unknown>[]): Promise<{ created: number; errors: { index: number; error: string }[] }> =>
   request(`/modules/${moduleId}/records/bulk`, { method: 'POST', body: JSON.stringify({ records }) });
+
+export interface NewInvoiceItem { description: string; quantity: number; unit_price: number }
+export const createInvoice = (payload: {
+  customer: string;
+  customer_email?: string;
+  customer_phone?: string;
+  due_date: string;
+  items: NewInvoiceItem[];
+  notes?: string;
+}) => request('/invoices', { method: 'POST', body: JSON.stringify(payload) });
 
 // ---- Change business type after setup — re-applies that type's
 // sensible default module set. ----
@@ -321,26 +349,6 @@ export const restoreBackup = (data: { database_base64: string; wrapped_key_base6
   request('/admin/restore', { method: 'POST', body: JSON.stringify(data) });
 export const restoreBackupFreshInstall = (data: { database_base64: string; wrapped_key_base64: string; passphrase: string }) =>
   request('/setup/restore', { method: 'POST', body: JSON.stringify(data) });
-
-// ---- Real payment collection — Stripe checkout / M-Pesa STK push.
-// Separate from license/activate and license/pay, which are trust-based
-// manual toggles with no actual charge — these two call real payment
-// providers and money actually moves. ----
-export interface PaymentHistoryEntry {
-  provider: string;
-  reference: string;
-  purpose: string;
-  amount: number;
-  currency: string;
-  status: string;
-  created_at: string;
-  completed_at: string | null;
-}
-export const getPaymentHistory = (): Promise<{ payments: PaymentHistoryEntry[] }> => request('/payments/history');
-export const initiateStripeCheckout = (purpose: 'activation' | 'subscription', amount: number, currency: string) =>
-  request('/payments/checkout', { method: 'POST', body: JSON.stringify({ provider: 'stripe', purpose, amount, currency }) });
-export const initiateMpesaPayment = (purpose: 'activation' | 'subscription', amount: number, phone: string) =>
-  request('/payments/checkout', { method: 'POST', body: JSON.stringify({ provider: 'mpesa', purpose, amount, phone }) });
 
 // ---- Vendor license key redemption ----
 export const getVendorLicenseStatus = () => request('/license/vendor/status');

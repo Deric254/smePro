@@ -27,7 +27,8 @@ pub struct RefundRequest {
     /// fee, a goodwill adjustment) — this is what the business
     /// actually gave back, recorded as the real fact it is rather than
     /// assumed from the original line's price.
-    pub refund_amount: f64,
+    /// Integer minor units (cents) — see money.rs.
+    pub refund_amount: i64,
     #[serde(default)]
     pub reason: Option<String>,
     /// Whether the returned quantity actually goes back into sellable
@@ -56,7 +57,7 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
     if req.quantity <= 0 {
         return Err(anyhow!("quantity to refund must be greater than zero"));
     }
-    if req.refund_amount < 0.0 {
+    if req.refund_amount < 0 {
         return Err(anyhow!("refund amount cannot be negative"));
     }
 

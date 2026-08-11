@@ -151,6 +151,13 @@ pub fn recover_via_security_questions(
         return Err(anyhow!("security answers did not match"));
     }
 
+    // Password strength is enforced at account creation (see
+    // users.rs) — it must be enforced here too, or a recovered
+    // account could end up with a weaker password than the policy
+    // allows anyone to set through the normal path, defeating the
+    // whole point of having the policy.
+    crate::security::validate_password(new_password)?;
+
     conn.execute(
         "UPDATE users SET password_hash = ?1 WHERE id = ?2",
         params![hash_secret(new_password)?, user_id],
@@ -191,6 +198,11 @@ pub fn recover_via_admin_code(
             |r| r.get(0),
         )
         .map_err(|_| anyhow!("account not found"))?;
+
+    // Same requirement as the security-questions path above and as
+    // account creation — this is the last-resort recovery route, not
+    // an excuse to skip the password policy.
+    crate::security::validate_password(new_password)?;
 
     conn.execute(
         "UPDATE users SET password_hash = ?1 WHERE id = ?2",

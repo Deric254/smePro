@@ -25,7 +25,7 @@
     },
     {
       "name": "unit_cost",
-      "type": "real",
+      "type": "money",
       "required": true
     },
     {

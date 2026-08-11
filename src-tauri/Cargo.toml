@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.21"
+version = "0.1.24"
 edition = "2021"
 
 [lib]
@@ -54,11 +54,6 @@ path = "src/bin/set_due_date.rs"
 required-features = ["dev-tools"]
 
 [[bin]]
-name = "seed_payment_intent"
-path = "src/bin/seed_payment_intent.rs"
-required-features = ["dev-tools"]
-
-[[bin]]
 name = "offline_keygen"
 path = "src/bin/offline_keygen.rs"
 required-features = ["dev-tools"]
@@ -67,8 +62,29 @@ required-features = ["dev-tools"]
 dev-tools = []
 
 [build-dependencies]
-tauri-build = { version = "=2.0.0", features = [] }
-tauri-utils = "=2.0.0"
+tauri-build = { version = "2", features = [] }
+
+[dependencies.tauri]
+version = "2"
+features = []
+
+[dependencies.tauri-plugin-updater]
+version = "2"
+
+[dependencies.tauri-plugin-process]
+version = "2"
+
+[dependencies.tauri-plugin-fs]
+version = "2"
+
+[dependencies.tauri-plugin-http]
+version = "2"
+
+[dependencies.tauri-plugin-opener]
+version = "2"
+
+[dependencies.tauri-plugin-os]
+version = "2"
 
 [dependencies]
 rusqlite = { version = "=0.31.0", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
@@ -90,6 +106,7 @@ sha2 = "=0.10.8"
 hex = "=0.4.3"
 totp-rs = { version = "=5.7.2", default-features = false, features = ["gen_secret", "otpauth"] }
 regex = "1.10"
+calamine = "=0.26.1"
 
 [dependencies.base64ct]
 version = "=1.6.0"

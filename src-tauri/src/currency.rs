@@ -31,14 +31,19 @@ pub struct RateRecord {
     pub fetched_at: i64,
 }
 
-/// Converts an amount from one currency to another.
-/// Uses cached rate if available; does NOT trigger API call.
-pub fn convert(conn: &Connection, from: &str, to: &str, amount: f64) -> Result<f64> {
+/// Converts an amount (integer minor units — see money.rs) from one
+/// currency to another. Uses cached rate if available; does NOT
+/// trigger API call. The exchange rate itself is inherently
+/// fractional, so this is one of the deliberate single rounding
+/// points in the system — the result is rounded to the nearest minor
+/// unit exactly once, via money::apply_rate, and never left as an
+/// unrounded intermediate value.
+pub fn convert(conn: &Connection, from: &str, to: &str, amount_cents: i64) -> Result<i64> {
     if from == to {
-        return Ok(amount);
+        return Ok(amount_cents);
     }
     let rate = get_rate(conn, from, to)?;
-    Ok(round2(amount * rate))
+    Ok(crate::money::apply_rate(amount_cents, rate))
 }
 
 /// Gets the exchange rate between two currencies.
@@ -73,7 +78,13 @@ pub fn get_rate(conn: &Connection, from: &str, to: &str) -> Result<f64> {
     ).ok();
 
     match (from_usd, to_usd) {
-        (Some(f), Some(t)) => Ok(round2(f / t)),
+        // The rate itself is a ratio, not a currency amount — rounding
+        // it to 2 decimal places (correct for money) would be a real
+        // accuracy bug here: a rate like KES→USD ≈ 0.0077 would round
+        // to 0.01, a ~30% error. The rate is left at full float
+        // precision; only the money it's later applied to (via
+        // money::apply_rate in convert()) gets rounded, exactly once.
+        (Some(f), Some(t)) => Ok(f / t),
         _ => Err(anyhow!("no exchange rate available for {from} → {to}")),
     }
 }
@@ -171,6 +182,3 @@ pub fn list_rates(conn: &Connection, base: &str) -> Result<Vec<RateRecord>> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
-}

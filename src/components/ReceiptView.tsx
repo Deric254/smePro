@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { getToken } from '../api';
+import { formatMoney } from '../lib/money';
 import '../styles/receipt-print.css';
 
+// unit_price, line_total, subtotal, tax_amount, total below are all
+// integer minor units (cents) — see src/lib/money.ts.
 interface ReceiptLine {
   item_name: string;
   quantity: number;
@@ -47,6 +50,43 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
   }, [orderId]);
 
   const handlePrint = () => window.print();
+
+  function receiptText(): string {
+    if (!receipt) return '';
+    const lines = receipt.items.map(
+      (i) => `${i.item_name} x${i.quantity} — ${receipt.business_currency} ${formatMoney(i.line_total, receipt.business_currency)}`
+    );
+    return [
+      receipt.business_name,
+      receipt.business_slogan || '',
+      '',
+      `Receipt #${receipt.order_id.slice(0, 8).toUpperCase()}`,
+      new Date(receipt.date).toLocaleString(),
+      '',
+      ...lines,
+      '',
+      `Total: ${receipt.business_currency} ${formatMoney(receipt.total, receipt.business_currency)}`,
+      receipt.payment_method ? `Paid via ${receipt.payment_method}` : '',
+      '',
+      'Thank you for your business!',
+    ].filter(Boolean).join('\n');
+  }
+
+  function shareWhatsApp() {
+    const text = encodeURIComponent(receiptText());
+    // wa.me works identically whether WhatsApp is installed (opens the
+    // app directly) or not (falls back to WhatsApp Web) — no phone
+    // number needed here since the person sharing picks the recipient
+    // themselves in WhatsApp's own share sheet, same as sharing any
+    // link or text from a phone normally works.
+    window.open(`https://wa.me/?text=${text}`, '_blank');
+  }
+
+  function shareEmail() {
+    const subject = encodeURIComponent(`Receipt from ${receipt?.business_name || 'your purchase'}`);
+    const body = encodeURIComponent(receiptText());
+    window.location.href = `mailto:?subject=${subject}&body=${body}`;
+  }
 
   if (loading) return (
     <div style={overlay}>
@@ -102,24 +142,24 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
               <tr key={i} style={tr}>
                 <td style={{...td, textAlign:'left'}}>{item.item_name}</td>
                 <td style={td}>{item.quantity}</td>
-                <td style={td}>{receipt.business_currency} {item.unit_price.toFixed(2)}</td>
-                <td style={td}>{receipt.business_currency} {item.line_total.toFixed(2)}</td>
+                <td style={td}>{receipt.business_currency} {formatMoney(item.unit_price, receipt.business_currency)}</td>
+                <td style={td}>{receipt.business_currency} {formatMoney(item.line_total, receipt.business_currency)}</td>
               </tr>
             ))}
           </tbody>
         </table>
 
         <div style={totals}>
-          <div style={row}><span>Subtotal:</span><span>{receipt.business_currency} {receipt.subtotal.toFixed(2)}</span></div>
+          <div style={row}><span>Subtotal:</span><span>{receipt.business_currency} {formatMoney(receipt.subtotal, receipt.business_currency)}</span></div>
           {receipt.tax_rate > 0 && (
             <div style={row}>
               <span>Tax ({receipt.tax_rate}%):</span>
-              <span>{receipt.business_currency} {receipt.tax_amount.toFixed(2)}</span>
+              <span>{receipt.business_currency} {formatMoney(receipt.tax_amount, receipt.business_currency)}</span>
             </div>
           )}
           <div style={{...row, ...totalRow}}>
             <span>Total:</span>
-            <span>{receipt.business_currency} {receipt.total.toFixed(2)}</span>
+            <span>{receipt.business_currency} {formatMoney(receipt.total, receipt.business_currency)}</span>
           </div>
           {receipt.payment_method && (
             <div style={row}><span>Paid via:</span><span>{receipt.payment_method}</span></div>
@@ -131,7 +171,9 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
         </div>
 
         <div style={actions} className="no-print">
-          <button onClick={handlePrint} style={primaryBtn}>🖨️ Print Receipt</button>
+          <button onClick={handlePrint} style={primaryBtn}>🖨️ Print</button>
+          <button onClick={shareWhatsApp} style={secondaryBtn}>💬 WhatsApp</button>
+          <button onClick={shareEmail} style={secondaryBtn}>✉️ Email</button>
           <button onClick={onClose} style={secondaryBtn}>Close</button>
         </div>
       </div>
@@ -163,7 +205,7 @@ const totals: React.CSSProperties = { borderTop: '2px solid #333', paddingTop: 1
 const row: React.CSSProperties = { display: 'flex', justifyContent: 'space-between', padding: '3px 0' };
 const totalRow: React.CSSProperties = { fontWeight: 700, fontSize: 15, borderTop: '1px solid #ddd', marginTop: 6, paddingTop: 6 };
 const footer: React.CSSProperties = { textAlign: 'center', marginTop: 18, fontSize: 12, color: '#666' };
-const actions: React.CSSProperties = { display: 'flex', gap: 10, marginTop: 20, justifyContent: 'center' };
+const actions: React.CSSProperties = { display: 'flex', gap: 10, marginTop: 20, justifyContent: 'center', flexWrap: 'wrap' };
 const primaryBtn: React.CSSProperties = {
   padding: '10px 18px', borderRadius: 8, border: 'none', background: '#1a1a1a', color: '#fff',
   fontSize: 13, fontWeight: 600, cursor: 'pointer',

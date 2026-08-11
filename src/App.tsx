@@ -5,8 +5,8 @@ import ModuleView from './pages/ModuleView';
 import AdminPanel from './pages/AdminPanel';
 import Dashboard from './pages/Dashboard';
 import PointOfSale from './pages/PointOfSale';
+import Customers from './pages/Customers';
 import Sidebar from './components/Sidebar';
-import LicenseBanner from './components/LicenseBanner';
 import AiFloatingButton from './components/AiFloatingButton';
 import UpdateChecker from './components/UpdateChecker';
 import AndroidUpdateChecker from './components/AndroidUpdateChecker';
@@ -122,8 +122,6 @@ export default function App() {
           <button className="btn btn-outline" onClick={handleLogout} style={{ fontSize: '0.8rem' }}>Sign out</button>
         </div>
 
-        <LicenseBanner onChange={loadModules} />
-
         {loadError && (
           <div className="card" style={{ borderColor: 'var(--stamp)', color: 'var(--stamp)' }}>{loadError}</div>
         )}
@@ -132,6 +130,8 @@ export default function App() {
           <AdminPanel />
         ) : selected === '__pos__' ? (
           <PointOfSale />
+        ) : selected === '__customers__' ? (
+          <Customers />
         ) : selected ? (
           <ModuleView moduleId={selected} />
         ) : (

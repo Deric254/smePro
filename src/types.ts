@@ -1,4 +1,4 @@
-export type FieldType = 'text' | 'integer' | 'real' | 'date' | 'boolean' | 'unit' | 'currency';
+export type FieldType = 'text' | 'integer' | 'real' | 'money' | 'date' | 'boolean' | 'unit' | 'currency';
 
 export interface FieldDef {
   name: string;
@@ -36,12 +36,6 @@ export interface ModuleListItem {
   display_name: string;
   enabled: boolean;
 }
-
-export type LicenseStatus =
-  | { status: 'active' }
-  | { status: 'inactive' }
-  | { status: 'grace'; days_left: number }
-  | { status: 'locked'; days_overdue: number };
 
 export type Record_ = { id: string; [key: string]: unknown };
 

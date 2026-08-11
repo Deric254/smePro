@@ -22,8 +22,9 @@ use serde::Serialize;
 pub struct ReceiptLine {
     pub item_name: String,
     pub quantity: i64,
-    pub unit_price: f64,
-    pub line_total: f64,
+    /// Integer minor units (cents) — see money.rs.
+    pub unit_price: i64,
+    pub line_total: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,10 +37,10 @@ pub struct Receipt {
     pub customer: Option<String>,
     pub date: String,
     pub items: Vec<ReceiptLine>,
-    pub subtotal: f64,
+    pub subtotal: i64,
     pub tax_rate: f64,
-    pub tax_amount: f64,
-    pub total: f64,
+    pub tax_amount: i64,
+    pub total: i64,
     pub payment_method: Option<String>,
     pub cashier_name: String,
 }
@@ -83,7 +84,7 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
             },
             quantity: r.get(1)?,
             line_total: r.get(2)?,
-            unit_price: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+            unit_price: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
         })
     })?;
 
@@ -92,9 +93,9 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
         return Err(anyhow!("order not found or has no items"));
     }
 
-    let subtotal = items.iter().map(|i| i.line_total).sum::<f64>();
-    let tax_amount = round2(subtotal * tax_rate / 100.0);
-    let total = round2(subtotal + tax_amount);
+    let subtotal: i64 = items.iter().map(|i| i.line_total).sum();
+    let tax_amount = crate::money::apply_rate(subtotal, tax_rate / 100.0);
+    let total = subtotal + tax_amount;
 
     let cashier_name: String = conn.query_row(
         "SELECT username FROM users WHERE id = ?1",
@@ -118,7 +119,7 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
         customer,
         date,
         items,
-        subtotal: round2(subtotal),
+        subtotal,
         tax_rate,
         tax_amount,
         total,
@@ -131,6 +132,3 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
     Ok(receipt)
 }
 
-fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
-}

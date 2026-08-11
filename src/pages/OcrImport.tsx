@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { ocrExtractText, ocrParseCandidates, bulkCreateRecords, ApiError } from '../api';
+import { useEffect, useState } from 'react';
+import { ocrExtractText, ocrParseCandidates, bulkCreateRecords, getBusinessInfo, ApiError } from '../api';
 import type { FieldDef } from '../types';
+import { parseMoneyInput } from '../lib/money';
 
 type Step = 'upload' | 'extracting' | 'review' | 'importing' | 'done';
 
@@ -15,6 +16,15 @@ export default function OcrImport({ moduleId, fields, onClose, onImported }: {
   const [candidates, setCandidates] = useState<Record<string, string>[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ created: number; errors: { index: number; error: string }[] } | null>(null);
+  // Needed to correctly parse a "money"-typed field's OCR-guessed
+  // value (e.g. "19.99" read off a receipt) into integer cents — see
+  // src/lib/money.ts. Wrong currency here just means wrong decimal
+  // handling for an unusual currency, not a crash; defaults to USD.
+  const [currency, setCurrency] = useState('USD');
+
+  useEffect(() => {
+    getBusinessInfo().then((b: any) => { if (b?.currency) setCurrency(b.currency); }).catch(() => {});
+  }, []);
 
   function fileToBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -84,6 +94,16 @@ export default function OcrImport({ moduleId, fields, onClose, onImported }: {
           if (raw === '' || raw === undefined) continue; // let required-field validation catch missing ones per-row
           if (f.type === 'integer') rec[f.name] = parseInt(raw, 10);
           else if (f.type === 'real') rec[f.name] = parseFloat(raw);
+          else if (f.type === 'money') {
+            // A malformed OCR guess (e.g. "19.9x") is deliberately
+            // left OUT of the payload rather than coerced to 0 or
+            // skipped silently — omitting it lets this row's own
+            // required-field validation catch it and report a clear
+            // per-row error below, the same "best-effort guess, you
+            // review it" philosophy this whole screen is built on.
+            const cents = parseMoneyInput(raw, currency);
+            if (cents !== null) rec[f.name] = cents;
+          }
           else if (f.type === 'boolean') rec[f.name] = raw === 'true';
           else rec[f.name] = raw;
         }

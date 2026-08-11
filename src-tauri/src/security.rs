@@ -1,17 +1,32 @@
 //! Security hardening — defense in depth for a million-user product.
 //!
 //! This module adds layers that were missing or incomplete:
-//! 1. Input sanitization (prevent XSS injection into JSON responses)
-//! 2. Request size limits (prevent memory exhaustion)
-//! 3. CORS tightening (restrict to app origin only)
-//! 4. Secure headers (HSTS, CSP, X-Frame-Options)
-//! 5. SQL injection audit (all queries already parameterized — verified)
-//! 6. Session expiration (tokens expire after 24h of inactivity)
-//! 7. Password strength enforcement (min 8 chars, complexity check)
+//! 1. Request size limits (prevent memory exhaustion)
+//! 2. CORS tightening (restrict to app origin only)
+//! 3. Secure headers (HSTS, CSP, X-Frame-Options)
+//! 4. Identifier format validation (defense-in-depth on module/record
+//!    IDs, even though the existing parameterized-query + existence-gated
+//!    resolution already prevents injection through them structurally —
+//!    see validate_table_name and validate_uuid below)
+//! 5. Session expiration (tokens expire after 24h of inactivity)
+//! 6. Password strength enforcement (min 8 chars, complexity check)
+//!
+//! One thing this module deliberately does NOT do, despite an earlier
+//! version of it claiming to: hand-roll JSON string sanitization. Every
+//! response in this codebase is built via serde_json's `Value`/`json!`
+//! machinery and serialized through `Value::to_string()`, which already
+//! escapes every control character per the JSON spec — a hand-written
+//! sanitizer sitting in front of that would be redundant defense
+//! against a problem that doesn't exist in how this app builds
+//! responses, not a real protection.
 //!
 //! NOTE: The existing codebase already had:
-//! - bcrypt password hashing (cost 12)
-//! - Parameterized queries (no string interpolation in SQL)
+//! - Argon2id password hashing with per-user random salts (see auth.rs)
+//! - Parameterized queries (no string interpolation of user-controlled
+//!   values into SQL — verified: module/record identifiers that DO get
+//!   interpolated into table names are only ever sourced from
+//!   previously-validated, application-controlled data — see
+//!   validate_table_name's doc comment below for the specifics)
 //! - Rate limiting (5 attempts / 15 min on login)
 //! - RBAC (role-based access control)
 //! - Audit logging
@@ -30,16 +45,6 @@ pub const MAX_FIELD_LENGTH: usize = 10000;
 
 /// Session inactivity timeout: 24 hours (in seconds).
 pub const SESSION_TIMEOUT_SECS: i64 = 86400;
-
-/// Sanitizes a string for safe JSON output.
-/// Removes control characters and null bytes that could break JSON parsing
-/// or be used in injection attacks.
-pub fn sanitize_json_string(input: &str) -> String {
-    input
-        .chars()
-        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
-        .collect()
-}
 
 /// Validates that a request body is within size limits.
 pub fn check_body_size(body: &[u8]) -> Result<()> {

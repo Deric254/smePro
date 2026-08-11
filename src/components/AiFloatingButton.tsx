@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import type { FormEvent } from 'react';
-import { askAi, ApiError } from '../api';
+import { askAi, getAiContext, ApiError } from '../api';
+import { decimalPlacesFor } from '../lib/money';
 
 interface Message { role: 'user' | 'ai'; text: string }
 
@@ -10,10 +11,32 @@ export default function AiFloatingButton() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
+  // "What can the AI see?" — a plain transparency view of the same
+  // business snapshot the assistant actually reasons from (see
+  // ai_context.rs::build_snapshot), so a business owner can check
+  // exactly what data it has access to rather than taking that on
+  // faith. Fetched on demand, not preloaded — most people opening the
+  // chat just want to ask a question.
+  const [showContext, setShowContext] = useState(false);
+  const [contextData, setContextData] = useState<any>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
 
   useEffect(() => {
     bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, open]);
+
+  function toggleContext() {
+    if (showContext) { setShowContext(false); return; }
+    setShowContext(true);
+    if (contextData) return; // already fetched this session
+    setContextLoading(true);
+    setContextError(null);
+    getAiContext()
+      .then(setContextData)
+      .catch((err) => setContextError(err instanceof ApiError ? err.message : 'Could not load this'))
+      .finally(() => setContextLoading(false));
+  }
 
   async function handleAsk(e: FormEvent) {
     e.preventDefault();
@@ -42,8 +65,46 @@ export default function AiFloatingButton() {
               <span className="stamp-badge" style={{ width: '1.7rem', height: '1.7rem', fontSize: '0.65rem', color: 'var(--stamp)' }}>AI</span>
               <strong style={{ fontSize: '0.9rem' }}>Ask about your business</strong>
             </div>
-            <button onClick={() => setOpen(false)} style={styles.closeBtn} aria-label="Close">×</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+              <button onClick={toggleContext} style={styles.infoBtn} aria-label="What can the AI see?" title="What can the AI see?">ⓘ</button>
+              <button onClick={() => setOpen(false)} style={styles.closeBtn} aria-label="Close">×</button>
+            </div>
           </div>
+
+          {showContext && (
+            <div style={styles.contextPanel}>
+              {contextLoading && <div style={styles.hint}>Loading…</div>}
+              {contextError && <div style={{ ...styles.hint, color: 'var(--stamp)' }}>{contextError}</div>}
+              {contextData && (
+                <>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.5rem' }}>
+                    This is exactly what the assistant sees about {contextData.business_name} — nothing more.
+                  </div>
+                  {Object.entries(contextData.modules ?? {}).map(([id, data]: [string, any]) => (
+                    <div key={id} style={{ marginBottom: '0.5rem' }}>
+                      <strong style={{ fontSize: '0.82rem' }}>{data.display_name}</strong>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)' }}>
+                        {data.record_count} record{data.record_count === 1 ? '' : 's'}
+                        {Object.entries(data.totals ?? {}).map(([field, value]: [string, any]) => (
+                          <span key={field}> · {field.replace(/_/g, ' ')}: {
+                            typeof value === 'number' && field.match(/price|cost|revenue|amount|total|salary/i)
+                              // ai_context.rs already converts "money" totals to decimal
+                              // currency (not cents) before sending — see build_snapshot's
+                              // comment on why. Formatted here with the currency's own
+                              // decimal-place count, straight from the value as given, with
+                              // no cents round-trip to introduce avoidable float noise.
+                              ? value.toLocaleString(undefined, { minimumFractionDigits: decimalPlacesFor(contextData.currency), maximumFractionDigits: decimalPlacesFor(contextData.currency) })
+                              : String(value)
+                          }</span>
+                        ))}
+                        {data.low_stock_alerts?.length > 0 && <span> · {data.low_stock_alerts.length} item(s) low on stock</span>}
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
 
           <div ref={bodyRef} style={styles.body}>
             {messages.length === 0 && (
@@ -95,6 +156,8 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: '0 10px 30px rgba(32,20,15,0.2)',
   },
   panelHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.8rem 0.9rem', borderBottom: '1px solid var(--paper-line)' },
+  infoBtn: { background: 'none', border: 'none', fontSize: '1rem', color: 'var(--ink-soft)', lineHeight: 1, cursor: 'pointer', padding: '0.1rem 0.3rem' },
+  contextPanel: { padding: '0.7rem 0.9rem', borderBottom: '1px solid var(--paper-line)', maxHeight: 160, overflowY: 'auto', background: 'var(--paper)' },
   closeBtn: { background: 'none', border: 'none', fontSize: '1.3rem', color: 'var(--ink-soft)', lineHeight: 1 },
   body: { flex: 1, overflowY: 'auto', padding: '0.8rem 0.9rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' },
   hint: { fontSize: '0.8rem', color: 'var(--ink-soft)', lineHeight: 1.5 },

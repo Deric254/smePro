@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react';
-import { listRecords, checkout, getOrder, processRefund, ApiError } from '../api';
+import { listRecords, checkout, getOrder, processRefund, getBusinessInfo, ApiError } from '../api';
 import ReceiptView from '../components/ReceiptView';
 import type { Record_ } from '../types';
+import { formatMoney, parseMoneyInput, sumMoney } from '../lib/money';
 
+// unit_price, revenue, line_total, subtotal below are all integer
+// minor units (cents) — see src/lib/money.ts. Never do float math on
+// them directly; go through formatMoney/parseMoneyInput/sumMoney.
 interface CartLine {
   inventory_record_id: string;
   name: string;
@@ -30,11 +34,17 @@ export default function PointOfSale() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [customer, setCustomer] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
   const [onCredit, setOnCredit] = useState(false);
   const [dueDate, setDueDate] = useState('');
   const [allowOversell, setAllowOversell] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Integer cents everywhere below — see src/lib/money.ts. Fetched
+  // once so every formatMoney/parseMoneyInput call in this screen
+  // uses the business's actual currency (decimal places, not just the
+  // symbol) instead of assuming USD's 2dp.
+  const [currency, setCurrency] = useState('USD');
   const [receipt, setReceipt] = useState<{
     order_id: string; subtotal: number; customer?: string; payment_method?: string; on_credit?: boolean;
     items: { name: string; sku: string; quantity: number; unit_price: number; line_total: number; remaining_stock: number }[];
@@ -48,7 +58,7 @@ export default function PointOfSale() {
   const [lookupLoading, setLookupLoading] = useState(false);
   const [refundingSaleId, setRefundingSaleId] = useState<string | null>(null);
   const [refundQty, setRefundQty] = useState(1);
-  const [refundAmount, setRefundAmount] = useState(0);
+  const [refundAmountText, setRefundAmountText] = useState('0.00');
   const [refundReason, setRefundReason] = useState('');
   const [refundRestock, setRefundRestock] = useState(true);
   const [refundError, setRefundError] = useState<string | null>(null);
@@ -77,7 +87,7 @@ export default function PointOfSale() {
     // A sensible default -- the full line's original value -- but
     // always editable, since a real refund isn't always full price
     // back (a restocking fee, a partial goodwill adjustment).
-    setRefundAmount(item.revenue);
+    setRefundAmountText(formatMoney(item.revenue, currency));
     setRefundReason('');
     setRefundRestock(true);
     setRefundError(null);
@@ -85,17 +95,22 @@ export default function PointOfSale() {
 
   async function submitRefund() {
     if (!refundingSaleId) return;
+    const refundAmountCents = parseMoneyInput(refundAmountText, currency);
+    if (refundAmountCents === null || refundAmountCents < 0) {
+      setRefundError('Enter a valid refund amount.');
+      return;
+    }
     setRefundSubmitting(true);
     setRefundError(null);
     try {
       await processRefund({
         sale_id: refundingSaleId,
         quantity: refundQty,
-        refund_amount: refundAmount,
+        refund_amount: refundAmountCents,
         reason: refundReason || undefined,
         restock: refundRestock,
       });
-      setRefundSuccess(`Refunded ${refundQty} unit(s), ${refundAmount.toFixed(2)} returned.`);
+      setRefundSuccess(`Refunded ${refundQty} unit(s), ${formatMoney(refundAmountCents, currency)} returned.`);
       setRefundingSaleId(null);
       // Re-look-up the order so the screen reflects what's now
       // actually left refundable, rather than showing stale numbers.
@@ -109,11 +124,31 @@ export default function PointOfSale() {
   }
 
   useEffect(() => {
+    getBusinessInfo()
+      .then((b: any) => { if (b?.currency) setCurrency(b.currency); })
+      .catch(() => {}); // default 'USD' stands if this fails — never blocks the POS screen
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
-    listRecords('inventory', search || undefined)
-      .then((r) => { if (!cancelled) setProducts(r.records); })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    const timer = setTimeout(() => {
+      listRecords('inventory', search || undefined)
+        .then((r) => {
+          if (cancelled) return;
+          // Highest stock first by default — the products a cashier is
+          // most likely to be selling right now, front and center,
+          // without having to search for them. A search term still
+          // takes over the ordering the backend itself returns for
+          // that search, this sort only applies to the "browse
+          // everything" no-search-term view.
+          const sorted = search
+            ? r.records
+            : [...r.records].sort((a, b) => Number(b.quantity ?? 0) - Number(a.quantity ?? 0));
+          setProducts(sorted);
+        })
+        .catch(() => {});
+    }, search ? 250 : 0); // instant on initial load / cleared search, debounced while typing
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [search]);
 
   function addToCart(p: Record_) {
@@ -141,7 +176,34 @@ export default function PointOfSale() {
     }
   }
 
-  const subtotal = cart.reduce((sum, c) => sum + c.unit_price * c.quantity, 0);
+  const subtotal = sumMoney(cart.map((c) => c.unit_price * c.quantity));
+
+  // Enter finalizes the sale; Enter again (once the receipt is
+  // showing) starts the next one — the actual, honest version of "one
+  // key does the next thing," without pretending this can also fire a
+  // printer silently with no dialog, which isn't something a webview
+  // can do on any platform.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Enter') return;
+      if (mode !== 'sell') return;
+      const target = e.target as HTMLElement;
+      // Typing in the product search box: Enter shouldn't hijack that
+      // into finalizing a sale mid-search.
+      if (target?.tagName === 'INPUT' && target.getAttribute('placeholder') === 'Search products…') return;
+
+      if (receipt) {
+        e.preventDefault();
+        newSale();
+      } else if (cart.length > 0 && !loading) {
+        e.preventDefault();
+        handleCheckout();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, cart, receipt, loading]);
 
   async function handleCheckout() {
     if (cart.length === 0) return;
@@ -152,6 +214,7 @@ export default function PointOfSale() {
         items: cart.map((c) => ({ inventory_record_id: c.inventory_record_id, quantity: c.quantity })),
         payment_method: onCredit ? undefined : paymentMethod,
         customer: customer || undefined,
+        customer_phone: customerPhone || undefined,
         allow_oversell: allowOversell,
         on_credit: onCredit,
         due_date: onCredit ? (dueDate || undefined) : undefined,
@@ -159,6 +222,7 @@ export default function PointOfSale() {
       setReceipt(result);
       setCart([]);
       setCustomer('');
+      setCustomerPhone('');
       setDueDate('');
       setOnCredit(false);
     } catch (err) {
@@ -185,12 +249,12 @@ export default function PointOfSale() {
           {receipt.items.map((item, i) => (
             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.88rem', padding: '0.3rem 0', borderBottom: '1px solid var(--paper-line)' }}>
               <span>{item.name} × {item.quantity}</span>
-              <span>{item.line_total.toFixed(2)}</span>
+              <span>{formatMoney(item.line_total, currency)}</span>
             </div>
           ))}
           <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: '1.05rem', marginTop: '0.8rem', paddingTop: '0.6rem', borderTop: '2px solid var(--ink)' }}>
             <span>Total</span>
-            <span>{receipt.subtotal.toFixed(2)}</span>
+            <span>{formatMoney(receipt.subtotal, currency)}</span>
           </div>
           {receipt.customer && <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: '0.6rem' }}>Customer: {receipt.customer}</div>}
           {receipt.on_credit && <div style={{ fontSize: '0.8rem', color: 'var(--stamp)', marginTop: '0.2rem' }}>Sold on credit — added to Debt &amp; Credit</div>}
@@ -245,7 +309,7 @@ export default function PointOfSale() {
           {orderLookup && (
             <div className="card" style={{ marginTop: '0.8rem' }}>
               <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.6rem' }}>
-                Order {orderLookup.order_id.slice(0, 8)} · subtotal {orderLookup.subtotal.toFixed(2)}
+                Order {orderLookup.order_id.slice(0, 8)} · subtotal {formatMoney(orderLookup.subtotal, currency)}
               </div>
               {orderLookup.items.map((item) => (
                 <div key={item.sale_id} style={{ borderBottom: '1px solid var(--paper-line)', padding: '0.6rem 0' }}>
@@ -253,7 +317,7 @@ export default function PointOfSale() {
                     <div>
                       <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{item.item_name}</div>
                       <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>
-                        {item.quantity} sold · {item.revenue.toFixed(2)} total
+                        {item.quantity} sold · {formatMoney(item.revenue, currency)} total
                       </div>
                     </div>
                     {refundingSaleId !== item.sale_id && (
@@ -279,11 +343,14 @@ export default function PointOfSale() {
                         <div style={{ flex: 1 }}>
                           <label>Amount to return</label>
                           <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            value={refundAmount}
-                            onChange={(e) => setRefundAmount(parseFloat(e.target.value) || 0)}
+                            type="text"
+                            inputMode="decimal"
+                            value={refundAmountText}
+                            onChange={(e) => setRefundAmountText(e.target.value)}
+                            onBlur={() => {
+                              const parsed = parseMoneyInput(refundAmountText, currency);
+                              if (parsed !== null) setRefundAmountText(formatMoney(parsed, currency));
+                            }}
                           />
                         </div>
                       </div>
@@ -341,7 +408,7 @@ export default function PointOfSale() {
                 >
                   <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{String(p.name ?? '')}</div>
                   <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)', marginTop: '0.2rem' }}>
-                    {outOfStock ? 'Out of stock' : `${qty} in stock`} · {Number(p.unit_price ?? 0).toFixed(2)}
+                    {outOfStock ? 'Out of stock' : `${qty} in stock`} · {formatMoney(Number(p.unit_price ?? 0), currency)}
                   </div>
                 </button>
               );
@@ -359,7 +426,7 @@ export default function PointOfSale() {
               <div key={c.inventory_record_id} style={styles.cartLine}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: '0.85rem', fontWeight: 600 }}>{c.name}</div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--ink-soft)' }}>{c.unit_price.toFixed(2)} each</div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--ink-soft)' }}>{formatMoney(c.unit_price, currency)} each</div>
                 </div>
                 <input
                   type="number"
@@ -374,13 +441,24 @@ export default function PointOfSale() {
 
           <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700, marginTop: '0.9rem', paddingTop: '0.7rem', borderTop: '1px solid var(--paper-line)' }}>
             <span>Subtotal</span>
-            <span>{subtotal.toFixed(2)}</span>
+            <span>{formatMoney(subtotal, currency)}</span>
           </div>
 
-          <div style={{ marginTop: '1rem' }}>
-            <label>Customer (optional)</label>
-            <input value={customer} onChange={(e) => setCustomer(e.target.value)} style={{ width: '100%' }} />
+          <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem' }}>
+            <div>
+              <label>Customer name (optional)</label>
+              <input value={customer} onChange={(e) => setCustomer(e.target.value)} style={{ width: '100%' }} />
+            </div>
+            <div>
+              <label>Phone (optional)</label>
+              <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} style={{ width: '100%' }} placeholder="e.g. 0712345678" />
+            </div>
           </div>
+          {customerPhone.trim() && (
+            <div style={{ fontSize: '0.75rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
+              Saved to your customer list — see their full purchase history under Admin → Customers.
+            </div>
+          )}
 
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', textTransform: 'none', fontSize: '0.85rem', marginTop: '0.8rem', cursor: 'pointer' }}>
             <input type="checkbox" checked={onCredit} onChange={(e) => setOnCredit(e.target.checked)} />
@@ -417,7 +495,7 @@ export default function PointOfSale() {
             disabled={cart.length === 0 || loading || (onCredit && !customer)}
             onClick={handleCheckout}
           >
-            {loading ? 'Processing…' : `Checkout — ${subtotal.toFixed(2)}`}
+            {loading ? 'Processing…' : `Checkout — ${formatMoney(subtotal, currency)}`}
           </button>
         </div>
       </div>

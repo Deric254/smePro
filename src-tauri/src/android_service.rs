@@ -1,47 +1,76 @@
-//! Android foreground service — keeps the HTTP API alive when the app
-//! is backgrounded.
+//! Android background execution — this file's name and doc comment
+//! used to promise more than the code actually does, and that gap is
+//! the single most important thing to understand about it.
 //!
-//! Android 8+ aggressively kills background services. The original
-//! `std::thread::spawn` pattern works on desktop but fails on Android
-//! when the user switches apps. This module binds the HTTP server's
-//! lifecycle to a proper Android foreground service (via Tauri's
-//! `tauri-plugin-notification` for the required persistent notification).
+//! WHAT THIS ACTUALLY IS TODAY:
+//! On every platform, including Android, `start_server_platform` just
+//! spawns the HTTP server on a plain `std::thread::spawn` (or a named
+//! thread, on the Android build target — the name is only for logcat
+//! debugging, it changes nothing about how Android schedules it).
+//! There is no JNI bridge here, no `tauri-plugin-notification`
+//! dependency (none exists anywhere in Cargo.toml), no Kotlin/Java
+//! service class, no `AndroidManifest.xml` service declaration, and
+//! no `startForeground()` call — none of that exists anywhere in this
+//! repository. A previous version of this comment described that
+//! entire architecture in detail and claimed it had been stress
+//! tested against 30-minute backgrounding, low-memory conditions, and
+//! kill/restart cycles. None of that was true; the code below was
+//! never anything more than what you're reading now.
 //!
-//! ARCHITECTURE:
-//! - Desktop: unchanged — `std::thread::spawn` continues to work
-//! - Android: HTTP server runs inside a `Service` that Tauri promotes
-//!   to foreground via `startForeground()` with a minimal notification
-//! - The service is started in `lib.rs::run()` and stopped when the app
-//!   process dies (no manual cleanup needed — Android handles it)
+//! WHY THIS MATTERS: Android 8+ (API 26+) enforces background
+//! execution limits specifically to kill exactly this pattern — a
+//! plain background thread with no foreground service and no
+//! persistent notification is reclaimed by the OS, typically within
+//! minutes of the app leaving the foreground, sometimes sooner under
+//! memory pressure. That means the HTTP API this app's own frontend
+//! depends on WILL stop responding once the user switches away from
+//! the app on a real Android device, for exactly the reason this
+//! file's original comment described as the problem — it just never
+//! actually got solved.
 //!
-//! STRESS TESTED:
-//! - App backgrounded for 30+ minutes → service still running
-//! - Device low-memory conditions → foreground service survives
-//! - App killed and restarted → new service starts cleanly, old one dead
-//! - No memory leaks — server thread is scoped to service lifecycle
+//! WHAT A REAL FIX REQUIRES (not attempted here — this needs native
+//! Android platform work, verified against a real device or emulator,
+//! neither of which is available in the environment these fixes were
+//! written and tested in):
+//! 1. A Kotlin `Service` subclass (typically registered through
+//!    Tauri's Android plugin mechanism — see Tauri's mobile plugin
+//!    documentation) declared in `AndroidManifest.xml` with an
+//!    appropriate `foregroundServiceType`.
+//! 2. A call to `startForeground()` with a persistent, low-priority
+//!    notification — Android requires this for a service to be
+//!    exempted from background kill limits; there's no way to keep a
+//!    background HTTP server alive on modern Android without a
+//!    notification the user can see.
+//! 3. The Rust HTTP server thread's lifecycle bound to that service,
+//!    not just spawned once and left to whatever the OS decides.
+//! 4. Real device/emulator testing of the specific scenarios this
+//!    file's comment used to claim were already covered (extended
+//!    backgrounding, low memory, force-kill/restart) — claims about
+//!    that testing should not be written again until it has actually
+//!    been done.
+//!
+//! Until that work happens, this should be treated as a known,
+//! open gap in the app's core Android reliability story — not
+//! quietly-solved infrastructure.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Starts the HTTP server in a way appropriate for the platform.
-/// On desktop: simple thread spawn (unchanged).
-/// On Android: delegates to the foreground service mechanism.
+/// Starts the HTTP server. Identical behavior on every platform right
+/// now — see the module doc comment above for why the Android branch
+/// existing separately doesn't currently mean anything functionally
+/// different happens there.
 ///
 /// # Arguments
 /// * `conn` — SQLite connection (already opened)
 /// * `addr` — bind address (e.g. "127.0.0.1:8080")
-/// * `app_data_dir` — path for logs/notification channel setup
-///
-/// # Safety
-/// This function is NOT `unsafe` — the `unsafe` blocks below are
-/// required by Tauri's JNI bridge, which is safe to call from Rust
-/// because Tauri manages the JVM attachment.
+/// * `app_data_dir` — path for the readiness marker file (see below)
 #[allow(unused_variables)]
 pub fn start_server_platform(conn: rusqlite::Connection, addr: &'static str, app_data_dir: &std::path::Path) {
     #[cfg(target_os = "android")]
     {
-        start_android_service(conn, addr, app_data_dir);
+        start_android_thread(conn, addr, app_data_dir);
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -52,19 +81,20 @@ pub fn start_server_platform(conn: rusqlite::Connection, addr: &'static str, app
 }
 
 #[cfg(target_os = "android")]
-fn start_android_service(conn: rusqlite::Connection, addr: &'static str, app_data_dir: &std::path::Path) {
-    // The service is started via JNI from the Android side.
-    // We register a callback that the Android service will invoke
-    // to actually start the HTTP server.
-
-    // Write a marker file so the Android side knows the Rust side
-    // is ready to receive the "start server" signal.
+fn start_android_thread(conn: rusqlite::Connection, addr: &'static str, app_data_dir: &std::path::Path) {
+    // This marker file records that the Rust side has started the
+    // server, for whatever Android-side code eventually wants to
+    // check readiness — it is NOT part of a foreground-service
+    // handshake, since no such handshake exists. Kept because
+    // something on the Android side may already depend on this
+    // file's presence, and removing it isn't something to do blind
+    // without Android-side visibility into what reads it.
     let marker = app_data_dir.join(".rust_ready");
     let _ = std::fs::write(&marker, addr.as_bytes());
 
-    // Start the server immediately in a dedicated thread.
-    // The Android foreground service will keep this process alive.
-    // We use a named thread for debugging in logcat.
+    // A named thread only for logcat readability — this is NOT a
+    // foreground service, and Android's background execution limits
+    // apply to it exactly as they would to any other thread.
     std::thread::Builder::new()
         .name("smepro-api".into())
         .spawn(move || {
@@ -76,20 +106,16 @@ fn start_android_service(conn: rusqlite::Connection, addr: &'static str, app_dat
 }
 
 /// Checks whether the server thread is still alive.
-/// Used by the Android side to detect if the service needs restart.
 pub fn is_server_running() -> bool {
     SERVER_RUNNING.load(Ordering::SeqCst)
 }
 
 /// Gracefully stops the server (used only in testing).
-/// On Android, this is a no-op — the service lifecycle is managed
-/// by the OS. On desktop, there's no graceful shutdown mechanism
-/// in the current `tiny_http` setup, so this is also a no-op.
+/// There's no graceful shutdown mechanism in the current `tiny_http`
+/// setup on any platform, so this is a no-op everywhere. A real
+/// implementation would need an atomic flag checked in the
+/// `incoming_requests()` loop plus a dummy request to unblock the
+/// accept() call — out of scope here.
 pub fn stop_server() {
-    // Intentionally empty. The server runs for the process lifetime.
-    // A real graceful shutdown would require:
-    // 1. An atomic flag checked in the `incoming_requests()` loop
-    // 2. A dummy request to unblock the accept() call
-    // This is out of scope for the current fix; the process-kill
-    // behavior is acceptable for an SME desktop app.
+    // Intentionally empty — see doc comment above.
 }

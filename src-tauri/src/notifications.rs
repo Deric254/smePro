@@ -90,7 +90,14 @@ fn send_via_twilio(channel: &str, recipient: &str, message: &str) -> Result<Stri
     // native_tls wiring, which is what was breaking cross-compiled
     // builds (Android, cross-arch macOS) with "could not find OpenSSL
     // installation" — rustls has no such external dependency at all.
-    let agent = ureq::AgentBuilder::new().build();
+    //
+    // The timeout matters here for the same reason it does in
+    // ai_assistant.rs: http_api.rs::serve() is a single-threaded,
+    // blocking request loop, so an unbounded hang on this call would
+    // freeze the entire API for every user, not just this one
+    // notification. 15s is generous for what should be a quick
+    // webhook POST.
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(15)).build();
 
     use base64::Engine;
     let basic_auth = base64::engine::general_purpose::STANDARD.encode(format!("{sid}:{token}"));

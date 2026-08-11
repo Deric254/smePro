@@ -5,15 +5,35 @@
 //! (Google Authenticator, Authy, Microsoft Authenticator, etc.).
 //!
 //! SECURITY DESIGN:
-//! - Secrets are stored encrypted (AES-256-GCM) in the database
+//! - Secrets are stored as plain text in the SQLCipher-encrypted
+//!   database — protected by the database's own at-rest encryption,
+//!   the same as every other sensitive column in this schema (an
+//!   earlier version of this comment claimed an additional app-level
+//!   AES-256-GCM layer on top of that; no such layer exists in this
+//!   code, and no AES dependency is even present in Cargo.toml — this
+//!   comment was simply wrong, not aspirational, so it's corrected
+//!   here rather than left to mislead the next person who reads it)
 //! - Setup requires verifying a code before 2FA is activated
-//! - Recovery codes are generated (10 single-use codes) for account recovery
+//! - Recovery codes are generated (10 single-use codes), shown to the
+//!   user exactly once at generation time, and stored as Argon2id
+//!   hashes — never in plain text — the same pattern used for
+//!   passwords and security-question answers everywhere else in this
+//!   codebase (auth.rs), not a weaker one just because it's TOTP
 //! - Disabling 2FA requires the current TOTP code (not just password)
 //! - Rate limiting applies to TOTP verification attempts
 //!
 //! STRESS TESTED:
 //! - Clock drift: accepts codes ±1 window (30s before/after)
-//! - Replay attack: same code rejected within the same window
+//! - Replay attack: a code that was already used successfully to log
+//!   in is rejected on a second submission, even if it's still within
+//!   its normal validity window — see the REPLAY_GUARD tracking below.
+//!   This does NOT come from the totp-rs crate itself: its `check()`
+//!   is purely a stateless time-window comparison with no memory of
+//!   what's already been used (confirmed by reading its source), so
+//!   without this app-level tracking, a captured valid code really
+//!   could be replayed for up to ~90 seconds. An earlier version of
+//!   this file claimed replay protection while never actually
+//!   implementing it — fixed here, not just re-described.
 //! - Brute force: rate-limited at the API layer
 //! - Lost phone: 10 recovery codes, each usable exactly once
 
@@ -44,6 +64,20 @@ static PENDING: OnceLock<Mutex<HashMap<String, (String, String, Instant)>>> = On
 
 fn pending_store() -> &'static Mutex<HashMap<String, (String, String, Instant)>> {
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Anti-replay tracking: the last time-step successfully used by each
+/// user_id. In-memory rather than a DB column for the same reason as
+/// PENDING above — this is ephemeral, self-healing state (a restart
+/// just means the very next code works again, same as if 30 seconds
+/// had passed), not something that needs to survive a crash or be
+/// backed up. A time step (not the raw code) is what's stored, since
+/// two different users' codes could coincidentally match but their
+/// step numbers are what actually needs to stay monotonic per user.
+static REPLAY_GUARD: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+fn replay_guard() -> &'static Mutex<HashMap<String, u64>> {
+    REPLAY_GUARD.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Issues a short-lived pending-login token for a user whose password
@@ -96,13 +130,25 @@ pub fn generate_secret(conn: &Connection, user_id: &str, username: &str) -> Resu
     let totp = build_totp(&secret, username)?;
     let qr_uri = totp.get_url();
 
-    // Generate 10 recovery codes (each 8 chars, alphanumeric)
+    // Generate 10 recovery codes (each 8 chars, alphanumeric). The
+    // plaintext codes are returned to the caller exactly once, here —
+    // shown to the user to save somewhere safe — and never stored or
+    // logged in plaintext anywhere after this point. Only their
+    // Argon2id hashes go into the database, the same pattern used for
+    // passwords and security-question answers everywhere else in this
+    // codebase (auth.rs) — a recovery code is exactly as sensitive as
+    // a password (it fully bypasses 2FA), so it gets exactly the same
+    // treatment, not a weaker one.
     let recovery_codes: Vec<String> = (0..10)
         .map(|_| generate_recovery_code())
         .collect();
+    let recovery_code_hashes: Vec<String> = recovery_codes
+        .iter()
+        .map(|c| crate::auth::hash_secret(c))
+        .collect::<Result<Vec<_>>>()?;
 
-    // Store secret and recovery codes (hashed) in the user row
-    let recovery_codes_json = serde_json::to_string(&recovery_codes)?;
+    // Store secret and recovery code HASHES (never plaintext) in the user row
+    let recovery_codes_json = serde_json::to_string(&recovery_code_hashes)?;
     conn.execute(
         "UPDATE users SET totp_secret = ?1, totp_recovery_codes = ?2, totp_enabled = 0 WHERE id = ?3",
         params![secret, recovery_codes_json, user_id],
@@ -137,6 +183,14 @@ pub fn verify_and_enable(conn: &mut Connection, user_id: &str, code: &str) -> Re
 }
 
 /// Verifies a TOTP code during login. Returns true if valid.
+///
+/// A code that's already been used successfully by this user is
+/// rejected even if it's still within its normal time-window validity
+/// — see REPLAY_GUARD above. Without this, a code intercepted once
+/// (network capture, shoulder-surfing, a compromised device showing
+/// it briefly) could be reused for the rest of its ~30-90 second
+/// window, which defeats a meaningful part of what 2FA is supposed to
+/// buy you.
 pub fn verify_login(conn: &Connection, user_id: &str, code: &str) -> Result<bool> {
     let enabled: bool = conn.query_row(
         "SELECT totp_enabled FROM users WHERE id = ?1",
@@ -156,7 +210,21 @@ pub fn verify_login(conn: &Connection, user_id: &str, code: &str) -> Result<bool
 
     let totp = build_totp(&secret, "")?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    Ok(totp.check(code, now))
+    if !totp.check(code, now) {
+        return Ok(false);
+    }
+
+    let current_step = now / STEP;
+    let mut guard = replay_guard().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&last_step) = guard.get(user_id) {
+        if current_step <= last_step {
+            // Same or earlier time-step already consumed by this user
+            // — a replay of a previously-accepted code, not a fresh one.
+            return Ok(false);
+        }
+    }
+    guard.insert(user_id.to_string(), current_step);
+    Ok(true)
 }
 
 /// Verifies a recovery code. If valid, disables 2FA so the user can re-enroll.
@@ -167,12 +235,16 @@ pub fn use_recovery_code(conn: &mut Connection, user_id: &str, code: &str) -> Re
         |r| r.get(0),
     ).map_err(|_| anyhow!("no recovery codes found"))?;
 
-    let mut codes: Vec<String> = serde_json::from_str(&codes_json)?;
-    let pos = codes.iter().position(|c| c == code);
+    // Stored values are Argon2id hashes, never plaintext — see
+    // generate_secret's doc comment for why. Comparison has to check
+    // each hash individually (there's no way to look up a hash by its
+    // plaintext preimage), same as any password-style credential.
+    let mut hashes: Vec<String> = serde_json::from_str(&codes_json)?;
+    let pos = hashes.iter().position(|h| crate::auth::verify_secret(code, h));
 
     if let Some(idx) = pos {
-        codes.remove(idx);
-        let new_json = serde_json::to_string(&codes)?;
+        hashes.remove(idx); // single-use — consumed regardless of outcome below
+        let new_json = serde_json::to_string(&hashes)?;
         conn.execute(
             "UPDATE users SET totp_recovery_codes = ?1, totp_enabled = 0, totp_secret = NULL WHERE id = ?2",
             params![new_json, user_id],

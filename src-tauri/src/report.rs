@@ -144,15 +144,27 @@ pub fn run(
     let mut where_clauses = vec!["business_id = ?1".to_string(), "deleted_at IS NULL".to_string()];
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(business_id.to_string())];
 
-    if let Dimension::Time { field, .. } = &dimension {
-        if let Some(start) = range_start {
-            params.push(Box::new(start.to_string()));
-            where_clauses.push(format!("{field} >= ?{}", params.len()));
-        }
-        if let Some(end) = range_end {
-            params.push(Box::new(end.to_string()));
-            where_clauses.push(format!("{field} <= ?{}", params.len()));
-        }
+    // THE BUG THIS FIXES: this used to only apply when dimension was
+    // Dimension::Time — meaning a plain KPI total (dimension=none) or
+    // a category breakdown (dimension=category) silently ignored any
+    // start/end range entirely, even though both are completely normal
+    // things to want ("total revenue this month," "sales by branch
+    // this quarter"). A time slicer needs to filter regardless of
+    // whether the result is ALSO grouped by time — those are two
+    // independent questions. Defaults to created_at when there's no
+    // time dimension to borrow a field name from, matching the same
+    // default used elsewhere in this file.
+    let range_field = match &dimension {
+        Dimension::Time { field, .. } => *field,
+        _ => "created_at",
+    };
+    if let Some(start) = range_start {
+        params.push(Box::new(start.to_string()));
+        where_clauses.push(format!("{range_field} >= ?{}", params.len()));
+    }
+    if let Some(end) = range_end {
+        params.push(Box::new(end.to_string()));
+        where_clauses.push(format!("{range_field} <= ?{}", params.len()));
     }
 
     let (select_label, group_by, order_by) = match &dimension {
@@ -179,7 +191,14 @@ pub fn run(
     let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         let label: String = row.get(0)?;
-        let value: f64 = row.get(1)?;
+        // SUM()/AVG() over zero matching rows is SQL NULL, not 0 — a
+        // completely normal, valid result (e.g. "revenue today" before
+        // the first sale of the day), not an error condition. Reading
+        // straight into a non-nullable f64 used to hard-fail exactly
+        // there; this now treats "nothing matched" as the value 0.0,
+        // which is what every caller of this — a KPI card, a time
+        // slicer with a narrow range — actually needs to see.
+        let value: f64 = row.get::<_, Option<f64>>(1)?.unwrap_or(0.0);
         Ok(ReportPoint { label, value })
     })?;
 
