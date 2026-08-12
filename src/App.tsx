@@ -109,6 +109,7 @@ export default function App() {
         businessName={businessName || '…'}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
+        onSignOut={handleLogout}
       />
       <div className={`app-sidebar-backdrop${mobileMenuOpen ? ' mobile-open' : ''}`} onClick={() => setMobileMenuOpen(false)} />
 
@@ -116,10 +117,6 @@ export default function App() {
         <div className="app-mobile-topbar">
           <button className="app-hamburger" onClick={() => setMobileMenuOpen(true)} aria-label="Open menu">☰</button>
           <div style={{ fontWeight: 600 }}>{businessName || 'SME Pro'}</div>
-        </div>
-
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.6rem' }}>
-          <button className="btn btn-outline" onClick={handleLogout} style={{ fontSize: '0.8rem' }}>Sign out</button>
         </div>
 
         {loadError && (

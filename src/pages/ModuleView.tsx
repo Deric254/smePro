@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   getModuleSchema, listRecords, createRecord, updateRecord, deleteRecord, exportModule,
+  downloadImportTemplate, importExcel,
   runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, getBusinessInfo,
   receiveStock, repackStock, ApiError,
 } from '../api';
-import type { NewInvoiceItem } from '../api';
+import type { NewInvoiceItem, ImportExcelResult } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
-import OcrImport from './OcrImport';
 import InvoiceView from '../components/InvoiceView';
 
 // Some fields must only ever change through a specific, purpose-built
@@ -24,6 +24,22 @@ function isActionManagedField(moduleId: string, fieldName: string): boolean {
   return moduleId === 'purchasing' && fieldName === 'received';
 }
 
+// Reads a File into a bare base64 string (no "data:...;base64," prefix
+// — the backend expects raw base64, same contract as the logo upload
+// in BusinessBranding.tsx, just pulled out into a reusable helper
+// here since this is the second place that needs it).
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      resolve(result.split(',')[1] ?? '');
+    };
+    reader.onerror = () => reject(new Error('could not read the file'));
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [schema, setSchema] = useState<ModuleSchema | null>(null);
   const [records, setRecords] = useState<Record_[]>([]);
@@ -35,7 +51,29 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // only the submit handler's target endpoint (createRecord vs
   // updateRecord) and the initial formValues differ.
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [showOcrImport, setShowOcrImport] = useState(false);
+  const [showExcelImport, setShowExcelImport] = useState(false);
+  const [excelKeyField, setExcelKeyField] = useState('');
+  const [excelFile, setExcelFile] = useState<File | null>(null);
+  const [excelImporting, setExcelImporting] = useState(false);
+  const [excelError, setExcelError] = useState<string | null>(null);
+  const [excelResult, setExcelResult] = useState<ImportExcelResult | null>(null);
+
+  async function handleExcelImport() {
+    if (!excelFile) return;
+    setExcelImporting(true);
+    setExcelError(null);
+    setExcelResult(null);
+    try {
+      const base64 = await fileToBase64(excelFile);
+      const result = await importExcel(moduleId, base64, excelKeyField || undefined);
+      setExcelResult(result);
+      await refreshRecords();
+    } catch (err) {
+      setExcelError(err instanceof ApiError ? err.message : 'Could not import this file');
+    } finally {
+      setExcelImporting(false);
+    }
+  }
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'records' | 'report'>('records');
@@ -168,7 +206,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         notes: repackNotes || undefined,
       });
       setActionResult(
-        `Repacked ${sourceQty} of "${summary.source_name}" into ${targetQty} of "${summary.target_name}".`
+        `Repacked ${sourceQty} of "${summary.source_name}" into ${targetQty} of "${summary.target_name}". New cost: ${formatMoney(summary.target_unit_cost_after, businessCurrency)} each.`
       );
       setRepackSourceId(null);
       setRepackTargetId('');
@@ -346,11 +384,15 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
               {canExport && <button className="btn btn-outline" onClick={() => exportModule(moduleId)}>Export to Excel</button>}
+              {canCreate && moduleId !== 'invoice' && (
+                <button className="btn btn-outline" onClick={() => { setShowExcelImport(true); setExcelResult(null); setExcelError(null); setExcelFile(null); }}>
+                  Import from Excel
+                </button>
+              )}
               {moduleId === 'invoice' ? (
                 canCreate && <button className="btn btn-stamp" onClick={() => setShowInvoiceForm((v) => !v)}>{showInvoiceForm ? 'Cancel' : '+ New invoice'}</button>
               ) : (
                 <>
-                  {canCreate && <button className="btn btn-outline" onClick={() => setShowOcrImport(true)}>Import from photo</button>}
                   {canCreate && (
                     <button className="btn btn-stamp" onClick={() => (showForm ? cancelForm() : setShowForm(true))}>
                       {showForm ? 'Cancel' : '+ New'}
@@ -365,15 +407,6 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             <NewInvoiceForm
               onCreated={() => { setShowInvoiceForm(false); refreshRecords(); }}
               onCancel={() => setShowInvoiceForm(false)}
-            />
-          )}
-
-          {showOcrImport && schema && (
-            <OcrImport
-              moduleId={moduleId}
-              fields={schema.fields}
-              onClose={() => setShowOcrImport(false)}
-              onImported={() => { refreshRecords(); }}
             />
           )}
 
@@ -453,7 +486,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       )}
 
       {viewingInvoiceId && (
-        <InvoiceView invoiceId={viewingInvoiceId} onClose={() => setViewingInvoiceId(null)} />
+        <InvoiceView invoiceId={viewingInvoiceId} onClose={() => setViewingInvoiceId(null)} onStatusChanged={refreshRecords} />
       )}
 
       {actionResult && (
@@ -524,6 +557,65 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               <button className="btn btn-outline" onClick={() => setRepackSourceId(null)} disabled={repackSubmitting}>Cancel</button>
               <button className="btn btn-stamp" onClick={submitRepack} disabled={repackSubmitting || !repackTargetId}>
                 {repackSubmitting ? 'Repacking…' : 'Confirm repack'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showExcelImport && schema && (
+        <div style={styles.overlay} onClick={() => setShowExcelImport(false)}>
+          <div className="card" style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>Import from Excel</h3>
+            <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+              Download the template below, fill it in (or export your existing records and edit them),
+              then upload it back here. Matching rows update the existing record instead of creating a
+              duplicate — this is also how to do a stock take: export, correct the counted quantities in
+              the spreadsheet, then reimport.
+            </p>
+            <button className="btn btn-outline" onClick={() => downloadImportTemplate(moduleId)} style={{ marginBottom: '0.8rem' }}>
+              Download template
+            </button>
+
+            <label>File to import</label>
+            <input
+              type="file"
+              accept=".xlsx"
+              onChange={(e) => setExcelFile(e.target.files?.[0] ?? null)}
+              style={{ width: '100%' }}
+            />
+
+            <label style={{ marginTop: '0.6rem', display: 'block' }}>Match existing records by</label>
+            <select value={excelKeyField} onChange={(e) => setExcelKeyField(e.target.value)} style={{ width: '100%' }}>
+              <option value="">{schema.fields[0]?.name ?? 'id'} (default)</option>
+              {schema.fields.filter((f) => f.unique).map((f) => (
+                <option key={f.name} value={f.name}>{f.name.replace(/_/g, ' ')}</option>
+              ))}
+            </select>
+
+            {excelError && <div style={styles.error}>{excelError}</div>}
+
+            {excelResult && (
+              <div style={{ marginTop: '0.8rem', fontSize: '0.85rem' }}>
+                <div>{excelResult.created} created, {excelResult.updated} updated.</div>
+                {excelResult.errors.length > 0 && (
+                  <div style={{ marginTop: '0.4rem', color: 'var(--stamp)' }}>
+                    {excelResult.errors.length} row(s) had problems:
+                    <ul style={{ margin: '0.3rem 0 0', paddingLeft: '1.2rem' }}>
+                      {excelResult.errors.slice(0, 10).map((e: { row: number; error: string }, i: number) => (
+                        <li key={i}>Row {e.row}: {e.error}</li>
+                      ))}
+                    </ul>
+                    {excelResult.errors.length > 10 && <div>…and {excelResult.errors.length - 10} more.</div>}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={styles.modalActions}>
+              <button className="btn btn-outline" onClick={() => setShowExcelImport(false)} disabled={excelImporting}>Close</button>
+              <button className="btn btn-stamp" onClick={handleExcelImport} disabled={excelImporting || !excelFile}>
+                {excelImporting ? 'Importing…' : 'Import'}
               </button>
             </div>
           </div>

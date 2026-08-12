@@ -10,22 +10,26 @@ import {
   createBackup, restoreBackup,
   getAuditLog,
   listNotifications, sendNotification, sendLowStockAlert,
+  getCurrencyRates, convertCurrency, refreshCurrencyRates,
+  listTaxRates, setTaxRate, computeTax,
   changeBusinessType,
-  listModules, getModuleSchema, enableModule,
+  listModules, listAvailableModules, getModuleSchema, enableModule,
   ApiError,
 } from '../api';
-import type { AuditLogEntry, NotificationRecord, AiSettingsStatus } from '../api';
+import type { AuditLogEntry, NotificationRecord, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
+import { formatMoney, parseMoneyInput } from '../lib/money';
 import BusinessBranding from '../components/BusinessBranding';
 import TwoFactorSetup from '../components/TwoFactorSetup';
 
-type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'license' | 'backup' | 'audit' | 'notifications' | 'business' | 'security' | 'ai';
+type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'license' | 'backup' | 'audit' | 'notifications' | 'business' | 'security' | 'ai';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
   { id: 'users', label: 'Users' },
   { id: 'units', label: 'Units' },
   { id: 'currencies', label: 'Currencies' },
+  { id: 'tax', label: 'Tax Rates' },
   { id: 'settings', label: 'Theme & Settings' },
   { id: 'business', label: 'Business' },
   { id: 'ai', label: 'AI Settings' },
@@ -56,6 +60,7 @@ export default function AdminPanel() {
       {tab === 'users' && <UsersTab />}
       {tab === 'units' && <UnitsTab />}
       {tab === 'currencies' && <CurrenciesTab />}
+      {tab === 'tax' && <TaxRatesTab />}
       {tab === 'settings' && <SettingsTab />}
       {tab === 'business' && <BusinessTab />}
       {tab === 'security' && <TwoFactorSetup />}
@@ -441,8 +446,70 @@ function CurrenciesTab() {
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
 
+  // Exchange rates + converter — see currency.rs. Rates are cached
+  // server-side and only refreshed on request, not on every load.
+  const [ratesBase, setRatesBase] = useState('USD');
+  const [rates, setRates] = useState<CurrencyRate[]>([]);
+  const [ratesStale, setRatesStale] = useState(false);
+  const [ratesLoading, setRatesLoading] = useState(false);
+  const [ratesError, setRatesError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const [convAmountText, setConvAmountText] = useState('100.00');
+  const [convFrom, setConvFrom] = useState('USD');
+  const [convTo, setConvTo] = useState('USD');
+  const [convResult, setConvResult] = useState<string | null>(null);
+  const [convError, setConvError] = useState<string | null>(null);
+  const [converting, setConverting] = useState(false);
+
   const refresh = () => listCurrencies().then((r) => setCurrencies(r.currencies)).catch(() => {});
   useEffect(() => { refresh(); }, []);
+
+  function loadRates(base: string) {
+    setRatesLoading(true);
+    setRatesError(null);
+    getCurrencyRates(base)
+      .then((r) => { setRates(r.rates); setRatesStale(r.stale); })
+      .catch((err) => setRatesError(err instanceof ApiError ? err.message : 'Could not load exchange rates'))
+      .finally(() => setRatesLoading(false));
+  }
+  useEffect(() => { loadRates(ratesBase); }, [ratesBase]);
+
+  async function handleRefreshRates() {
+    setRefreshing(true);
+    setRatesError(null);
+    try {
+      await refreshCurrencyRates(ratesBase);
+      loadRates(ratesBase);
+    } catch (err) {
+      // require_owner on the backend means a non-owner sees a clear
+      // 403 here rather than a hidden/disabled button — simpler than
+      // duplicating the ownership check client-side for a rarely-hit
+      // permission edge case in an already admin-only tab.
+      setRatesError(err instanceof ApiError ? err.message : 'Could not refresh rates');
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function handleConvert() {
+    setConvError(null);
+    setConvResult(null);
+    const cents = parseMoneyInput(convAmountText, convFrom);
+    if (cents === null) {
+      setConvError('Enter a valid amount.');
+      return;
+    }
+    setConverting(true);
+    try {
+      const { result } = await convertCurrency(convFrom, convTo, cents);
+      setConvResult(`${formatMoney(cents, convFrom)} ${convFrom} = ${formatMoney(result, convTo)} ${convTo}`);
+    } catch (err) {
+      setConvError(err instanceof ApiError ? err.message : 'Could not convert — is a rate available for this pair?');
+    } finally {
+      setConverting(false);
+    }
+  }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -500,6 +567,253 @@ function CurrenciesTab() {
           </tbody>
         </table>
       </div>
+
+      <div className="card" style={{ marginTop: '1.2rem' }}>
+        <h3 style={{ marginTop: 0 }}>Exchange rates</h3>
+        <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-end', marginBottom: '0.8rem' }}>
+          <div style={{ width: 100 }}>
+            <label>Base currency</label>
+            <input value={ratesBase} onChange={(e) => setRatesBase(e.target.value.toUpperCase())} style={{ width: '100%' }} />
+          </div>
+          <button className="btn btn-outline" onClick={handleRefreshRates} disabled={refreshing}>
+            {refreshing ? 'Refreshing…' : 'Refresh rates'}
+          </button>
+          {ratesStale && !ratesLoading && (
+            <span style={{ fontSize: '0.78rem', color: 'var(--stamp)' }}>These rates look stale — consider refreshing.</span>
+          )}
+        </div>
+        <ErrorBox error={ratesError} />
+        {ratesLoading ? (
+          <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>Loading…</div>
+        ) : rates.length === 0 ? (
+          <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>No cached rates for {ratesBase} yet — try refreshing.</div>
+        ) : (
+          <table style={styles.table}>
+            <thead><tr><th style={styles.th}>To</th><th style={styles.th}>Rate</th><th style={styles.th}>Fetched</th></tr></thead>
+            <tbody>
+              {rates.map((r) => (
+                <tr key={r.to_currency}>
+                  <td className="mono" style={styles.td}>{r.to_currency}</td>
+                  <td className="mono" style={styles.td}>{r.rate}</td>
+                  <td style={styles.td}>{new Date(r.fetched_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="card" style={{ marginTop: '1.2rem' }}>
+        <h3 style={{ marginTop: 0 }}>Convert</h3>
+        <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div style={{ width: 120 }}>
+            <label>Amount</label>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={convAmountText}
+              onChange={(e) => setConvAmountText(e.target.value)}
+              style={{ width: '100%' }}
+            />
+          </div>
+          <div style={{ width: 90 }}>
+            <label>From</label>
+            <input value={convFrom} onChange={(e) => setConvFrom(e.target.value.toUpperCase())} style={{ width: '100%' }} />
+          </div>
+          <div style={{ width: 90 }}>
+            <label>To</label>
+            <input value={convTo} onChange={(e) => setConvTo(e.target.value.toUpperCase())} style={{ width: '100%' }} />
+          </div>
+          <button className="btn btn-stamp" onClick={handleConvert} disabled={converting}>
+            {converting ? 'Converting…' : 'Convert'}
+          </button>
+        </div>
+        {convError && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginTop: '0.5rem' }}>{convError}</div>}
+        {convResult && <div style={{ fontSize: '0.9rem', marginTop: '0.5rem', fontWeight: 600 }}>{convResult}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------- Tax Rates
+
+function TaxRatesTab() {
+  const [rates, setRates] = useState<{ category: string; rate: number }[]>([]);
+  const [category, setCategory] = useState('');
+  const [rateText, setRateText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const refresh = () => listTaxRates().then((r) => setRates(r.rates)).catch(() => {});
+  useEffect(() => { refresh(); }, []);
+
+  async function handleSetRate(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const rate = parseFloat(rateText);
+    if (!category.trim() || Number.isNaN(rate) || rate < 0) {
+      setError('Enter a category name and a rate (e.g. 16 for 16%).');
+      return;
+    }
+    setSaving(true);
+    try {
+      await setTaxRate(category.trim(), rate);
+      setCategory('');
+      setRateText('');
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save this rate — owner permission required.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Calculator/preview state
+  const [calcItems, setCalcItems] = useState<{ category: string; unit_price_text: string; quantity: number }[]>([
+    { category: '', unit_price_text: '0.00', quantity: 1 },
+  ]);
+  const [taxInclusive, setTaxInclusive] = useState(false);
+  const [calcResult, setCalcResult] = useState<TaxComputeResult | null>(null);
+  const [calcError, setCalcError] = useState<string | null>(null);
+  const [calculating, setCalculating] = useState(false);
+
+  function updateCalcItem(i: number, patch: Partial<{ category: string; unit_price_text: string; quantity: number }>) {
+    setCalcItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
+  }
+
+  async function handleCompute() {
+    setCalcError(null);
+    setCalcResult(null);
+    const parsedItems: TaxComputeItem[] = [];
+    for (const it of calcItems) {
+      if (!it.category.trim()) continue;
+      const cents = parseMoneyInput(it.unit_price_text, 'USD');
+      if (cents === null || !(it.quantity > 0)) {
+        setCalcError(`"${it.category}" has an invalid price or quantity.`);
+        return;
+      }
+      parsedItems.push({ category: it.category.trim(), unit_price: cents, quantity: it.quantity });
+    }
+    if (parsedItems.length === 0) {
+      setCalcError('Add at least one line item with a category.');
+      return;
+    }
+    setCalculating(true);
+    try {
+      setCalcResult(await computeTax(parsedItems, taxInclusive));
+    } catch (err) {
+      setCalcError(err instanceof ApiError ? err.message : 'Could not compute tax for these items');
+    } finally {
+      setCalculating(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="card" style={{ borderColor: 'var(--stamp)', marginBottom: '1rem' }}>
+        <strong style={{ color: 'var(--stamp)' }}>Heads up:</strong>{' '}
+        <span style={{ fontSize: '0.85rem' }}>
+          These per-category tax rates are <strong>not currently applied</strong> to real sales or invoices —
+          Point of Sale and Invoicing both use a single flat tax rate instead, set under Admin → Business.
+          What's below lets you configure and preview category rates, but changing them here won't change
+          what a customer is actually charged yet. If you need per-category tax to actually apply at
+          checkout, that's a real feature to build deliberately — ask, don't assume this page already does it.
+        </span>
+      </div>
+
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <h3 style={{ marginTop: 0 }}>Category rates</h3>
+        <form onSubmit={handleSetRate} style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-end', marginBottom: '0.8rem' }}>
+          <div style={{ flex: 1 }}>
+            <label>Category</label>
+            <input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Food" style={{ width: '100%' }} />
+          </div>
+          <div style={{ width: 100 }}>
+            <label>Rate (%)</label>
+            <input value={rateText} onChange={(e) => setRateText(e.target.value)} placeholder="16" style={{ width: '100%' }} />
+          </div>
+          <button className="btn btn-stamp" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Set rate'}</button>
+        </form>
+        <ErrorBox error={error} />
+        <table style={styles.table}>
+          <thead><tr><th style={styles.th}>Category</th><th style={styles.th}>Rate</th></tr></thead>
+          <tbody>
+            {rates.length === 0 && <tr><td colSpan={2} style={styles.td}>No category rates set yet.</td></tr>}
+            {rates.map((r) => (
+              <tr key={r.category}>
+                <td style={styles.td}>{r.category}</td>
+                <td className="mono" style={styles.td}>{r.rate}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Preview calculator</h3>
+        {calcItems.map((it, i) => (
+          <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', alignItems: 'flex-end' }}>
+            <div style={{ flex: 1 }}>
+              <label>Category</label>
+              <input value={it.category} onChange={(e) => updateCalcItem(i, { category: e.target.value })} style={{ width: '100%' }} />
+            </div>
+            <div style={{ width: 100 }}>
+              <label>Unit price</label>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={it.unit_price_text}
+                onChange={(e) => updateCalcItem(i, { unit_price_text: e.target.value })}
+                style={{ width: '100%' }}
+              />
+            </div>
+            <div style={{ width: 70 }}>
+              <label>Qty</label>
+              <input
+                type="number"
+                min={1}
+                value={it.quantity}
+                onChange={(e) => updateCalcItem(i, { quantity: parseInt(e.target.value, 10) || 1 })}
+                style={{ width: '100%' }}
+              />
+            </div>
+          </div>
+        ))}
+        <button
+          className="btn btn-outline"
+          type="button"
+          onClick={() => setCalcItems((prev) => [...prev, { category: '', unit_price_text: '0.00', quantity: 1 }])}
+          style={{ marginBottom: '0.8rem' }}
+        >
+          + Add line
+        </button>
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.8rem' }}>
+          <input type="checkbox" checked={taxInclusive} onChange={(e) => setTaxInclusive(e.target.checked)} />
+          Prices already include tax
+        </label>
+
+        <button className="btn btn-stamp" onClick={handleCompute} disabled={calculating}>
+          {calculating ? 'Computing…' : 'Compute'}
+        </button>
+
+        {calcError && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginTop: '0.6rem' }}>{calcError}</div>}
+
+        {calcResult && (
+          <div style={{ marginTop: '0.8rem', fontSize: '0.85rem' }}>
+            {calcResult.lines.map((l) => (
+              <div key={l.category} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>{l.category} ({l.rate}%)</span>
+                <span className="mono">{formatMoney(l.taxable_amount, 'USD')} + {formatMoney(l.tax_amount, 'USD')} tax</span>
+              </div>
+            ))}
+            <div style={{ borderTop: '1px solid var(--paper-line)', marginTop: '0.5rem', paddingTop: '0.5rem', fontWeight: 600, display: 'flex', justifyContent: 'space-between' }}>
+              <span>Total</span>
+              <span className="mono">{formatMoney(calcResult.total, 'USD')}</span>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -513,25 +827,30 @@ const THEMES = [
 ];
 
 function BusinessTab() {
-  const [modules, setModules] = useState<ModuleListItem[]>([]);
-  const [enabling, setEnabling] = useState(false);
+  const [modules, setModules] = useState<AvailableModule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [enablingId, setEnablingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = () => { listModules().then((r) => setModules(r.modules)).catch(() => {}); };
+  const refresh = () => {
+    setLoading(true);
+    listAvailableModules()
+      .then((r) => setModules(r.modules))
+      .catch(() => setError('Could not load the module list'))
+      .finally(() => setLoading(false));
+  };
   useEffect(refresh, []);
 
-  const invoiceEnabled = modules.some((m) => m.id === 'invoice' && m.enabled);
-
-  async function handleEnableInvoices() {
-    setEnabling(true);
+  async function handleEnable(moduleId: string) {
+    setEnablingId(moduleId);
     setError(null);
     try {
-      await enableModule('invoice');
+      await enableModule(moduleId);
       refresh();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not enable Invoices module');
+      setError(err instanceof ApiError ? err.message : `Could not enable ${moduleId}`);
     } finally {
-      setEnabling(false);
+      setEnablingId(null);
     }
   }
 
@@ -542,21 +861,27 @@ function BusinessTab() {
       <div className="card" style={{ marginTop: '1.2rem' }}>
         <h3 style={{ marginTop: 0 }}>Additional modules</h3>
         <p style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
-          Modules beyond your business type's starting set can be turned on individually.
+          Your business type enables a sensible starting set — any of these can be turned on
+          individually too, whether or not your type's preset included them.
         </p>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0', borderTop: '1px solid var(--paper-line)' }}>
-          <div>
-            <strong>Invoices</strong>
-            <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)' }}>Create, send, and track customer invoices.</div>
-          </div>
-          {invoiceEnabled ? (
-            <span style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Enabled</span>
-          ) : (
-            <button className="btn" onClick={handleEnableInvoices} disabled={enabling}>
-              {enabling ? 'Enabling…' : 'Enable'}
-            </button>
-          )}
-        </div>
+        {loading ? (
+          <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>Loading…</div>
+        ) : (
+          modules.map((m) => (
+            <div key={m.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0', borderTop: '1px solid var(--paper-line)' }}>
+              <div>
+                <strong>{m.display_name}</strong>
+              </div>
+              {m.enabled ? (
+                <span style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Enabled</span>
+              ) : (
+                <button className="btn" onClick={() => handleEnable(m.id)} disabled={enablingId === m.id}>
+                  {enablingId === m.id ? 'Enabling…' : 'Enable'}
+                </button>
+              )}
+            </div>
+          ))
+        )}
         {error && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginTop: '0.5rem' }}>{error}</div>}
       </div>
     </div>

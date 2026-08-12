@@ -26,6 +26,19 @@
 //! requires: not just that the math balances at the moment it happens,
 //! but that anyone can look back later and see exactly what was
 //! converted into what, and when.
+//!
+//! COST, not just quantity: the target item's `unit_cost` is
+//! recalculated too, using the same weighted-average approach
+//! receiving.rs uses for purchase orders — the cost consumed from the
+//! source (source_quantity × the source's own unit_cost) is
+//! distributed across the units produced, blended with whatever the
+//! target already had in stock at its existing cost. A dozen eggs
+//! bought for 300 and broken into 12 single eggs correctly leaves the
+//! single-egg record at a cost of 25 each, not whatever arbitrary
+//! value it happened to have before (often 0, for a brand-new item)
+//! — an earlier version of this file only updated quantities and left
+//! every repacked item's cost basis silently wrong, corrupting margin
+//! and profit figures computed from it afterward.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -72,14 +85,14 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
 
     let tx = conn.transaction()?;
 
-    let source: Option<(String, i64)> = tx
+    let source: Option<(String, i64, i64)> = tx
         .query_row(
-            &format!("SELECT name, quantity FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+            &format!("SELECT name, quantity, unit_cost FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
             params![req.source_record_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((source_name, source_current_qty)) = source else {
+    let Some((source_name, source_current_qty, source_unit_cost)) = source else {
         return Err(anyhow!("source inventory item not found: {}", req.source_record_id));
     };
 
@@ -90,27 +103,51 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         ));
     }
 
-    let target: Option<(String, i64)> = tx
+    let target: Option<(String, i64, i64)> = tx
         .query_row(
-            &format!("SELECT name, quantity FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+            &format!("SELECT name, quantity, unit_cost FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
             params![req.target_record_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((target_name, target_current_qty)) = target else {
+    let Some((target_name, target_current_qty, target_current_unit_cost)) = target else {
         return Err(anyhow!("target inventory item not found: {}", req.target_record_id));
     };
 
     let source_new_qty = source_current_qty - req.source_quantity;
     let target_new_qty = target_current_qty + req.target_quantity_produced;
 
+    // The real fix: without this, the target item's cost basis never
+    // reflects what was actually consumed to produce it — a dozen
+    // eggs bought for 300 broken into 12 single eggs would leave the
+    // "single egg" record at whatever cost it happened to have
+    // before (often 0, for a brand-new item), silently corrupting
+    // every margin/profit figure computed from it afterward. Instead:
+    // the total cost consumed from the source (source_quantity *
+    // source's own unit_cost) is distributed across the units
+    // produced, blended with whatever the target already had in
+    // stock at its existing cost — the exact same weighted-average
+    // formula receiving.rs uses for purchase orders, applied here to
+    // a repack instead. Integer cents throughout (see money.rs), so
+    // this is exact arithmetic; the one deliberate rounding point is
+    // the final division, rounded to the nearest cent rather than
+    // truncated, same as receiving.rs.
+    let cost_consumed_from_source = source_unit_cost * req.source_quantity;
+    let existing_target_value = target_current_qty * target_current_unit_cost;
+    let numerator = existing_target_value + cost_consumed_from_source;
+    let target_new_unit_cost = if target_new_qty > 0 {
+        (numerator + target_new_qty / 2) / target_new_qty
+    } else {
+        target_current_unit_cost // unreachable in practice (target_new_qty > 0 whenever target_quantity_produced > 0, already validated above), kept only so this can never divide by zero
+    };
+
     tx.execute(
         &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
         params![source_new_qty, req.source_record_id, business_id],
     )?;
     tx.execute(
-        &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
-        params![target_new_qty, req.target_record_id, business_id],
+        &format!("UPDATE {table} SET quantity = ?1, unit_cost = ?2, updated_at = datetime('now') WHERE id = ?3 AND business_id = ?4"),
+        params![target_new_qty, target_new_unit_cost, req.target_record_id, business_id],
     )?;
 
     // Same discipline as checkout() and receive(): nothing above is
@@ -123,11 +160,14 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         "source_name": source_name,
         "source_quantity_before": source_current_qty,
         "source_quantity_after": source_new_qty,
+        "source_unit_cost": source_unit_cost,
         "target_record_id": req.target_record_id,
         "target_name": target_name,
         "target_quantity_before": target_current_qty,
         "target_quantity_after": target_new_qty,
         "target_quantity_produced": req.target_quantity_produced,
+        "target_unit_cost_before": target_current_unit_cost,
+        "target_unit_cost_after": target_new_unit_cost,
         "notes": req.notes,
     });
 

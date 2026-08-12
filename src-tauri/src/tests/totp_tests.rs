@@ -96,6 +96,35 @@ fn test_totp_rejects_a_replayed_code_within_its_own_window() {
     assert!(!replay, "a replayed TOTP code must be rejected, not accepted a second time");
 }
 
+#[test]
+fn test_totp_disable_requires_a_valid_current_code() {
+    // Proves the backend side of the gap that was just found while
+    // auditing: TwoFactorSetup.tsx had no UI to disable 2FA at all,
+    // even though totp::disable() worked correctly and was already
+    // reachable via POST /auth/2fa/disable. This confirms the
+    // function itself is correct — the fix was purely that nothing
+    // in the frontend ever called it.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let setup = crate::totp::generate_secret(&conn, &uid, "owner").unwrap();
+    let code = current_code(&setup.secret);
+    crate::totp::verify_and_enable(&mut conn, &uid, &code).unwrap();
+    assert!(crate::totp::status(&conn, &uid).unwrap().enabled);
+
+    // Wrong code must be rejected, and 2FA must stay enabled.
+    let wrong = crate::totp::disable(&mut conn, &uid, "000000");
+    assert!(wrong.is_err());
+    assert!(crate::totp::status(&conn, &uid).unwrap().enabled);
+
+    // The correct current code disables it.
+    let next_code = current_code(&setup.secret);
+    let result = crate::totp::disable(&mut conn, &uid, &next_code);
+    assert!(result.is_ok());
+    assert!(!crate::totp::status(&conn, &uid).unwrap().enabled);
+}
+
 /// Computes a currently-valid TOTP code for a given base32 secret, the
 /// same way a real authenticator app would — used only so these tests
 /// exercise the real verification path with a genuinely valid code,

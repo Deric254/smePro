@@ -10,7 +10,15 @@ use crate::business_panel;
 /// screen or workflow.
 fn preset_modules(business_type: &str) -> Result<Vec<&'static str>> {
     match business_type {
-        "retail" => Ok(vec!["inventory", "sales", "refunds", "debt_credit", "accounting", "invoice"]),
+        // "retail" gets purchasing too — a retail business's entire
+        // model is buying stock to resell, so leaving this off by
+        // default meant every retail business had to discover an
+        // indirect, confusing workaround (switching business type to
+        // "food" or "manufacturing" just to unlock the Purchasing
+        // module, since there was no direct way to enable it
+        // otherwise) before they could even receive their first
+        // delivery against a purchase order.
+        "retail" => Ok(vec!["inventory", "purchasing", "sales", "refunds", "debt_credit", "accounting", "invoice"]),
         "food" => Ok(vec!["inventory", "sales", "purchasing", "refunds", "debt_credit", "accounting", "invoice"]),
         "services" => Ok(vec!["hr", "sales", "refunds", "debt_credit", "accounting", "invoice"]),
         "manufacturing" => Ok(vec!["inventory", "purchasing", "hr", "sales", "refunds", "accounting", "invoice"]),

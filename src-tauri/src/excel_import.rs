@@ -57,6 +57,12 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
         let example = match field.field_type.as_str() {
             "integer" => "0".to_string(),
             "real" => "0.00".to_string(),
+            // Shown as a plain decimal amount, matching exactly what a
+            // person should type — the integer-cents conversion this
+            // app does internally for "money" fields is not something
+            // a spreadsheet-filling business owner should ever need to
+            // know about or type themselves.
+            "money" => "0.00".to_string(),
             "boolean" => "false".to_string(),
             "date" => "2026-01-31".to_string(),
             _ => format!("example {}", field.name),
@@ -95,6 +101,16 @@ pub fn import(
     // existing key will correctly fail for them individually, not
     // silently succeed as an unauthorized overwrite.
     crate::rbac::require(conn, user_id, &module.id, "create")?;
+
+    // Needed to correctly parse any "money"-typed column — a human
+    // typing "19.99" into a spreadsheet cell means something
+    // different depending on the business's currency (2 decimal
+    // places for USD/KES, 0 for JPY, 3 for KWD — see
+    // money::decimal_places_for), and the cell has no way to carry
+    // that context itself.
+    let currency: String = conn
+        .query_row("SELECT currency FROM businesses WHERE id = ?1", rusqlite::params![business_id], |r| r.get(0))
+        .unwrap_or_else(|_| "USD".to_string());
 
     let cursor = Cursor::new(xlsx_bytes);
     let mut workbook: Xlsx<_> =
@@ -138,7 +154,7 @@ pub fn import(
             let Some(field) = module.fields.iter().find(|f| &f.name == header) else { continue };
             let Some(cell) = cells.get(col_idx) else { continue };
             if matches!(cell, Data::Empty) { continue; }
-            record.insert(field.name.clone(), cell_to_json(cell, &field.field_type));
+            record.insert(field.name.clone(), cell_to_json(cell, &field.field_type, &currency));
         }
 
         for f in &module.fields {
@@ -211,12 +227,46 @@ fn cell_to_string(cell: &Data) -> String {
     }
 }
 
-fn cell_to_json(cell: &Data, field_type: &str) -> Value {
+fn cell_to_json(cell: &Data, field_type: &str, currency: &str) -> Value {
     match (cell, field_type) {
         (Data::Int(i), "integer") => json!(i),
         (Data::Float(f), "integer") => json!(*f as i64),
+        // A numeric-looking cell stored as TEXT rather than a native
+        // number — genuinely common in real spreadsheets (a column
+        // formatted as Text, or data pasted/imported from a CSV,
+        // often ends up this way even though a human reading it sees
+        // "10", not text). Falling through to the generic string
+        // branch below would silently produce the STRING "10" instead
+        // of the integer 10, which module.validate() then rejects —
+        // exactly the same class of bug the money-field fix above
+        // exists to close, just for integer/real instead of money.
+        (Data::String(s), "integer") => s.trim().parse::<i64>().map(|i| json!(i)).unwrap_or(Value::Null),
         (Data::Float(f), "real") => json!(f),
         (Data::Int(i), "real") => json!(*i as f64),
+        (Data::String(s), "real") => s.trim().parse::<f64>().map(|f| json!(f)).unwrap_or(Value::Null),
+        // A human types a decimal amount into the cell (19.99), same
+        // as anywhere else money is typed in this app — parsed here
+        // through the exact same strict parser (money::parse_money_input)
+        // that every other money input in the app goes through, not a
+        // separate, looser one just because this path is a spreadsheet.
+        // An Excel float and an Excel string both need handling: Excel
+        // itself decides which storage type a cell gets based on how
+        // it was typed/formatted, and a person filling in a template
+        // could produce either. A value that fails to parse (or is
+        // simply garbage) becomes Null rather than a guess — the
+        // existing per-row module.validate() call right after this
+        // returns already rejects a Null "money" field with a clear
+        // "expected type money but got Null" error, so this doesn't
+        // need its own separate error-reporting path.
+        (Data::Float(f), "money") => crate::money::parse_money_input(&f.to_string(), currency)
+            .map(|c| json!(c))
+            .unwrap_or(Value::Null),
+        (Data::String(s), "money") => crate::money::parse_money_input(s.trim(), currency)
+            .map(|c| json!(c))
+            .unwrap_or(Value::Null),
+        (Data::Int(i), "money") => crate::money::parse_money_input(&i.to_string(), currency)
+            .map(|c| json!(c))
+            .unwrap_or(Value::Null),
         (Data::Bool(b), "boolean") => json!(b),
         (Data::String(s), "boolean") => json!(s.eq_ignore_ascii_case("true") || s == "1"),
         (Data::DateTimeIso(s), "date") => json!(s),

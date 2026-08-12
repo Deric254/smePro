@@ -5,6 +5,8 @@ mod auth_tests;
 #[cfg(test)]
 mod business_branding_tests;
 #[cfg(test)]
+mod excel_import_tests;
+#[cfg(test)]
 mod backup_tests;
 #[cfg(test)]
 mod crud_tests;
@@ -22,3 +24,5 @@ mod receipt_tests;
 mod receiving_tests;
 #[cfg(test)]
 mod refund_tests;
+#[cfg(test)]
+mod repack_tests;

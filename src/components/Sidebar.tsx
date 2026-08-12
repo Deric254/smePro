@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ModuleListItem } from '../types';
+import AccountMenu from './AccountMenu';
 
 function initials(name: string) {
   const words = name.split(/[\s/]+/).filter(Boolean);
@@ -14,6 +15,7 @@ export default function Sidebar({
   businessName,
   mobileOpen = false,
   onCloseMobile,
+  onSignOut,
 }: {
   modules: ModuleListItem[];
   selected: string | null;
@@ -21,6 +23,7 @@ export default function Sidebar({
   businessName: string;
   mobileOpen?: boolean;
   onCloseMobile?: () => void;
+  onSignOut: () => void;
 }) {
   // Remembers whether "Operations" is expanded across visits — a
   // once-off collapse shouldn't reset itself every time the app opens.
@@ -152,6 +155,10 @@ export default function Sidebar({
           </span>
           <span>Admin</span>
         </button>
+      </div>
+
+      <div style={styles.footer}>
+        <AccountMenu onSignOut={onSignOut} />
       </div>
     </nav>
   );

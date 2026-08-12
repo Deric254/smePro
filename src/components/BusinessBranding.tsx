@@ -8,6 +8,14 @@ export default function BusinessBranding() {
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  // The flat tax rate applied to every real sale and invoice — see
+  // pos.rs / invoice.rs. This used to have no working way to be set
+  // anywhere in the app at all: the backend function that updates it
+  // existed but had zero HTTP route calling it, so every business was
+  // permanently stuck at the schema's 0.0 default.
+  const [taxRateText, setTaxRateText] = useState('0');
+  const [taxSaving, setTaxSaving] = useState(false);
+  const [taxMessage, setTaxMessage] = useState('');
 
   useEffect(() => {
     fetch(`${API}/business/branding`, { headers: { Authorization: `Bearer ${getToken()}` } })
@@ -15,8 +23,34 @@ export default function BusinessBranding() {
       .then(data => {
         if (data.slogan) { setSlogan(data.slogan); }
         if (data.logo_path) setLogoPreview(`${API}/uploads/${data.logo_path.split('/').pop()}`);
+        if (typeof data.tax_rate === 'number') setTaxRateText(String(data.tax_rate));
       });
   }, []);
+
+  async function handleSaveTaxRate(e: React.FormEvent) {
+    e.preventDefault();
+    setTaxMessage('');
+    const rate = parseFloat(taxRateText);
+    if (Number.isNaN(rate) || rate < 0 || rate > 100) {
+      setTaxMessage('Enter a rate between 0 and 100.');
+      return;
+    }
+    setTaxSaving(true);
+    try {
+      const res = await fetch(`${API}/business/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ tax_rate: rate }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setTaxMessage('Tax rate updated — applies to sales and invoices from now on.');
+    } catch (err: any) {
+      setTaxMessage(err.message);
+    } finally {
+      setTaxSaving(false);
+    }
+  }
 
   const handleLogoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -114,6 +148,39 @@ export default function BusinessBranding() {
         >
           {loading ? 'Saving…' : 'Save Branding'}
         </button>
+      </form>
+
+      <form onSubmit={handleSaveTaxRate} style={{ marginTop: 28, paddingTop: 20, borderTop: '1px solid #eee' }}>
+        <label style={{ display:'block', fontSize:13, fontWeight:600, marginBottom:6 }}>Tax rate</label>
+        <p style={{ fontSize: 11, color: '#888', marginTop: 0, marginBottom: 8 }}>
+          The flat percentage applied to every sale and invoice — e.g. 16 for 16%. Only the owner can change this.
+        </p>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={taxRateText}
+            onChange={e => setTaxRateText(e.target.value)}
+            style={{ width: 100, padding: '10px 12px', borderRadius: 8, border: '1px solid #ccc', fontSize: 14 }}
+          />
+          <span style={{ fontSize: 14 }}>%</span>
+          <button
+            type="submit"
+            disabled={taxSaving}
+            style={{
+              padding: '10px 18px', borderRadius: 8, border: '1px solid #1a1a1a', background: '#fff',
+              color: '#1a1a1a', fontSize: 13, fontWeight: 600, cursor: taxSaving ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {taxSaving ? 'Saving…' : 'Save rate'}
+          </button>
+        </div>
+        {taxMessage && (
+          <div style={{
+            marginTop: 10, fontSize: 12,
+            color: taxMessage.includes('Enter') || taxMessage.toLowerCase().includes('error') ? '#c0392b' : '#27ae60',
+          }}>{taxMessage}</div>
+        )}
       </form>
     </div>
   );
