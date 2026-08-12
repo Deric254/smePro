@@ -2,7 +2,11 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SME Pro",
   "mainBinaryName": "sme-pro",
+<<<<<<< HEAD
   "version": "0.1.26",
+=======
+  "version": "0.1.28",
+>>>>>>> 567754d733894804d2ff35316146c1afa8098b26
   "identifier": "com.smepro.app",
   "build": {
     "beforeDevCommand": "npm run dev",
