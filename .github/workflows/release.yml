@@ -228,6 +228,12 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
+          # Bumped once to force a clean cache after a stale cached
+          # target/ dir was found to ship an outdated embedded exe icon
+          # (see build.rs cargo:rerun-if-changed=icons fix). Bump again
+          # any time a cache-invisible asset change needs to force a
+          # full rebuild.
+          prefix-key: "v2-icon-fix"
 
       - name: Install frontend dependencies
         run: npm ci
