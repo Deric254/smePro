@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getToken } from '../api';
+import { getToken, markInvoiceSent, markInvoicePaid, cancelInvoice, ApiError } from '../api';
 import { formatMoney } from '../lib/money';
 import '../styles/invoice-print.css';
 
@@ -30,11 +30,36 @@ interface InvoiceRecord {
 
 const API = 'http://127.0.0.1:8080';
 
-export default function InvoiceView({ invoiceId, onClose }: { invoiceId: string; onClose: () => void }) {
+export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { invoiceId: string; onClose: () => void; onStatusChanged?: () => void }) {
   const [invoice, setInvoice] = useState<InvoiceRecord | null>(null);
   const [business, setBusiness] = useState<{name:string; slogan?:string; logo_path?:string; currency:string} | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState('');
+
+  function reload() {
+    return fetch(`${API}/modules/invoice/records`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      .then(r => r.json())
+      .then((recordsData) => {
+        const rec = recordsData.records?.find((r: any) => r.id === invoiceId);
+        if (rec) setInvoice(rec);
+      });
+  }
+
+  async function handleAction(action: () => Promise<unknown>) {
+    setActionError('');
+    setActionLoading(true);
+    try {
+      await action();
+      await reload();
+      onStatusChanged?.();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Could not update this invoice');
+    } finally {
+      setActionLoading(false);
+    }
+  }
 
   useEffect(() => {
     Promise.all([
@@ -139,7 +164,28 @@ export default function InvoiceView({ invoiceId, onClose }: { invoiceId: string;
           <p>Thank you for your business!</p>
         </div>
 
+        {actionError && <div style={{ color: '#c0392b', fontSize: 13, marginTop: 10 }} className="no-print">{actionError}</div>}
+
         <div style={actions} className="no-print">
+          {invoice.status === 'draft' && (
+            <button onClick={() => handleAction(() => markInvoiceSent(invoice.id))} disabled={actionLoading} style={primaryBtn}>
+              {actionLoading ? 'Working…' : 'Mark as sent'}
+            </button>
+          )}
+          {(invoice.status === 'sent' || invoice.status === 'overdue') && (
+            <button onClick={() => handleAction(() => markInvoicePaid(invoice.id))} disabled={actionLoading} style={primaryBtn}>
+              {actionLoading ? 'Working…' : 'Mark as paid'}
+            </button>
+          )}
+          {(invoice.status === 'draft' || invoice.status === 'sent') && (
+            <button
+              onClick={() => { if (confirm('Cancel this invoice? This cannot be undone.')) handleAction(() => cancelInvoice(invoice.id)); }}
+              disabled={actionLoading}
+              style={secondaryBtn}
+            >
+              Cancel invoice
+            </button>
+          )}
           <button onClick={handlePrint} style={primaryBtn}>🖨️ Print Invoice</button>
           <button onClick={onClose} style={secondaryBtn}>Close</button>
         </div>

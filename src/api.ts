@@ -84,6 +84,18 @@ export const createBusiness = (payload: Record<string, string>) =>
 // ---- Auth ----
 export const logout = () => request('/auth/logout', { method: 'POST' });
 
+export interface CurrentUser {
+  username: string;
+  role_name: string;
+  role_id: string;
+  business_name: string;
+}
+// Who's actually signed in right now — powers the account menu. Every
+// authenticated user can call this regardless of RBAC permissions,
+// since a user always has the right to know their own username and
+// role (see the matching comment on the backend route).
+export const getCurrentUser = (): Promise<CurrentUser> => request('/auth/me');
+
 export const login = (username: string, password: string, biz: string) =>
   fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
@@ -134,6 +146,13 @@ export const recoverViaAdminCode = (biz: string, payload: Record<string, string>
 export const getBusinessInfo = () => request('/business');
 export const listModules = () => request('/modules');
 export const enableModule = (moduleId: string) => request(`/modules/${moduleId}/enable`, { method: 'POST' });
+// Every module TYPE that exists (reads the real modules/*.json files
+// on disk), each flagged with whether THIS business currently has it
+// enabled — unlike listModules() above, which only ever returns
+// modules the business has touched at least once, so it can't be used
+// to discover something like "Purchasing" as available-but-not-yet-on.
+export interface AvailableModule { id: string; display_name: string; enabled: boolean }
+export const listAvailableModules = (): Promise<{ modules: AvailableModule[] }> => request('/modules/available');
 
 // ---- Point of sale — atomically links Sales and Inventory (and,
 // optionally, Debt & Credit for a sale on credit). See pos.rs. ----
@@ -199,6 +218,25 @@ export const exportModule = async (moduleId: string) => {
   downloadBlob(blob, `${moduleId}_export.xlsx`);
 };
 
+// ---- Excel import: download a blank template with real field names
+// as headers, fill it in (or export existing records and edit them —
+// this is also how a stock take works: export, correct the counted
+// quantities, reimport), then upload it back. See excel_import.rs.
+export const downloadImportTemplate = async (moduleId: string) => {
+  const blob = await request(`/modules/${moduleId}/import-template`);
+  downloadBlob(blob, `${moduleId}_import_template.xlsx`);
+};
+export interface ImportExcelResult {
+  created: number;
+  updated: number;
+  errors: { row: number; error: string }[];
+}
+export const importExcel = (moduleId: string, fileBase64: string, keyField?: string): Promise<ImportExcelResult> =>
+  request(`/modules/${moduleId}/import-excel`, {
+    method: 'POST',
+    body: JSON.stringify({ file_base64: fileBase64, key_field: keyField }),
+  });
+
 // ---- Reports ----
 export const runReport = (moduleId: string, params: Record<string, string>) =>
   request(`/modules/${moduleId}/report?${new URLSearchParams(params)}`);
@@ -260,6 +298,40 @@ export const createCurrency = (code: string, symbol?: string, name?: string) =>
   request('/currencies', { method: 'POST', body: JSON.stringify({ code, symbol, name }) });
 export const deleteCurrency = (currencyId: string) => request(`/currencies/${currencyId}`, { method: 'DELETE' });
 
+// ---- Currency conversion — see currency.rs. Rates are cached and
+// only refreshed on request (rates_stale tells the UI when it's worth
+// nudging the owner to refresh, rather than hitting the external
+// exchange-rate API on every page load). Amounts are integer minor
+// units (cents) — see money.rs.
+export interface CurrencyRate { from_currency: string; to_currency: string; rate: number; fetched_at: string }
+export const getCurrencyRates = (base: string): Promise<{ rates: CurrencyRate[]; stale: boolean }> =>
+  request(`/currency/rates?base=${encodeURIComponent(base)}`);
+export const convertCurrency = (from: string, to: string, amountCents: number): Promise<{ result: number }> =>
+  request('/currency/convert', { method: 'POST', body: JSON.stringify({ from, to, amount: amountCents }) });
+export const refreshCurrencyRates = (base: string) =>
+  request(`/currency/refresh?base=${encodeURIComponent(base)}`, { method: 'POST' });
+
+// ---- Tax rates by category, and a compute preview — see tax.rs.
+// IMPORTANT, and surfaced in the UI, not just here: these per-category
+// rates are NOT currently applied by real checkouts or invoices —
+// pos.rs and invoice.rs both use a single flat business-wide tax rate
+// instead. This is a genuine gap in the backend itself, not a UI
+// limitation — see the note shown in TaxRatesTab.
+export interface TaxRate { category: string; rate: number }
+export const listTaxRates = (): Promise<{ rates: TaxRate[] }> => request('/tax/rates');
+export const setTaxRate = (category: string, rate: number) =>
+  request('/tax/rates', { method: 'POST', body: JSON.stringify({ category, rate }) });
+export interface TaxComputeItem { category: string; unit_price: number; quantity: number }
+export interface TaxComputeResult {
+  subtotal: number;
+  total_tax: number;
+  total: number;
+  tax_inclusive: boolean;
+  lines: { category: string; rate: number; taxable_amount: number; tax_amount: number }[];
+}
+export const computeTax = (items: TaxComputeItem[], taxInclusive: boolean): Promise<TaxComputeResult> =>
+  request('/tax/compute', { method: 'POST', body: JSON.stringify({ items, tax_inclusive: taxInclusive }) });
+
 // ---- Settings (theme, locale, etc.) ----
 export const getSettings = () => request('/settings');
 export const setSetting = (key: string, value: string) =>
@@ -289,19 +361,6 @@ export const sendNotification = (channel: 'whatsapp' | 'sms', recipient: string,
 export const sendLowStockAlert = (channel: 'whatsapp' | 'sms', recipient: string) =>
   request('/notifications/low-stock-alert', { method: 'POST', body: JSON.stringify({ channel, recipient }) });
 
-// ---- OCR photo import — photograph a paper ledger page, review the
-// guessed records, confirm to actually create them. Requires
-// tesseract-ocr installed on this machine (not bundled with the app) —
-// callers should show a clear, specific message on failure rather than
-// a generic error, since "not installed" is the overwhelmingly likely
-// cause for most people trying this. ----
-export const ocrExtractText = (imageBase64: string): Promise<{ raw_text: string }> =>
-  request('/import/ocr/extract', { method: 'POST', body: JSON.stringify({ image_base64: imageBase64 }) });
-export const ocrParseCandidates = (moduleId: string, rawText: string): Promise<{ candidates: Record<string, unknown>[] }> =>
-  request('/import/ocr/parse', { method: 'POST', body: JSON.stringify({ module_id: moduleId, raw_text: rawText }) });
-export const bulkCreateRecords = (moduleId: string, records: Record<string, unknown>[]): Promise<{ created: number; errors: { index: number; error: string }[] }> =>
-  request(`/modules/${moduleId}/records/bulk`, { method: 'POST', body: JSON.stringify({ records }) });
-
 export interface NewInvoiceItem { description: string; quantity: number; unit_price: number }
 export const createInvoice = (payload: {
   customer: string;
@@ -311,6 +370,15 @@ export const createInvoice = (payload: {
   items: NewInvoiceItem[];
   notes?: string;
 }) => request('/invoices', { method: 'POST', body: JSON.stringify(payload) });
+
+// ---- Invoice lifecycle — see invoice.rs::transition_status for the
+// exact allowed transitions (draft -> sent/cancelled, sent ->
+// paid/overdue/cancelled, overdue -> paid). The backend enforces
+// these; the UI only needs to know which buttons make sense to show
+// for the invoice's current status, not re-implement the rules.
+export const markInvoiceSent = (invoiceId: string) => request(`/invoices/${invoiceId}/send`, { method: 'POST' });
+export const markInvoicePaid = (invoiceId: string) => request(`/invoices/${invoiceId}/pay`, { method: 'POST' });
+export const cancelInvoice = (invoiceId: string) => request(`/invoices/${invoiceId}/cancel`, { method: 'POST' });
 
 // ---- Change business type after setup — re-applies that type's
 // sensible default module set. ----

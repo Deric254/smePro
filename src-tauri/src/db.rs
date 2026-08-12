@@ -70,7 +70,27 @@ pub fn open(path: &str) -> Result<Connection> {
     // a genuinely concurrent write to wait its turn rather than fail a
     // real sale for no reason other than bad timing.
     conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
-    conn.execute_batch(SCHEMA)?;
+    // schema.sql is 16 CREATE TABLE IF NOT EXISTS statements — no-ops
+    // after the first launch, since the tables already exist, but
+    // still real work every single time otherwise: SQLite's default
+    // autocommit mode makes each individual statement its own
+    // implicit transaction, and with `synchronous = FULL` above (a
+    // deliberate, correct choice for a system recording real money —
+    // see that PRAGMA's own comment), every one of those 16
+    // transactions means its own fsync. On Android's often-slow flash
+    // storage — this app's primary target platform — 16 sequential
+    // fsyncs on every app launch, before the login screen can even
+    // render (this all runs inside Tauri's blocking `.setup()`), is a
+    // real, measurable, and entirely avoidable source of startup
+    // delay. Wrapping the whole batch in one explicit transaction
+    // makes it one commit and one fsync instead of 16 — same
+    // durability guarantee for what actually matters (this only runs
+    // once, at startup, not on every real transaction afterward),
+    // same idempotent CREATE TABLE IF NOT EXISTS semantics, just
+    // committed together rather than one at a time.
+    let tx = conn.transaction()?;
+    tx.execute_batch(SCHEMA)?;
+    tx.commit()?;
     crate::db_migrations::run(&mut conn)?;
     Ok(conn)
 }

@@ -11,11 +11,43 @@ export default function TwoFactorSetup() {
   const [message, setMessage] = useState('');
   const [step, setStep] = useState<'start' | 'verify' | 'done'>('start');
 
+  // Disabling requires the CURRENT TOTP code — same rule the backend
+  // enforces (totp.rs: "Disabling 2FA requires the current TOTP code,
+  // not just password"), kept as a separate flow/state from setup
+  // since it's a different action entirely, not a continuation of it.
+  const [showDisable, setShowDisable] = useState(false);
+  const [disableCode, setDisableCode] = useState('');
+  const [disabling, setDisabling] = useState(false);
+  const [disableMessage, setDisableMessage] = useState('');
+
   useEffect(() => {
     fetch(`${API}/auth/2fa/status`, { headers: { Authorization: `Bearer ${getToken()}` } })
       .then(r => r.json())
       .then(setStatus);
   }, []);
+
+  const handleDisable = async () => {
+    setDisabling(true);
+    setDisableMessage('');
+    try {
+      const res = await fetch(`${API}/auth/2fa/disable`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ code: disableCode }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setStatus({ enabled: false });
+      setShowDisable(false);
+      setDisableCode('');
+      setStep('start');
+      setMessage('2FA has been disabled for your account.');
+    } catch (e: any) {
+      setDisableMessage(e.message);
+    } finally {
+      setDisabling(false);
+    }
+  };
 
   const handleStart = async () => {
     setLoading(true);
@@ -75,9 +107,56 @@ export default function TwoFactorSetup() {
       {status.enabled ? (
         <div>
           <p style={{ color: '#27ae60', fontWeight: 600 }}>✓ 2FA is enabled</p>
-          <p style={{ fontSize: 13, color: '#555', marginTop: 8 }}>
+          <p style={{ fontSize: 13, color: '#555', marginTop: 8, marginBottom: 16 }}>
             Your account is protected with an authenticator app.
           </p>
+          {!showDisable ? (
+            <button
+              onClick={() => setShowDisable(true)}
+              style={{
+                padding: '8px 16px', borderRadius: 8, border: '1px solid #c0392b', background: '#fff',
+                color: '#c0392b', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              }}
+            >
+              Disable 2FA
+            </button>
+          ) : (
+            <div style={{ padding: 16, background: '#fdeaea', borderRadius: 8, border: '1px solid #e0a0a0' }}>
+              <p style={{ fontSize: 13, color: '#7a2020', marginBottom: 10 }}>
+                Enter your current 6-digit authenticator code to confirm.
+              </p>
+              {disableMessage && <div style={{ fontSize: 12, color: '#c0392b', marginBottom: 8 }}>{disableMessage}</div>}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  type="text"
+                  value={disableCode}
+                  onChange={e => setDisableCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="000000"
+                  style={{
+                    width: 100, padding: '8px 10px', borderRadius: 8, border: '1px solid #ccc',
+                    fontSize: 16, fontFamily: 'monospace', textAlign: 'center', letterSpacing: 3,
+                  }}
+                />
+                <button
+                  onClick={handleDisable}
+                  disabled={disabling || disableCode.length !== 6}
+                  style={{
+                    padding: '8px 16px', borderRadius: 8, border: 'none', background: '#c0392b',
+                    color: '#fff', fontSize: 13, fontWeight: 600,
+                    opacity: disableCode.length !== 6 ? 0.5 : 1, cursor: disableCode.length !== 6 ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {disabling ? 'Disabling…' : 'Confirm disable'}
+                </button>
+                <button
+                  onClick={() => { setShowDisable(false); setDisableCode(''); setDisableMessage(''); }}
+                  style={{ padding: '8px 12px', borderRadius: 8, border: 'none', background: 'transparent', fontSize: 13, cursor: 'pointer' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       ) : step === 'start' ? (
         <div>

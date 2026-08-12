@@ -3,9 +3,16 @@
 -- These tables exist once, regardless of what modules are
 -- enabled. Every module's own tables are generated at
 -- runtime from its JSON definition (see module.rs).
+--
+-- NOTE: foreign_keys is deliberately NOT set here — db.rs
+-- already enables it before this file's SQL ever runs, and
+-- SQLite documents that this specific PRAGMA is a silent no-op
+-- when issued inside a transaction. Once db::open() wraps this
+-- file's CREATE TABLE statements in one explicit transaction
+-- (for startup performance — see db.rs), a copy of this PRAGMA
+-- sitting in here would quietly do nothing rather than error,
+-- which is worse than not having it at all.
 -- =========================================================
-
-PRAGMA foreign_keys = ON;
 
 -- One row per SME tenant. In this local-first version there is
 -- normally exactly one active business per install, but the schema

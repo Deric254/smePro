@@ -381,7 +381,23 @@ because they're a different kind of work than what's been done so far:
   architecturally (conflict resolution, not just data transfer) and
   deserves dedicated design time rather than a bolt-on here.
 
-## OCR Import (added)
+## OCR Import (added, later REMOVED — see note)
+
+> **REMOVED.** This feature shelled out to a `tesseract` CLI binary
+> that had to be separately installed on whatever machine ran the
+> backend — nothing bundled or installed it for Android, this app's
+> primary target platform. A typical small-business owner's phone has
+> no way to get `tesseract` onto it, so this was very likely
+> non-functional for most real users despite working in this sandbox's
+> desktop-with-tesseract-installed test environment. Removed entirely
+> — `src-tauri/src/ocr_import.rs`, its two HTTP routes, the
+> now-orphaned generic bulk-create route (`POST
+> /modules/{id}/records/bulk`, which had no other caller once this
+> went), and the corresponding frontend page and API functions — no
+> code, route, or UI element from this section exists in the app
+> anymore. The rest of this section is kept as-is below purely as a
+> historical record of what was built and why it didn't hold up in
+> practice, not as documentation of current behavior.
 
 `src/ocr_import.rs` — the "import from existing chaos" feature from the
 original usability brainstorm: photograph a paper ledger, extract text

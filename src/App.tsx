@@ -5,6 +5,7 @@ import ModuleView from './pages/ModuleView';
 import AdminPanel from './pages/AdminPanel';
 import Dashboard from './pages/Dashboard';
 import PointOfSale from './pages/PointOfSale';
+import ServiceSale from './pages/ServiceSale';
 import Customers from './pages/Customers';
 import Sidebar from './components/Sidebar';
 import AiFloatingButton from './components/AiFloatingButton';
@@ -109,6 +110,7 @@ export default function App() {
         businessName={businessName || '…'}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
+        onSignOut={handleLogout}
       />
       <div className={`app-sidebar-backdrop${mobileMenuOpen ? ' mobile-open' : ''}`} onClick={() => setMobileMenuOpen(false)} />
 
@@ -118,10 +120,6 @@ export default function App() {
           <div style={{ fontWeight: 600 }}>{businessName || 'SME Pro'}</div>
         </div>
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.6rem' }}>
-          <button className="btn btn-outline" onClick={handleLogout} style={{ fontSize: '0.8rem' }}>Sign out</button>
-        </div>
-
         {loadError && (
           <div className="card" style={{ borderColor: 'var(--stamp)', color: 'var(--stamp)' }}>{loadError}</div>
         )}
@@ -129,7 +127,16 @@ export default function App() {
         {selected === '__admin__' ? (
           <AdminPanel />
         ) : selected === '__pos__' ? (
-          <PointOfSale />
+          // PointOfSale's checkout hard-requires every line to
+          // reference a real inventory record (see pos.rs) — it
+          // fundamentally cannot work for a business with no
+          // Inventory module enabled (services, consulting, anything
+          // without stock). ServiceSale writes to the exact same
+          // "sales" table through the plain generic create endpoint
+          // instead, with no inventory dependency, and still gets a
+          // real receipt out of it (receipt.rs only cares about the
+          // shared order_id, not how the rows were created).
+          modules.some((m) => m.id === 'inventory' && m.enabled) ? <PointOfSale /> : <ServiceSale />
         ) : selected === '__customers__' ? (
           <Customers />
         ) : selected ? (

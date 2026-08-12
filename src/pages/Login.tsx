@@ -129,7 +129,15 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
             <img
               src={`${API_BASE}${branding.logo_url}`}
               alt={branding.name || 'Business logo'}
-              style={{ width: '3.2rem', height: '3.2rem', objectFit: 'contain', borderRadius: 6, background: '#fff', border: '1px solid var(--paper-line)' }}
+              // No forced background/border/corners here — a logo
+              // with real transparency (a circular badge design, for
+              // instance) was getting boxed into a stark white square
+              // with visible corners around it, exactly the opposite
+              // of what a transparent PNG is for. object-fit: contain
+              // keeps it from distorting; everything else about how
+              // it looks comes from the logo image itself, the same
+              // way receipts and invoices already render it.
+              style={{ width: '3.2rem', height: '3.2rem', objectFit: 'contain' }}
             />
           ) : (
             <div className="stamp-badge" style={{ color: 'var(--stamp)', width: '3.2rem', height: '3.2rem', fontSize: '1.3rem' }}>

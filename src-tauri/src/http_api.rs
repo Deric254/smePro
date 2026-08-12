@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, audit, auth, backup, crud, excel_import, forecast, notifications, ocr_import, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
+use crate::{ai_assistant, audit, auth, backup, crud, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -437,6 +437,35 @@ fn route(
     if parts.as_slice() == ["auth", "logout"] && *method == Method::Post {
         return match auth::logout(conn, token) { Ok(()) => ApiResponse::Json(200, json!({"logged_out": true})), Err(e) => json_err(400, &e.to_string()) };
     }
+
+    // GET /auth/me — who is currently signed in, right now, from the
+    // token alone. Every authenticated user can call this regardless
+    // of their RBAC permissions (unlike /users, which lists everyone
+    // and is properly permission-gated) — a user always has the right
+    // to know their own username and role, that isn't a privileged
+    // fact about them. Exists specifically because login only ever
+    // returned a bare session token, with no way for the frontend to
+    // show a real account menu (name, role) without this.
+    if parts.as_slice() == ["auth", "me"] && *method == Method::Get {
+        let result = conn.query_row(
+            "SELECT u.username, r.name, u.role_id, b.name
+             FROM users u
+             JOIN roles r ON r.id = u.role_id
+             JOIN businesses b ON b.id = u.business_id
+             WHERE u.id = ?1",
+            rusqlite::params![user_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+        );
+        return match result {
+            Ok((username, role_name, role_id, business_name)) => ApiResponse::Json(200, json!({
+                "username": username,
+                "role_name": role_name,
+                "role_id": role_id,
+                "business_name": business_name,
+            })),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
     // POST /license/vendor/redeem {"key": "SPK-...."} — one-time,
     // fully offline activation of a vendor-issued license key. See
     // vendor_license.rs for the full design and its honest trade-off.
@@ -724,75 +753,6 @@ fn route(
             "openai_key_set": has("ai_openai_api_key"),
             "claude_key_set": has("ai_claude_api_key"),
         }));
-    }
-
-    // ---- OCR import: photograph a paper ledger, extract text, propose candidate records ----
-    if parts.as_slice() == ["import", "ocr", "extract"] && *method == Method::Post {
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "body must include 'image_base64'") };
-        let b64 = match obj.get("image_base64").and_then(Value::as_str) {
-            Some(s) => s,
-            None => return json_err(400, "'image_base64' is required"),
-        };
-        use base64::Engine;
-        let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
-            Ok(b) => b,
-            Err(_) => return json_err(400, "'image_base64' is not valid base64"),
-        };
-        return match ocr_import::extract_text(&bytes) {
-            Ok(text) => ApiResponse::Json(200, json!({"raw_text": text})),
-            Err(e) => json_err(502, &e.to_string()),
-        };
-    }
-
-    if parts.as_slice() == ["import", "ocr", "parse"] && *method == Method::Post {
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let module_id = match obj.get("module_id").and_then(Value::as_str) {
-            Some(m) => m,
-            None => return json_err(400, "'module_id' is required"),
-        };
-        if let Err(e) = rbac::require(conn, &user_id, module_id, "create") { return json_err(403, &e.to_string()); }
-        let raw_text = match obj.get("raw_text").and_then(Value::as_str) {
-            Some(t) => t,
-            None => return json_err(400, "'raw_text' is required"),
-        };
-        let schema_json: Result<String, _> = conn.query_row(
-            "SELECT schema_json FROM modules WHERE business_id = ?1 AND id = ?2 AND enabled = 1",
-            rusqlite::params![business_id, module_id],
-            |r| r.get(0),
-        );
-        let module = match schema_json {
-            Ok(raw) => match crate::module::ModuleDef::from_json_str(&raw) {
-                Ok(m) => m,
-                Err(e) => return json_err(500, &e.to_string()),
-            },
-            Err(_) => return json_err(404, &format!("module '{module_id}' is not enabled for this business")),
-        };
-        let candidates = ocr_import::parse_into_candidates(&module, raw_text);
-        return ApiResponse::Json(200, json!({"candidates": candidates}));
-    }
-
-    // ---- Bulk create: used by the OCR import "confirm and import" step,
-    // also generally useful for CSV-style imports ----
-    if parts.len() == 4 && parts[0] == "modules" && parts[2] == "records" && parts[3] == "bulk" && *method == Method::Post {
-        let module_id = parts[1];
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let records = match obj.get("records").and_then(Value::as_array) {
-            Some(r) => r,
-            None => return json_err(400, "'records' must be an array"),
-        };
-        let mut created = 0;
-        let mut errors = Vec::new();
-        for (i, rec) in records.iter().enumerate() {
-            let rec_obj = match rec.as_object() {
-                Some(o) => o,
-                None => { errors.push(json!({"index": i, "error": "not a JSON object"})); continue; }
-            };
-            match crud::create(conn, &business_id, &user_id, module_id, rec_obj) {
-                Ok(_) => created += 1,
-                Err(e) => errors.push(json!({"index": i, "error": e.to_string()})),
-            }
-        }
-        return ApiResponse::Json(200, json!({"created": created, "errors": errors}));
     }
 
     // GET /modules/{id}/import-template — a downloadable .xlsx with
@@ -1250,6 +1210,40 @@ fn route(
             Err(e) => json_err(400, &e.to_string()),
         };
     }
+    // POST /business/settings {"tax_rate": 16.0} — the flat tax rate
+    // used by both pos.rs checkouts and invoice.rs (see their doc
+    // comments: "tax_rate is a percentage, e.g. 16.0 meaning 16%").
+    // This wires up business_panel::update_branding, which existed and
+    // worked correctly but had NO HTTP route calling it at all — every
+    // business's tax_rate was permanently stuck at its schema default
+    // of 0.0 with no way to ever change it, through the UI or the API.
+    // Deliberately owner-gated (not just admin-tier, like branding
+    // above) since this directly changes what customers get charged —
+    // a higher bar than a logo or slogan warrants.
+    //
+    // currency is intentionally NOT exposed here even though
+    // business_panel::update_branding also accepts it — changing a
+    // business's currency after it already has transaction history is
+    // a separate, real risk (existing money amounts don't retroactively
+    // rescale to a new currency's decimal places) that deserves its own
+    // deliberate decision, not a side effect of fixing this tax_rate gap.
+    if parts.as_slice() == ["business", "settings"] && *method == Method::Post {
+        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let tax_rate = obj.get("tax_rate").and_then(Value::as_f64);
+        if let Some(rate) = tax_rate {
+            if !(0.0..=100.0).contains(&rate) {
+                return json_err(400, "tax_rate must be between 0 and 100");
+            }
+        }
+        return match crate::business_panel::update_branding(conn, &business_id, None, None, tax_rate) {
+            Ok(()) => {
+                let _ = audit::log(conn, &business_id, Some(&user_id), "_business", "settings_update", None, Some(&json!({"tax_rate": tax_rate})));
+                ApiResponse::Json(200, json!({"updated": true}))
+            }
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
     // ---- 2FA management (setup/verify/status/disable — the login-time
     // check is up in the public routes section above, alongside
     // /auth/login and /auth/2fa/login) ----
@@ -1352,6 +1346,45 @@ fn route(
             Ok(()) => ApiResponse::Json(200, json!({"refreshed": true})),
             Err(e) => json_err(500, &e.to_string()),
         };
+    }
+
+    // ---- Module registry: what module TYPES exist at all, each
+    // flagged with whether this business currently has it enabled.
+    // Needed because list_modules() (the plain /modules route above)
+    // only ever returns modules this business has enabled at least
+    // once — a `modules` table row simply doesn't exist for a module
+    // type the business has never touched, so there was previously no
+    // way to even discover that, say, "Purchasing" exists as
+    // something you *could* turn on if your business type's preset
+    // didn't happen to include it. Reads the real modules/*.json
+    // files on disk rather than a hardcoded list in either this file
+    // or the frontend, so it can never drift out of sync with what
+    // module definitions actually ship with the app.
+    if parts.as_slice() == ["modules", "available"] && *method == Method::Get {
+        let dir = match std::fs::read_dir(crate::modules_dir()) {
+            Ok(d) => d,
+            Err(e) => return json_err(500, &format!("could not read modules directory: {e}")),
+        };
+        let enabled_ids: std::collections::HashSet<String> = match crate::business_panel::list_modules(conn, &business_id) {
+            Ok(list) => list.into_iter().filter(|m| m.enabled).map(|m| m.id).collect(),
+            Err(e) => return json_err(500, &e.to_string()),
+        };
+        let mut available = Vec::new();
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+            let Ok(module) = crate::module::ModuleDef::from_json_str(&raw) else { continue };
+            available.push(json!({
+                "id": module.id,
+                "display_name": module.display_name,
+                "enabled": enabled_ids.contains(&module.id),
+            }));
+        }
+        available.sort_by(|a, b| a["display_name"].as_str().unwrap_or("").cmp(b["display_name"].as_str().unwrap_or("")));
+        return ApiResponse::Json(200, json!({"modules": available}));
     }
 
     // ---- Module registry: enable an additional module beyond the

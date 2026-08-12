@@ -19,7 +19,6 @@ pub mod invoice;
 pub mod module;
 pub mod money;
 pub mod notifications;
-pub mod ocr_import;
 pub mod onboarding;
 pub mod pos;
 pub mod rate_limit;
