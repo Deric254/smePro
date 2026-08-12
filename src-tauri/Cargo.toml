@@ -1,7 +1,7 @@
 [package]
 name = "core_engine"
 <<<<<<< HEAD
-version = "0.1.26"
+version = "0.1.28"
 =======
 version = "0.1.28"
 >>>>>>> 567754d733894804d2ff35316146c1afa8098b26
