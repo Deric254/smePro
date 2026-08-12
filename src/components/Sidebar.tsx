@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import type { ModuleListItem } from '../types';
+import type { Tab as AdminTab } from '../pages/AdminPanel';
+import { ADMIN_TABS } from '../pages/AdminPanel';
 import AccountMenu from './AccountMenu';
 
 function initials(name: string) {
-  const words = name.split(/[\s/]+/).filter(Boolean);
+  const words = name.split(/[\s/]+/).filter((w) => /[a-zA-Z]/.test(w));
+  if (words.length === 0) return '?';
   if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
   return (words[0][0] + words[1][0]).toUpperCase();
 }
@@ -16,6 +19,8 @@ export default function Sidebar({
   mobileOpen = false,
   onCloseMobile,
   onSignOut,
+  adminTab,
+  onSelectAdminTab,
 }: {
   modules: ModuleListItem[];
   selected: string | null;
@@ -24,6 +29,8 @@ export default function Sidebar({
   mobileOpen?: boolean;
   onCloseMobile?: () => void;
   onSignOut: () => void;
+  adminTab: AdminTab;
+  onSelectAdminTab: (tab: AdminTab) => void;
 }) {
   // Remembers whether "Operations" is expanded across visits — a
   // once-off collapse shouldn't reset itself every time the app opens.
@@ -37,6 +44,28 @@ export default function Sidebar({
       try { localStorage.setItem('sidebar_operations_open', String(next)); } catch { /* not critical */ }
       return next;
     });
+  }
+
+  // Same collapsible pattern as "Operations" above, for Admin — this
+  // is what "part of the sidebar" actually means: Admin's own
+  // sections navigate from here now, not from a tab-strip that used
+  // to eat the whole top of the screen on a phone before any content
+  // was even visible.
+  const [adminOpen, setAdminOpen] = useState(() => {
+    try { return localStorage.getItem('sidebar_admin_open') === 'true'; } catch { return false; }
+  });
+
+  function toggleAdmin() {
+    setAdminOpen((prev) => {
+      const next = !prev;
+      try { localStorage.setItem('sidebar_admin_open', String(next)); } catch { /* not critical */ }
+      return next;
+    });
+  }
+
+  function selectAdminTab(t: AdminTab) {
+    onSelectAdminTab(t);
+    select('__admin__');
   }
 
   // Tapping any nav item closes the drawer on mobile — on desktop
@@ -137,24 +166,30 @@ export default function Sidebar({
             ))}
           </>
         )}
-      </div>
 
-      <div style={styles.footer}>
-        <button
-          onClick={() => select('__admin__')}
-          style={{ ...styles.item, ...(selected === '__admin__' ? styles.itemActive : {}) }}
-        >
-          <span
-            className="stamp-badge"
-            style={{
-              width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
-              color: selected === '__admin__' ? 'var(--stamp)' : 'var(--ink-faint)',
-            }}
-          >
-            ⚙
-          </span>
+        <button onClick={toggleAdmin} style={styles.groupHeader}>
+          <span style={{ transform: adminOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s ease', display: 'inline-block', fontSize: '0.7rem' }}>▶</span>
           <span>Admin</span>
         </button>
+
+        {adminOpen && ADMIN_TABS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => selectAdminTab(t.id)}
+            style={{ ...styles.item, ...styles.subItem, ...(selected === '__admin__' && adminTab === t.id ? styles.itemActive : {}) }}
+          >
+            <span
+              className="stamp-badge"
+              style={{
+                width: '1.7rem', height: '1.7rem', fontSize: '0.65rem',
+                color: selected === '__admin__' && adminTab === t.id ? 'var(--stamp)' : 'var(--ink-faint)',
+              }}
+            >
+              {initials(t.label)}
+            </span>
+            <span>{t.label}</span>
+          </button>
+        ))}
       </div>
 
       <div style={styles.footer}>

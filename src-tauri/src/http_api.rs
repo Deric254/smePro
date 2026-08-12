@@ -466,36 +466,6 @@ fn route(
             Err(e) => json_err(500, &e.to_string()),
         };
     }
-    // POST /license/vendor/redeem {"key": "SPK-...."} — one-time,
-    // fully offline activation of a vendor-issued license key. See
-    // vendor_license.rs for the full design and its honest trade-off.
-    // Owner-only.
-    if parts.as_slice() == ["license", "vendor", "redeem"] && *method == Method::Post {
-        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let key = obj.get("key").and_then(Value::as_str).unwrap_or("").trim().to_string();
-        if key.is_empty() { return json_err(400, "key is required"); }
-        if let Err(e) = crate::vendor_license::validate_key_format(&key) {
-            return json_err(400, &format!("invalid key: {e}"));
-        }
-        // Fully offline now — no server URL, no network call. See
-        // vendor_license.rs for why (and its honest trade-off).
-        return match crate::vendor_license::redeem(conn, &key) {
-            Ok(result) => {
-                let _ = audit::log(conn, &business_id, Some(&user_id), "_license", "vendor_key_redeem", None, Some(&result));
-                ApiResponse::Json(200, result)
-            }
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-    // GET /license/vendor/status — local-only, no network call.
-    if parts.as_slice() == ["license", "vendor", "status"] && *method == Method::Get {
-        return match crate::vendor_license::status(conn) {
-            Ok(v) => ApiResponse::Json(200, v),
-            Err(e) => json_err(500, &e.to_string()),
-        };
-    }
-
     // ---- Backup & restore — Owner-only, real disaster recovery. ----
     if parts.as_slice() == ["admin", "backup"] && *method == Method::Post {
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }

@@ -307,11 +307,6 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
               <input type="checkbox" checked={savedCodeConfirmed} onChange={(e) => setSavedCodeConfirmed(e.target.checked)} />
               I've saved this code somewhere safe
             </label>
-            <div style={styles.hint}>
-              One more thing: your business starts on a free trial automatically — no
-              license needed yet. When you're ready to activate or pay, that's under
-              <strong> Admin → Vendor License</strong> once you're signed in.
-            </div>
             {error && <div style={styles.error}>{error}</div>}
             <button className="btn btn-stamp" onClick={handleFinish} disabled={!savedCodeConfirmed || loading} style={{ width: '100%', justifyContent: 'center' }}>
               {loading ? 'Finishing…' : 'Continue to my business'}

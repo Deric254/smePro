@@ -1,5 +1,5 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { listModules, listRecords, getModuleSchema, runReport, listUsers, getVendorLicenseStatus, getBusinessInfo, getSettings, setSetting } from '../api';
+import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting } from '../api';
 import type { ModuleListItem } from '../types';
 import { formatMoney } from '../lib/money';
 
@@ -45,7 +45,6 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
   const [stats, setStats] = useState<ModuleStat[]>([]);
   const [loading, setLoading] = useState(true);
   const [userCount, setUserCount] = useState<number | null>(null);
-  const [licensed, setLicensed] = useState<boolean | null>(null);
   const [checklistDismissed, setChecklistDismissed] = useState<boolean | null>(null);
   const [currency, setCurrency] = useState('USD');
 
@@ -89,7 +88,6 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
     // Best-effort — Staff/some roles won't have permission for these,
     // and that's fine, the dashboard just quietly shows less.
     listUsers().then((r) => { if (!cancelled) setUserCount(r.users.filter((u: { active: boolean }) => u.active).length); }).catch(() => {});
-    getVendorLicenseStatus().then((r) => { if (!cancelled) setLicensed(r.licensed); }).catch(() => {});
     getSettings().then((s) => { if (!cancelled) setChecklistDismissed(s.onboarding_dismissed === 'true'); }).catch(() => { if (!cancelled) setChecklistDismissed(false); });
 
     return () => { cancelled = true; };
@@ -132,12 +130,6 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
             done={(userCount ?? 1) > 1}
             label={(userCount ?? 1) > 1 ? 'Invited your team' : 'Invite your team'}
             detail="Add staff accounts with exactly the access they need — Admin → Users."
-            onClick={onOpenAdmin}
-          />
-          <ChecklistItem
-            done={licensed === true}
-            label={licensed ? 'Licensed' : 'Activate your license when ready'}
-            detail="Your business runs on a free trial until then — nothing is blocked in the meantime."
             onClick={onOpenAdmin}
           />
         </div>

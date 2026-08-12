@@ -417,8 +417,3 @@ export const restoreBackup = (data: { database_base64: string; wrapped_key_base6
   request('/admin/restore', { method: 'POST', body: JSON.stringify(data) });
 export const restoreBackupFreshInstall = (data: { database_base64: string; wrapped_key_base64: string; passphrase: string }) =>
   request('/setup/restore', { method: 'POST', body: JSON.stringify(data) });
-
-// ---- Vendor license key redemption ----
-export const getVendorLicenseStatus = () => request('/license/vendor/status');
-export const redeemVendorKey = (key: string) =>
-  request('/license/vendor/redeem', { method: 'POST', body: JSON.stringify({ key }) });

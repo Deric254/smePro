@@ -66,7 +66,6 @@ pub mod report;
 pub mod roles;
 pub mod settings;
 pub mod users;
-pub mod vendor_license;
 pub mod xlsx_export;
 
 /// The one real entry point for the packaged app — desktop (called from

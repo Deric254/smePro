@@ -3,6 +3,7 @@ import Login from './pages/Login';
 import FirstRunSetup from './pages/FirstRunSetup';
 import ModuleView from './pages/ModuleView';
 import AdminPanel from './pages/AdminPanel';
+import type { Tab as AdminTab } from './pages/AdminPanel';
 import Dashboard from './pages/Dashboard';
 import PointOfSale from './pages/PointOfSale';
 import ServiceSale from './pages/ServiceSale';
@@ -23,6 +24,12 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [businessName, setBusinessName] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  // Which Admin section is showing — now driven entirely by the
+  // sidebar's own collapsible "Admin" group (the same pattern as
+  // "Operations"), not an internal tab-strip inside AdminPanel
+  // itself. Defaults to 'roles', matching what AdminPanel used to
+  // default to on its own.
+  const [adminTab, setAdminTab] = useState<AdminTab>('roles');
 
   // On launch, ask the backend whether this install has ever had a
   // business created — this is what decides between the first-run
@@ -111,6 +118,8 @@ export default function App() {
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
         onSignOut={handleLogout}
+        adminTab={adminTab}
+        onSelectAdminTab={setAdminTab}
       />
       <div className={`app-sidebar-backdrop${mobileMenuOpen ? ' mobile-open' : ''}`} onClick={() => setMobileMenuOpen(false)} />
 
@@ -125,7 +134,7 @@ export default function App() {
         )}
 
         {selected === '__admin__' ? (
-          <AdminPanel />
+          <AdminPanel tab={adminTab} />
         ) : selected === '__pos__' ? (
           // PointOfSale's checkout hard-requires every line to
           // reference a real inventory record (see pos.rs) — it

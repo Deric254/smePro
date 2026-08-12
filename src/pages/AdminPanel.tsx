@@ -6,7 +6,6 @@ import {
   listCurrencies, createCurrency, deleteCurrency,
   getSettings, setSetting,
   getAiSettings,
-  getVendorLicenseStatus, redeemVendorKey,
   createBackup, restoreBackup,
   getAuditLog,
   listNotifications, sendNotification, sendLowStockAlert,
@@ -22,9 +21,9 @@ import { formatMoney, parseMoneyInput } from '../lib/money';
 import BusinessBranding from '../components/BusinessBranding';
 import TwoFactorSetup from '../components/TwoFactorSetup';
 
-type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'license' | 'backup' | 'audit' | 'notifications' | 'business' | 'security' | 'ai';
+export type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'backup' | 'audit' | 'notifications' | 'business' | 'security' | 'ai';
 
-const TABS: { id: Tab; label: string }[] = [
+export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
   { id: 'users', label: 'Users' },
   { id: 'units', label: 'Units' },
@@ -35,26 +34,22 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'ai', label: 'AI Settings' },
   { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
-  { id: 'license', label: 'Vendor License' },
   { id: 'backup', label: 'Backup & Restore' },
   { id: 'audit', label: 'Audit Log' },
 ];
 
-export default function AdminPanel() {
-  const [tab, setTab] = useState<Tab>('roles');
-
+// Navigation into a specific admin section now lives entirely in the
+// sidebar (a collapsible "Admin" group, the same pattern as
+// "Operations" — see Sidebar.tsx), not in a horizontal tab-strip
+// crammed at the top of this page. That strip used to wrap across
+// many rows on a phone screen before any actual content was visible
+// — genuinely "no space left for navigation" on mobile, which is
+// exactly the problem this removes. `tab` is now fully controlled by
+// whatever the sidebar has selected.
+export default function AdminPanel({ tab }: { tab: Tab }) {
   return (
     <div>
-      <div style={styles.headerRow}>
-        <h2>Admin</h2>
-        <div style={styles.tabs}>
-          {TABS.map((t) => (
-            <button key={t.id} className={tab === t.id ? 'btn' : 'btn btn-outline'} onClick={() => setTab(t.id)}>
-              {t.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <h2 style={{ marginTop: 0 }}>{ADMIN_TABS.find((t) => t.id === tab)?.label ?? 'Admin'}</h2>
 
       {tab === 'roles' && <RolesTab />}
       {tab === 'users' && <UsersTab />}
@@ -66,7 +61,6 @@ export default function AdminPanel() {
       {tab === 'security' && <TwoFactorSetup />}
       {tab === 'ai' && <AiSettingsTab />}
       {tab === 'notifications' && <NotificationsTab />}
-      {tab === 'license' && <VendorLicenseTab />}
       {tab === 'backup' && <BackupTab />}
       {tab === 'audit' && <AuditLogTab />}
     </div>
@@ -1024,62 +1018,6 @@ function SettingsTab() {
   );
 }
 
-// --------------------------------------------------- Vendor License
-
-function VendorLicenseTab() {
-  const [status, setStatus] = useState<{ licensed: boolean; key_id?: string; activated_at?: string } | null>(null);
-  const [key, setKey] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const refresh = () => getVendorLicenseStatus().then(setStatus).catch(() => {});
-  useEffect(() => { refresh(); }, []);
-
-  async function handleRedeem(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setBusy(true);
-    try {
-      await redeemVendorKey(key);
-      setKey('');
-      await refresh();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not redeem key');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="card">
-      <ErrorBox error={error} />
-      {status?.licensed ? (
-        <div>
-          <span className="status-pill status-active">Licensed</span>
-          <div style={{ marginTop: '0.6rem', fontSize: '0.85rem', color: 'var(--ink-soft)' }} className="mono">
-            key_id: {status.key_id} · activated: {status.activated_at}
-          </div>
-        </div>
-      ) : (
-        <form onSubmit={handleRedeem} style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-end' }}>
-          <div style={{ flex: 1 }}>
-            <label>License key</label>
-            <input
-              className="mono"
-              value={key}
-              onChange={(e) => setKey(e.target.value.toUpperCase())}
-              placeholder="SPK-XXXXX-XXXXX-XXXXX-..."
-              style={{ width: '100%' }}
-              required
-            />
-          </div>
-          <button className="btn btn-stamp" type="submit" disabled={busy}>{busy ? 'Redeeming…' : 'Redeem'}</button>
-        </form>
-      )}
-    </div>
-  );
-}
-
 // --------------------------------------------------------------- Backup
 
 function BackupTab() {
@@ -1617,8 +1555,6 @@ function AiSettingsTab() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  headerRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.9rem', flexWrap: 'wrap', gap: '0.6rem' },
-  tabs: { display: 'flex', gap: '0.4rem', flexWrap: 'wrap' },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: '0.86rem' },
   th: { textAlign: 'left', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--paper-line)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--ink-soft)' },
   td: { padding: '0.55rem 0.8rem', borderBottom: '1px solid var(--paper-line)' },
