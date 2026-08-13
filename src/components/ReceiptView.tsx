@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getToken, API_BASE as API } from '../api';
+import { getToken } from '../api';
 import { formatMoney } from '../lib/money';
 import '../styles/receipt-print.css';
 
@@ -28,6 +28,8 @@ interface ReceiptData {
   payment_method?: string;
   cashier_name: string;
 }
+
+const API = 'http://127.0.0.1:8080';
 
 export default function ReceiptView({ orderId, onClose }: { orderId: string; onClose: () => void }) {
   const [receipt, setReceipt] = useState<ReceiptData | null>(null);

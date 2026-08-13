@@ -189,33 +189,21 @@ CREATE TABLE IF NOT EXISTS business_settings (
 );
 
 -- Captured automatically from POS checkout when a cashier enters a
--- name and/or phone (both optional — most sales are still fully
--- anonymous, this only exists for the ones where a customer's own
--- details were given). Phone is the PREFERRED dedup key when given —
--- the same phone number on a later sale updates this row rather than
--- creating a duplicate. When no phone is given, name alone is used
--- instead (case-insensitive, see customers.rs) — genuinely weaker,
--- since a name alone isn't reliably unique ("John" shows up a lot),
--- so a business relying on name-only tracking should expect the
--- occasional false match (two different Johns collapsed into one) or
--- false split (the same John typed differently). Phone stays the
--- reliable option; name-only is a deliberately-accepted trade-off for
--- businesses/cashiers that don't ask for a phone number.
+-- name/phone (both optional — most sales are still fully anonymous,
+-- this only exists for the ones where a customer's own details were
+-- given). Phone is the dedup key: the same phone number on a later
+-- sale updates this row rather than creating a duplicate customer,
+-- since a name alone is not reliably unique ("John" shows up a lot).
 -- Lifetime value itself is NOT stored here — it's computed on read
--- from the matching sales records, so it's always exactly correct
--- against the real transaction history, never a cached number that
--- can drift out of sync with reality.
+-- from the sales records matching this phone number, so it's always
+-- exactly correct against the real transaction history, never a
+-- cached number that can drift out of sync with reality.
 CREATE TABLE IF NOT EXISTS customers (
     id            TEXT PRIMARY KEY,
     business_id   TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     name          TEXT,
-    phone         TEXT,
+    phone         TEXT NOT NULL,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL,
     UNIQUE(business_id, phone)
 );
--- A phone-less customer is deduped by (business_id, name) instead —
--- a PARTIAL unique index (only applies WHERE phone IS NULL) so it
--- never interferes with the phone-based UNIQUE constraint above, and
--- multiple phone-less rows with different names can coexist freely.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_name_only ON customers(business_id, name) WHERE phone IS NULL;

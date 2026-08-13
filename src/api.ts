@@ -1,17 +1,4 @@
-// A `let`, not a `const` — this is a live ES-module binding, so every
-// file that does `import { API_BASE } from '../api'` sees the updated
-// value automatically the moment `setApiBase` below reassigns it, with
-// no getter function needed. That matters here specifically: this
-// device might be a LAN "client" pointed at a different device
-// entirely (see network.ts / Admin → Network), and every request in
-// the whole app — not just the ones that already went through this
-// file's own `request()` helper — needs to follow that, or switching
-// modes would silently leave some features still talking to
-// 127.0.0.1 while others correctly follow the host.
-export let API_BASE = 'http://127.0.0.1:8080';
-export function setApiBase(url: string) {
-  API_BASE = url;
-}
+export const API_BASE = 'http://127.0.0.1:8080';
 
 let authToken: string | null = localStorage.getItem('erp_token');
 let businessId: string | null = localStorage.getItem('erp_business_id');
@@ -159,7 +146,6 @@ export const recoverViaAdminCode = (biz: string, payload: Record<string, string>
 export const getBusinessInfo = () => request('/business');
 export const listModules = () => request('/modules');
 export const enableModule = (moduleId: string) => request(`/modules/${moduleId}/enable`, { method: 'POST' });
-export const disableModule = (moduleId: string) => request(`/modules/${moduleId}/disable`, { method: 'POST' });
 // Every module TYPE that exists (reads the real modules/*.json files
 // on disk), each flagged with whether THIS business currently has it
 // enabled — unlike listModules() above, which only ever returns
@@ -184,21 +170,8 @@ export const checkout = (req: CheckoutRequest) =>
   request('/pos/checkout', { method: 'POST', body: JSON.stringify(req) });
 export const getOrder = (orderId: string) => request(`/pos/orders/${orderId}`);
 
-// ---- Service sale — the same atomicity + customer-tracking
-// guarantee as checkout above, for businesses with no Inventory
-// module. See pos::create_service_sale. ----
-export interface ServiceLineRequest { description: string; unit_price: number; quantity: number }
-export interface ServiceSaleRequest {
-  lines: ServiceLineRequest[];
-  payment_method?: string;
-  customer?: string;
-  customer_phone?: string;
-}
-export const createServiceSale = (req: ServiceSaleRequest) =>
-  request('/pos/service-sale', { method: 'POST', body: JSON.stringify(req) });
-
 export interface CustomerSummary {
-  id: string; name: string | null; phone: string | null; customer_since: string;
+  id: string; name: string | null; phone: string; customer_since: string;
   lifetime_value: number; order_count: number; last_purchase_at: string | null;
 }
 export interface CustomerDetail extends CustomerSummary {
@@ -206,9 +179,6 @@ export interface CustomerDetail extends CustomerSummary {
 }
 export const listCustomers = (): Promise<{ customers: CustomerSummary[] }> => request('/customers');
 export const getCustomer = (id: string): Promise<CustomerDetail> => request(`/customers/${id}`);
-export interface CustomerMatch { id: string; name: string | null; phone: string | null }
-export const searchCustomers = (query: string): Promise<{ customers: CustomerMatch[] }> =>
-  request(`/customers/search?q=${encodeURIComponent(query)}`);
 
 // ---- Refunds — the counterpart to checkout. See refund.rs. ----
 export interface RefundRequest {
@@ -290,37 +260,6 @@ function downloadBlob(blob: Blob, filename: string) {
 export const askAi = (question: string) =>
   request('/ai/ask', { method: 'POST', body: JSON.stringify({ question }) });
 export const getAiContext = () => request('/ai/context');
-
-// ---- AI chat history — see ai_chat.rs. Real, persisted sessions
-// instead of state that vanished when the panel closed. ----
-export interface AiChatSession {
-  id: string;
-  title: string;
-  created_at: string;
-  updated_at: string;
-  last_message: string | null;
-  message_count: number;
-}
-export interface AiChatMessage {
-  role: 'user' | 'ai';
-  content: string;
-  created_at: string;
-}
-export const listAiSessions = (): Promise<{ sessions: AiChatSession[] }> => request('/ai/sessions');
-export const createAiSession = (): Promise<{ session_id: string }> =>
-  request('/ai/sessions', { method: 'POST' });
-export const getAiSessionMessages = (sessionId: string): Promise<{ messages: AiChatMessage[] }> =>
-  request(`/ai/sessions/${sessionId}/messages`);
-export const askAiInSession = (sessionId: string, question: string): Promise<{ answer: string; session_id: string }> =>
-  request(`/ai/sessions/${sessionId}/ask`, { method: 'POST', body: JSON.stringify({ question }) });
-export const clearAiSession = (sessionId: string) =>
-  request(`/ai/sessions/${sessionId}/clear`, { method: 'POST' });
-export const deleteAiSession = (sessionId: string) =>
-  request(`/ai/sessions/${sessionId}`, { method: 'DELETE' });
-export const exportAiChatHistory = async () => {
-  const blob = await request('/ai/sessions/export.xlsx');
-  downloadBlob(blob, 'ai-chat-history.xlsx');
-};
 
 // (Notifications — see the fuller, typed versions further down:
 // listNotifications, sendNotification, sendLowStockAlert)

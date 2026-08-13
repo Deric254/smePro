@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listRecords, checkout, getOrder, processRefund, getBusinessInfo, ApiError } from '../api';
 import ReceiptView from '../components/ReceiptView';
-import CustomerPicker from '../components/CustomerPicker';
 import type { Record_ } from '../types';
 import { formatMoney, parseMoneyInput, sumMoney } from '../lib/money';
 
@@ -445,18 +444,19 @@ export default function PointOfSale() {
             <span>{formatMoney(subtotal, currency)}</span>
           </div>
 
-          <div style={{ marginTop: '1rem' }}>
-            <CustomerPicker
-              name={customer}
-              phone={customerPhone}
-              onChangeName={setCustomer}
-              onChangePhone={setCustomerPhone}
-            />
+          <div style={{ marginTop: '1rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem' }}>
+            <div>
+              <label>Customer name (optional)</label>
+              <input value={customer} onChange={(e) => setCustomer(e.target.value)} style={{ width: '100%' }} />
+            </div>
+            <div>
+              <label>Phone (optional)</label>
+              <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} style={{ width: '100%' }} placeholder="e.g. 0712345678" />
+            </div>
           </div>
-          {(customer.trim() || customerPhone.trim()) && (
+          {customerPhone.trim() && (
             <div style={{ fontSize: '0.75rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
               Saved to your customer list — see their full purchase history under Admin → Customers.
-              {!customerPhone.trim() && ' (Matched by name only, since no phone was given — less reliable than phone if another customer shares this name.)'}
             </div>
           )}
 

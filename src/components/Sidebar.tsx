@@ -21,7 +21,6 @@ export default function Sidebar({
   onSignOut,
   adminTab,
   onSelectAdminTab,
-  onOpenAi,
 }: {
   modules: ModuleListItem[];
   selected: string | null;
@@ -32,7 +31,6 @@ export default function Sidebar({
   onSignOut: () => void;
   adminTab: AdminTab;
   onSelectAdminTab: (tab: AdminTab) => void;
-  onOpenAi: () => void;
 }) {
   // Remembers whether "Operations" is expanded across visits — a
   // once-off collapse shouldn't reset itself every time the app opens.
@@ -139,19 +137,6 @@ export default function Sidebar({
             ♥
           </span>
           <span>Customers</span>
-        </button>
-
-        <button
-          onClick={() => { onOpenAi(); onCloseMobile?.(); }}
-          style={styles.item}
-        >
-          <span
-            className="stamp-badge"
-            style={{ width: '1.9rem', height: '1.9rem', fontSize: '0.72rem', color: 'var(--ink-faint)' }}
-          >
-            AI
-          </span>
-          <span>Ask AI</span>
         </button>
 
         {enabledModules.length > 0 && (

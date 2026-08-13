@@ -78,19 +78,6 @@ html, body {
   font-size: 15px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
-  /* Android (via Tauri) renders this WebView edge-to-edge by default —
-     content draws under the status bar unless something reserves that
-     space. env(safe-area-inset-*) is exactly that reservation; it
-     resolves to 0 on Windows/macOS and on any device that doesn't
-     report an inset, so this line does nothing there and only matters
-     on the devices that actually need it. Left/right covers the
-     landscape case (a notch/inset on the side rather than the top).
-     Bottom is handled per-surface instead (see .app-sidebar and
-     .app-main-content below) since different bottom chrome needs
-     different amounts of extra clearance, not one global number. */
-  padding-top: env(safe-area-inset-top);
-  padding-left: env(safe-area-inset-left);
-  padding-right: env(safe-area-inset-right);
 }
 
 /* Faint horizontal ledger rules across the whole app background */
@@ -107,7 +94,6 @@ body {
 
 #root {
   min-height: 100vh;
-  min-height: 100dvh;
 }
 
 h1, h2, h3 {
@@ -294,17 +280,6 @@ label {
     transform: translateX(-100%);
     transition: transform 0.2s ease;
     box-shadow: 3px 0 16px rgba(0, 0, 0, 0.2);
-    /* A position:fixed element sits outside body's box entirely, so
-       body's own safe-area padding (see the html,body rule above)
-       never reaches it — this drawer touches the real physical top,
-       bottom, and left edges directly and needs its own insets. The
-       header/footer inside already have their own padding (see
-       .header/.footer further down this file); this adds to it
-       rather than replacing it, so the AccountMenu footer in
-       particular doesn't end up sitting under the system nav bar. */
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
-    padding-left: env(safe-area-inset-left);
   }
 
   .app-sidebar.mobile-open {
@@ -321,7 +296,6 @@ label {
 
   .app-main-content {
     padding: 1rem !important;
-    padding-bottom: calc(1rem + env(safe-area-inset-bottom)) !important;
     max-width: 100% !important;
   }
 

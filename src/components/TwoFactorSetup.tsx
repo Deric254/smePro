@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
-import { getToken, API_BASE as API } from '../api';
+import { getToken } from '../api';
+
+const API = 'http://127.0.0.1:8080';
 
 export default function TwoFactorSetup() {
   const [status, setStatus] = useState<{enabled:boolean} | null>(null);

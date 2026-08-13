@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::ai_context;
 
@@ -62,15 +62,6 @@ fn resolve_key(conn: &Connection, business_id: &str, provider_key: &str, env_var
     ))
 }
 
-/// One prior turn of a conversation — `role` is "user" or "ai", matching
-/// the values stored in `ai_chat_messages.role` (see ai_chat.rs), so
-/// callers can pass a session's history straight through with no
-/// translation step.
-pub struct Turn {
-    pub role: String,
-    pub content: String,
-}
-
 /// Answers a free-form business question, grounded in a real snapshot
 /// of the business's own data (see ai_context.rs) — the assistant
 /// genuinely sees real current numbers, not a static description of
@@ -78,45 +69,24 @@ pub struct Turn {
 /// this business's own AI Settings, not a shared/global config, so
 /// each business brings its own key to its own account with whichever
 /// provider they've chosen.
-///
-/// Same as `ask`, but with the conversation's prior turns included so a
-/// follow-up question ("what about last week?") is actually answered in
-/// context instead of as an isolated one-off question. `history` should
-/// be in chronological order and NOT include `question` itself.
-pub fn ask_with_history(
-    conn: &Connection,
-    business_id: &str,
-    user_id: &str,
-    question: &str,
-    history: &[Turn],
-) -> Result<String> {
+pub fn ask(conn: &Connection, business_id: &str, user_id: &str, question: &str) -> Result<String> {
     let snapshot = ai_context::build_snapshot(conn, business_id, user_id)?;
     let system_prompt = format!(
         "You are a business assistant embedded in an SME's ERP system. \
          You are given a structured snapshot of the business's CURRENT real data below — \
          use it as ground truth and do not invent numbers that aren't in it. \
          If the snapshot doesn't contain what's needed to answer, say so plainly rather than guessing. \
-         Keep answers short, concrete, and in plain language a busy shop owner would understand. \
-         This answer is shown in a plain chat bubble that does NOT render markdown — never use \
-         asterisks, #, backticks, or any markdown syntax; write plain sentences, and use a plain \
-         hyphen '-' at the start of a line for a list item if a list genuinely helps.\n\n\
+         Keep answers short, concrete, and in plain language a busy shop owner would understand.\n\n\
          BUSINESS SNAPSHOT:\n{}",
         serde_json::to_string_pretty(&snapshot)?
     );
 
     match Provider::resolve(conn, business_id) {
-        Provider::NvidiaNim => ask_nvidia_nim(conn, business_id, &system_prompt, question, history),
-        Provider::Gemini => ask_gemini(conn, business_id, &system_prompt, question, history),
-        Provider::OpenAi => ask_openai(conn, business_id, &system_prompt, question, history),
-        Provider::Claude => ask_claude(conn, business_id, &system_prompt, question, history),
+        Provider::NvidiaNim => ask_nvidia_nim(conn, business_id, &system_prompt, question),
+        Provider::Gemini => ask_gemini(conn, business_id, &system_prompt, question),
+        Provider::OpenAi => ask_openai(conn, business_id, &system_prompt, question),
+        Provider::Claude => ask_claude(conn, business_id, &system_prompt, question),
     }
-}
-
-/// Single-turn convenience wrapper, kept for any existing caller that
-/// doesn't have a session (e.g. tests) — equivalent to `ask_with_history`
-/// with an empty history.
-pub fn ask(conn: &Connection, business_id: &str, user_id: &str, question: &str) -> Result<String> {
-    ask_with_history(conn, business_id, user_id, question, &[])
 }
 
 fn tls_agent() -> Result<ureq::Agent> {
@@ -141,31 +111,18 @@ fn model_for(conn: &Connection, business_id: &str, provider_key: &str, default: 
     crate::settings::get(conn, business_id, &format!("ai_{provider_key}_model")).unwrap_or_else(|| default.to_string())
 }
 
-/// Builds the OpenAI-compatible `messages` array (system + prior turns
-/// + the new question) shared by NIM and OpenAI — the only two
-/// providers here using that exact wire shape. `Turn.role` of "ai" is
-/// translated to the API's own "assistant" here, since "ai" is this
-/// app's internal storage vocabulary (see ai_chat.rs), not any
-/// provider's wire format.
-fn openai_style_messages(system_prompt: &str, question: &str, history: &[Turn]) -> Value {
-    let mut messages = vec![json!({ "role": "system", "content": system_prompt })];
-    for turn in history {
-        let role = if turn.role == "ai" { "assistant" } else { "user" };
-        messages.push(json!({ "role": role, "content": turn.content }));
-    }
-    messages.push(json!({ "role": "user", "content": question }));
-    json!(messages)
-}
-
 /// NVIDIA NIM — free tier, OpenAI-compatible chat completions API.
-fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
+fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
     let api_key = resolve_key(conn, business_id, "nvidia", "NVIDIA_API_KEY", Some("https://build.nvidia.com"))?;
     let model = model_for(conn, business_id, "nvidia", "deepseek-ai/deepseek-v4-pro");
 
     let body = json!({
         "model": model,
         "max_tokens": 500,
-        "messages": openai_style_messages(system_prompt, question, history),
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": question }
+        ],
         // Required for NVIDIA NIM's DeepSeek-V4 family specifically —
         // without this, the request can hang with no response at all
         // rather than erroring cleanly (confirmed via NVIDIA's own
@@ -211,23 +168,13 @@ fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, que
 /// Note: on the free tier, Google's terms allow using your prompts to
 /// improve their models — flag this to the business owner if the data
 /// they're asking about is sensitive.
-fn ask_gemini(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
+fn ask_gemini(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
     let api_key = resolve_key(conn, business_id, "gemini", "GOOGLE_API_KEY", Some("https://aistudio.google.com"))?;
     let model = model_for(conn, business_id, "gemini", "gemini-3.6-flash");
 
-    // Gemini's wire format uses "model" (not "assistant") for the
-    // other side of the conversation, and "contents" instead of
-    // "messages" — different enough from the OpenAI-style shape above
-    // that it isn't worth sharing a helper between the two.
-    let mut contents: Vec<Value> = history
-        .iter()
-        .map(|t| json!({ "role": if t.role == "ai" { "model" } else { "user" }, "parts": [{ "text": t.content }] }))
-        .collect();
-    contents.push(json!({ "role": "user", "parts": [{ "text": question }] }));
-
     let body = json!({
         "systemInstruction": { "parts": [{ "text": system_prompt }] },
-        "contents": contents
+        "contents": [{ "parts": [{ "text": question }] }]
     });
 
     let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}");
@@ -252,14 +199,17 @@ fn ask_gemini(conn: &Connection, business_id: &str, system_prompt: &str, questio
 /// OpenAI — paid (has a small free trial credit for new accounts, not
 /// an ongoing free tier). Chat completions API, same shape as NVIDIA
 /// NIM since NIM deliberately mirrors it.
-fn ask_openai(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
+fn ask_openai(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
     let api_key = resolve_key(conn, business_id, "openai", "OPENAI_API_KEY", None)?;
     let model = model_for(conn, business_id, "openai", "gpt-4o-mini");
 
     let body = json!({
         "model": model,
         "max_tokens": 500,
-        "messages": openai_style_messages(system_prompt, question, history)
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": question }
+        ]
     });
 
     let agent = tls_agent()?;
@@ -287,26 +237,15 @@ fn ask_openai(conn: &Connection, business_id: &str, system_prompt: &str, questio
 /// Claude — paid, no ongoing free tier, but included since it's
 /// Anthropic's own model and may be worth it once the business is
 /// generating revenue.
-fn ask_claude(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
+fn ask_claude(conn: &Connection, business_id: &str, system_prompt: &str, question: &str) -> Result<String> {
     let api_key = resolve_key(conn, business_id, "claude", "ANTHROPIC_API_KEY", None)?;
     let model = model_for(conn, business_id, "claude", "claude-sonnet-4-6");
-
-    // Claude takes "system" as its own top-level field, not a message
-    // in the array — same shape as OpenAI's messages otherwise
-    // ("assistant" for the model's own prior turns), so this reuses
-    // the same translation as openai_style_messages minus the system
-    // entry, which Claude would reject as an invalid message role.
-    let mut messages: Vec<Value> = history
-        .iter()
-        .map(|t| json!({ "role": if t.role == "ai" { "assistant" } else { "user" }, "content": t.content }))
-        .collect();
-    messages.push(json!({ "role": "user", "content": question }));
 
     let body = json!({
         "model": model,
         "max_tokens": 500,
         "system": system_prompt,
-        "messages": messages
+        "messages": [{ "role": "user", "content": question }]
     });
 
     let agent = tls_agent()?;

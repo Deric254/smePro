@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getToken, markInvoiceSent, markInvoicePaid, cancelInvoice, ApiError, API_BASE as API } from '../api';
+import { getToken, markInvoiceSent, markInvoicePaid, cancelInvoice, ApiError } from '../api';
 import { formatMoney } from '../lib/money';
 import '../styles/invoice-print.css';
 
@@ -28,7 +28,7 @@ interface InvoiceRecord {
   notes?: string;
 }
 
-
+const API = 'http://127.0.0.1:8080';
 
 export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { invoiceId: string; onClose: () => void; onStatusChanged?: () => void }) {
   const [invoice, setInvoice] = useState<InvoiceRecord | null>(null);

@@ -35,7 +35,7 @@ export default function Customers() {
 
   const filtered = customers.filter((c) => {
     const q = search.toLowerCase();
-    return !q || (c.name ?? '').toLowerCase().includes(q) || (c.phone ?? '').includes(q);
+    return !q || (c.name ?? '').toLowerCase().includes(q) || c.phone.includes(q);
   });
 
   const totalLtv = customers.reduce((sum, c) => sum + c.lifetime_value, 0);
@@ -50,14 +50,11 @@ export default function Customers() {
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.9rem', marginBottom: '1.2rem' }}>
               <span className="stamp-badge" style={{ width: '3rem', height: '3rem', fontSize: '1rem', color: 'var(--stamp)' }}>
-                {(detail.name || detail.phone || '?').slice(0, 2).toUpperCase()}
+                {(detail.name || detail.phone).slice(0, 2).toUpperCase()}
               </span>
               <div>
                 <h1 style={{ margin: 0 }}>{detail.name || detail.phone}</h1>
-                <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-                  {detail.phone ? `${detail.phone} · ` : 'No phone on file (matched by name) · '}
-                  customer since {new Date(detail.customer_since).toLocaleDateString()}
-                </div>
+                <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>{detail.phone} · customer since {new Date(detail.customer_since).toLocaleDateString()}</div>
               </div>
             </div>
 
@@ -154,7 +151,7 @@ export default function Customers() {
                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
               >
                 <td style={{ padding: '0.5rem', fontWeight: 600 }}>{c.name || <span style={{ color: 'var(--ink-faint)', fontWeight: 400 }}>—</span>}</td>
-                <td style={{ padding: '0.5rem' }} className="mono">{c.phone || <span style={{ color: 'var(--ink-faint)', fontFamily: 'var(--font-body)' }}>—</span>}</td>
+                <td style={{ padding: '0.5rem' }} className="mono">{c.phone}</td>
                 <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{c.order_count}</td>
                 <td style={{ textAlign: 'right', padding: '0.5rem', fontWeight: 600, color: 'var(--stamp)' }} className="mono">{formatMoney(c.lifetime_value, currency)}</td>
                 <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>

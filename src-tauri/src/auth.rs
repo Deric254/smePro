@@ -50,11 +50,6 @@ pub fn login(conn: &Connection, business_id: &str, username: &str, password: &st
 /// until a TOTP code is also verified. Kept separate from `login()`
 /// (which still does both steps for the common non-2FA case) so nothing
 /// about existing non-2FA behavior changes.
-///
-/// Rate-limiting for this lives one layer up, in http_api.rs's
-/// `auth_limiter` (see rate_limit.rs) — this function itself does no
-/// lockout bookkeeping of its own, on purpose, so there is exactly one
-/// place that logic lives rather than two competing mechanisms.
 pub fn verify_password(conn: &Connection, business_id: &str, username: &str, password: &str) -> Result<String> {
     let row: Option<(String, String)> = conn
         .query_row(
