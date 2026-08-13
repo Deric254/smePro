@@ -153,7 +153,11 @@ export default function AndroidUpdateChecker() {
 
 const styles: Record<string, React.CSSProperties> = {
   banner: {
-    position: 'fixed', bottom: '1.6rem', left: '1.6rem', right: '1.6rem', maxWidth: 420,
+    // This banner is Android-only (see the component name), so the
+    // safe-area bottom inset here is not a hypothetical edge case —
+    // it's THE case. See the matching comment in mobile.css.
+    position: 'fixed', bottom: 'calc(1.6rem + env(safe-area-inset-bottom))',
+    left: 'calc(1.6rem + env(safe-area-inset-left))', right: 'calc(1.6rem + env(safe-area-inset-right))', maxWidth: 420,
     display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
     zIndex: 30, borderColor: 'var(--stamp)',
   },

@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod common;
 #[cfg(test)]
+mod ai_chat_tests;
+#[cfg(test)]
 mod auth_tests;
 #[cfg(test)]
 mod business_branding_tests;
@@ -16,6 +18,14 @@ mod db_tests;
 mod crash_report_tests;
 #[cfg(test)]
 mod money_migration_tests;
+#[cfg(test)]
+mod network_mode_tests;
+#[cfg(test)]
+mod module_disable_tests;
+#[cfg(test)]
+mod customers_tests;
+#[cfg(test)]
+mod service_sale_tests;
 #[cfg(test)]
 mod totp_tests;
 #[cfg(test)]

@@ -24,6 +24,7 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [businessName, setBusinessName] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
   // Which Admin section is showing — now driven entirely by the
   // sidebar's own collapsible "Admin" group (the same pattern as
   // "Operations"), not an internal tab-strip inside AdminPanel
@@ -120,13 +121,21 @@ export default function App() {
         onSignOut={handleLogout}
         adminTab={adminTab}
         onSelectAdminTab={setAdminTab}
+        onOpenAi={() => setAiOpen(true)}
       />
       <div className={`app-sidebar-backdrop${mobileMenuOpen ? ' mobile-open' : ''}`} onClick={() => setMobileMenuOpen(false)} />
 
       <main className="app-main-content" style={{ flex: 1, padding: '1.6rem 2rem', maxWidth: 980 }}>
         <div className="app-mobile-topbar">
           <button className="app-hamburger" onClick={() => setMobileMenuOpen(true)} aria-label="Open menu">☰</button>
-          <div style={{ fontWeight: 600 }}>{businessName || 'SME Pro'}</div>
+          <div style={{ fontWeight: 600, flex: 1 }}>{businessName || 'SME Pro'}</div>
+          <button
+            onClick={() => setAiOpen(true)}
+            aria-label="Ask AI"
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+          >
+            <span className="stamp-badge" style={{ width: '2rem', height: '2rem', fontSize: '0.65rem', color: 'var(--ink-faint)' }}>AI</span>
+          </button>
         </div>
 
         {loadError && (
@@ -159,7 +168,7 @@ export default function App() {
         )}
       </main>
 
-      <AiFloatingButton />
+      <AiFloatingButton open={aiOpen} onClose={() => setAiOpen(false)} />
       <UpdateChecker />
         <AndroidUpdateChecker />
     </div>

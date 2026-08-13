@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-const CURRENT_VERSION: i32 = 8;
+const CURRENT_VERSION: i32 = 10;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -28,7 +28,9 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 6 { v6_add_exchange_rates(conn)?; }
     if current < 7 { v7_session_security(conn)?; }
     if current < 8 { v8_money_to_cents(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 8, "bump this alongside the last `if current < N` check above");
+    if current < 9 { v9_ai_chat_history(conn)?; }
+    if current < 10 { v10_customers_name_only(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 10, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -274,6 +276,125 @@ fn v8_money_to_cents(conn: &mut Connection) -> Result<()> {
     }
 
     tx.execute("INSERT INTO _schema_version (version) VALUES (8)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Persisted AI chat history — before this, every question and answer
+/// lived only in React state, gone the moment the panel closed or the
+/// app restarted. Two tables: `ai_chat_sessions` (one row per
+/// conversation, so a business can hold several distinct threads
+/// rather than one endless scrollback) and `ai_chat_messages` (every
+/// question/answer pair within a session, in order). Scoped by
+/// `business_id` AND `user_id` — one user's chat history is their own,
+/// not shared across every login on the account, same privacy model
+/// as everything else per-user in this app.
+fn v9_ai_chat_history(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS ai_chat_sessions (
+            id TEXT PRIMARY KEY,
+            business_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT 'New chat',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_chat_sessions_user
+         ON ai_chat_sessions(business_id, user_id, updated_at)",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS ai_chat_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES ai_chat_sessions(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK (role IN ('user','ai')),
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_session
+         ON ai_chat_messages(session_id, created_at)",
+        [],
+    )?;
+    tx.execute("INSERT INTO _schema_version (version) VALUES (9)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Allows a customer to be tracked by NAME ALONE, not just phone —
+/// see the customers table's own doc comment in schema.sql for the
+/// honest trade-off (name-only matching is weaker than phone; this is
+/// a deliberate accommodation for cashiers/businesses that don't ask
+/// for a phone number, not a claim that it's just as reliable).
+///
+/// Checks the table's OWN current column state via PRAGMA table_info
+/// — same approach as v8's money migration — rather than assuming
+/// every install is on the same prior schema: a fresh install already
+/// has `phone` nullable straight from schema.sql (nothing to rebuild),
+/// while an existing install still has the original `phone TEXT NOT
+/// NULL` and needs a real table rebuild (SQLite has no `ALTER COLUMN`
+/// to just relax a NOT NULL constraint in place). The partial unique
+/// index for name-only dedup is created unconditionally either way,
+/// since `CREATE UNIQUE INDEX IF NOT EXISTS` is safe to run whether or
+/// not it already exists.
+fn v10_customers_name_only(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let phone_is_not_null: bool = {
+        let mut stmt = tx.prepare("PRAGMA table_info(customers)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "phone" {
+                let notnull: i64 = row.get(3)?;
+                found = notnull == 1;
+                break;
+            }
+        }
+        found
+    };
+
+    if phone_is_not_null {
+        // Standard SQLite rebuild: no in-place way to drop a NOT NULL
+        // constraint, so create the correctly-shaped table, copy every
+        // row across unchanged (no data transformation needed here,
+        // unlike v8's money conversion — existing phone values are
+        // already valid, non-null strings), drop the old table, rename.
+        tx.execute(
+            "CREATE TABLE customers_new (
+                id            TEXT PRIMARY KEY,
+                business_id   TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+                name          TEXT,
+                phone         TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                UNIQUE(business_id, phone)
+            )",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO customers_new (id, business_id, name, phone, created_at, updated_at)
+             SELECT id, business_id, name, phone, created_at, updated_at FROM customers",
+            [],
+        )?;
+        tx.execute("DROP TABLE customers", [])?;
+        tx.execute("ALTER TABLE customers_new RENAME TO customers", [])?;
+    }
+
+    tx.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_name_only
+         ON customers(business_id, name) WHERE phone IS NULL",
+        [],
+    )?;
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (10)", [])?;
     tx.commit()?;
     Ok(())
 }

@@ -60,7 +60,11 @@ export default function UpdateChecker() {
 
 const styles: Record<string, React.CSSProperties> = {
   banner: {
-    position: 'fixed', bottom: '1.6rem', left: '1.6rem', maxWidth: 360,
+    // calc() with env(safe-area-inset-bottom) keeps this clear of
+    // Android's on-screen nav bar/gesture strip — see the matching
+    // comment in mobile.css for why this is needed at all. env()
+    // resolves to 0 on desktop, so this is a no-op there.
+    position: 'fixed', bottom: 'calc(1.6rem + env(safe-area-inset-bottom))', left: 'calc(1.6rem + env(safe-area-inset-left))', maxWidth: 360,
     display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
     zIndex: 30, borderColor: 'var(--stamp)',
   },
