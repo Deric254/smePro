@@ -111,11 +111,19 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     // gets created/updated but the sale itself fails partway through,
     // the whole thing rolls back together, not a customer record left
     // behind with no matching purchase.
-    let customer_id = match &req.customer_phone {
-        Some(phone) if !phone.trim().is_empty() => {
-            Some(crate::customers::find_or_create(&tx, business_id, req.customer.as_deref(), phone)?)
-        }
-        _ => None,
+    //
+    // Triggered by EITHER a name or a phone — not phone alone. A
+    // cashier who only got a name (no phone offered/asked) still gets
+    // that customer tracked (weaker, name-only matching — see
+    // customers.rs's own doc comment on the trade-off), rather than
+    // silently skipping tracking entirely just because there was no
+    // phone number this particular visit.
+    let has_customer_info = req.customer.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+        || req.customer_phone.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+    let customer_id = if has_customer_info {
+        Some(crate::customers::find_or_create(&tx, business_id, req.customer.as_deref(), req.customer_phone.as_deref())?)
+    } else {
+        None
     };
 
     for item in &req.items {
@@ -161,8 +169,17 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             record.insert("customer".into(), json!(c));
         }
         if let Some(phone) = &req.customer_phone {
-            if !phone.trim().is_empty() {
-                record.insert("customer_phone".into(), json!(phone.trim()));
+            // Same normalization as customers::find_or_create — this
+            // field is what customers::list/detail JOIN against
+            // customers.phone to compute lifetime value. Storing
+            // anything other than the identical normalized form here
+            // would silently break that join for this specific sale,
+            // even though the customer record itself was created
+            // correctly — the sale would just never show up in that
+            // customer's history or LTV total.
+            let normalized = crate::customers::normalize_phone(phone);
+            if !normalized.is_empty() {
+                record.insert("customer_phone".into(), json!(normalized));
             }
         }
         if let Some(p) = &req.payment_method {
@@ -245,6 +262,131 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     let _ = crate::audit::log(conn, business_id, Some(user_id), "_pos", "checkout", Some(&order_id), Some(&summary));
 
     let _ = sales_table; // kept for symmetry/clarity even though only inventory_table is queried directly above
+    Ok(summary)
+}
+
+/// One line item for a service sale (see `create_service_sale` below)
+/// — no `inventory_record_id`, since a service business by definition
+/// has no stock to reference.
+#[derive(Debug, Deserialize)]
+pub struct ServiceLine {
+    pub description: String,
+    pub unit_price: i64, // integer cents
+    pub quantity: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServiceSaleRequest {
+    pub lines: Vec<ServiceLine>,
+    #[serde(default)]
+    pub payment_method: Option<String>,
+    #[serde(default)]
+    pub customer: Option<String>,
+    #[serde(default)]
+    pub customer_phone: Option<String>,
+}
+
+/// The service-business counterpart to `checkout` above — same two
+/// guarantees, minus inventory: (1) every line commits together in one
+/// transaction or none do, and (2) a customer phone given here creates
+/// or updates a real `customers` row exactly like checkout does,
+/// through the same `customers::find_or_create`.
+///
+/// This didn't always exist: ServiceSale.tsx used to call the plain
+/// generic `crud::create` once per line in a loop with no shared
+/// transaction (a failure partway through the loop could leave some
+/// lines saved and others not) AND never touched `customers` at all —
+/// a service business's repeat customers never appeared in the
+/// Customers list or had any lifetime value tracked, despite the phone
+/// number being recorded right there on every sale. Both gaps closed
+/// here the same way checkout() already closes them for goods sales.
+pub fn create_service_sale(conn: &mut Connection, business_id: &str, user_id: &str, req: ServiceSaleRequest) -> Result<Value> {
+    if req.lines.is_empty() {
+        return Err(anyhow!("add at least one line"));
+    }
+    crate::rbac::require(conn, user_id, "sales", "create")?;
+    let sales_module = crud::load_module(conn, business_id, "sales")
+        .map_err(|_| anyhow!("the Sales module isn't enabled for this business"))?;
+
+    let order_id = Uuid::new_v4().to_string();
+    let mut lines_out = Vec::with_capacity(req.lines.len());
+    let mut subtotal: i64 = 0;
+
+    let tx = conn.transaction()?;
+
+    let has_customer_info = req.customer.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+        || req.customer_phone.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+    let customer_id = if has_customer_info {
+        Some(crate::customers::find_or_create(&tx, business_id, req.customer.as_deref(), req.customer_phone.as_deref())?)
+    } else {
+        None
+    };
+    let normalized_phone = req.customer_phone.as_deref().map(crate::customers::normalize_phone);
+
+    for line in &req.lines {
+        if line.quantity <= 0 {
+            return Err(anyhow!("quantity must be greater than zero"));
+        }
+        if line.unit_price < 0 {
+            return Err(anyhow!("price cannot be negative"));
+        }
+        if line.description.trim().is_empty() {
+            return Err(anyhow!("every line needs a description"));
+        }
+
+        let line_total: i64 = line.unit_price * line.quantity;
+        subtotal += line_total;
+
+        let mut record: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        record.insert("item_name".into(), json!(line.description.trim()));
+        record.insert("quantity".into(), json!(line.quantity));
+        record.insert("revenue".into(), json!(line_total));
+        record.insert("unit_price".into(), json!(line.unit_price));
+        record.insert("order_id".into(), json!(order_id));
+        if let Some(c) = &req.customer {
+            record.insert("customer".into(), json!(c));
+        }
+        if let Some(p) = &normalized_phone {
+            if !p.is_empty() {
+                record.insert("customer_phone".into(), json!(p));
+            }
+        }
+        if let Some(p) = &req.payment_method {
+            record.insert("payment_method".into(), json!(p));
+        }
+        for f in &sales_module.fields {
+            if !record.contains_key(&f.name) {
+                if let Some(d) = &f.default {
+                    record.insert(f.name.clone(), d.clone());
+                }
+            }
+        }
+        sales_module.validate(&record)?;
+        crate::reference_data::validate_field_references(&tx, business_id, &sales_module, &record)?;
+        let sale_id = crud::insert_validated_record(&tx, business_id, &sales_module, &record)?;
+
+        lines_out.push(json!({
+            "description": line.description,
+            "quantity": line.quantity,
+            "unit_price": line.unit_price,
+            "line_total": line_total,
+            "sale_id": sale_id,
+        }));
+    }
+
+    tx.commit()?;
+
+    let summary = json!({
+        "order_id": order_id,
+        "customer": req.customer,
+        "customer_id": customer_id,
+        "payment_method": req.payment_method,
+        "subtotal": subtotal,
+        "item_count": req.lines.len(),
+        "items": lines_out,
+    });
+
+    let _ = crate::audit::log(conn, business_id, Some(user_id), "_pos", "service_sale", Some(&order_id), Some(&summary));
     Ok(summary)
 }
 

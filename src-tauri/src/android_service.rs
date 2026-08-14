@@ -53,10 +53,6 @@
 //! open gap in the app's core Android reliability story — not
 //! quietly-solved infrastructure.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
-
 /// Starts the HTTP server. Identical behavior on every platform right
 /// now — see the module doc comment above for why the Android branch
 /// existing separately doesn't currently mean anything functionally
@@ -98,24 +94,7 @@ fn start_android_thread(conn: rusqlite::Connection, addr: &'static str, app_data
     std::thread::Builder::new()
         .name("smepro-api".into())
         .spawn(move || {
-            SERVER_RUNNING.store(true, Ordering::SeqCst);
             crate::http_api::serve(conn, addr);
-            SERVER_RUNNING.store(false, Ordering::SeqCst);
         })
         .expect("failed to spawn API server thread");
-}
-
-/// Checks whether the server thread is still alive.
-pub fn is_server_running() -> bool {
-    SERVER_RUNNING.load(Ordering::SeqCst)
-}
-
-/// Gracefully stops the server (used only in testing).
-/// There's no graceful shutdown mechanism in the current `tiny_http`
-/// setup on any platform, so this is a no-op everywhere. A real
-/// implementation would need an atomic flag checked in the
-/// `incoming_requests()` loop plus a dummy request to unblock the
-/// accept() call — out of scope here.
-pub fn stop_server() {
-    // Intentionally empty — see doc comment above.
 }

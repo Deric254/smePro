@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, audit, auth, backup, crud, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
+use crate::{ai_assistant, ai_chat, audit, auth, backup, crud, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -87,11 +87,21 @@ pub fn serve(conn: Connection, addr: &str) {
     }
 }
 
-/// CORS is wide-open (`*`) because this API only ever binds to
-/// 127.0.0.1 — it's not reachable from outside the device, so the usual
-/// cross-origin risk model doesn't apply the way it would for a public
-/// API. This is what lets the Tauri/React frontend (served from its own
-/// dev-server port, or from `tauri://localhost` in production) call it.
+/// CORS is wide-open (`*`). This API binds to 127.0.0.1-only in the
+/// app's default ("standalone") mode — not reachable from outside the
+/// device, so the usual cross-origin risk model doesn't apply the way
+/// it would for a public API — but can also bind to every network
+/// interface in "host" mode (see network_mode.rs and lib.rs's setup()),
+/// specifically so other devices on the same WiFi can reach it. In
+/// that mode this really is reachable from other devices on the
+/// network, same as most in-store POS/register hardware already is —
+/// every request still requires a valid bearer token (see
+/// `auth::current_user` below), so this is "no un-authenticated
+/// endpoint is exposed," not "no security boundary at all." Traffic
+/// itself is plain HTTP, not HTTPS, on both binding modes — a
+/// deliberate simplicity trade-off for a single-shop LAN, not an
+/// oversight; anyone sharing that same WiFi could in principle observe
+/// traffic, same as they could with many real point-of-sale setups.
 fn cors_headers() -> Vec<Header> {
     vec![
         Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
@@ -785,6 +795,19 @@ fn route(
             Err(e) => crud_error(&e),
         };
     }
+    // ---- Service sale: the same atomicity + customer-tracking
+    // guarantee as checkout above, for businesses with no Inventory
+    // module (services, consulting) — see pos::create_service_sale. ----
+    if parts.as_slice() == ["pos", "service-sale"] && *method == Method::Post {
+        let req: pos::ServiceSaleRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return json_err(400, &format!("invalid service sale request: {e}")),
+        };
+        return match pos::create_service_sale(conn, &business_id, &user_id, req) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
+        };
+    }
     if parts.len() == 3 && parts[0] == "pos" && parts[1] == "orders" && *method == Method::Get {
         let order_id = parts[2];
         return match pos::get_order(conn, &business_id, order_id) {
@@ -1065,7 +1088,10 @@ fn route(
         };
     }
 
-    // ---- AI floating assistant: POST /ai/ask {question} ----
+    // ---- AI floating assistant: POST /ai/ask {question} — legacy,
+    // stateless single-turn ask kept for anything that still calls it
+    // without a session. The chat panel itself uses the session-based
+    // routes below instead. ----
     if parts.as_slice() == ["ai", "ask"] && *method == Method::Post {
         let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "body must be JSON with a 'question' field") };
         let question = match obj.get("question").and_then(Value::as_str) {
@@ -1075,6 +1101,81 @@ fn route(
         return match ai_assistant::ask(conn, &business_id, &user_id, question) {
             Ok(answer) => ApiResponse::Json(200, json!({"answer": answer})),
             Err(e) => json_err(502, &e.to_string()),
+        };
+    }
+
+    // ---- AI chat history: sessions ----
+    // GET /ai/sessions — list this user's own conversations, most
+    // recently active first.
+    if parts.as_slice() == ["ai", "sessions"] && *method == Method::Get {
+        return match ai_chat::list_sessions(conn, &business_id, &user_id) {
+            Ok(sessions) => ApiResponse::Json(200, json!({"sessions": sessions})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    // POST /ai/sessions — start a new, empty conversation.
+    if parts.as_slice() == ["ai", "sessions"] && *method == Method::Post {
+        return match ai_chat::create_session(conn, &business_id, &user_id) {
+            Ok(id) => ApiResponse::Json(200, json!({"session_id": id})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    // GET /ai/sessions/export.xlsx — every session's every message, in
+    // one workbook. Checked before the more general /ai/sessions/{id}
+    // routes below so "export.xlsx" is never mistaken for a session id.
+    if parts.as_slice() == ["ai", "sessions", "export.xlsx"] && *method == Method::Get {
+        return match ai_chat::export_to_xlsx(conn, &business_id, &user_id) {
+            Ok(bytes) => ApiResponse::Xlsx(200, bytes, "ai-chat-history.xlsx".to_string()),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    // GET /ai/sessions/{id}/messages — this session's full transcript.
+    if parts.len() == 4 && parts[0] == "ai" && parts[1] == "sessions" && parts[3] == "messages" && *method == Method::Get {
+        let session_id = parts[2];
+        return match ai_chat::get_messages(conn, &business_id, &user_id, session_id) {
+            Ok(messages) => ApiResponse::Json(200, json!({"messages": messages})),
+            Err(e) => json_err(404, &e.to_string()),
+        };
+    }
+    // POST /ai/sessions/{id}/ask {question} — asks within this
+    // session's context (its prior turns are sent to the provider) and
+    // persists both the question and the answer.
+    if parts.len() == 4 && parts[0] == "ai" && parts[1] == "sessions" && parts[3] == "ask" && *method == Method::Post {
+        let session_id = parts[2];
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "body must be JSON with a 'question' field") };
+        let question = match obj.get("question").and_then(Value::as_str) {
+            Some(q) if !q.trim().is_empty() => q,
+            _ => return json_err(400, "'question' is required"),
+        };
+        let history = match ai_chat::history_for_provider(conn, &business_id, &user_id, session_id) {
+            Ok(h) => h,
+            Err(e) => return json_err(404, &e.to_string()),
+        };
+        let answer = match ai_assistant::ask_with_history(conn, &business_id, &user_id, question, &history) {
+            Ok(a) => a,
+            Err(e) => return json_err(502, &e.to_string()),
+        };
+        return match ai_chat::record_turn(conn, &business_id, &user_id, session_id, question, &answer) {
+            Ok(()) => ApiResponse::Json(200, json!({"answer": answer, "session_id": session_id})),
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+    // POST /ai/sessions/{id}/clear — empty this session's messages,
+    // keep the session slot itself (see ai_chat::clear_session).
+    if parts.len() == 4 && parts[0] == "ai" && parts[1] == "sessions" && parts[3] == "clear" && *method == Method::Post {
+        let session_id = parts[2];
+        return match ai_chat::clear_session(conn, &business_id, &user_id, session_id) {
+            Ok(()) => ApiResponse::Json(200, json!({"cleared": true})),
+            Err(e) => json_err(404, &e.to_string()),
+        };
+    }
+    // DELETE /ai/sessions/{id} — remove a conversation from history
+    // entirely.
+    if parts.len() == 3 && parts[0] == "ai" && parts[1] == "sessions" && *method == Method::Delete {
+        let session_id = parts[2];
+        return match ai_chat::delete_session(conn, &business_id, &user_id, session_id) {
+            Ok(()) => ApiResponse::Json(200, json!({"deleted": true})),
+            Err(e) => json_err(404, &e.to_string()),
         };
     }
 
@@ -1116,6 +1217,21 @@ fn route(
         if let Err(e) = rbac::require(conn, &user_id, "sales", "read") { return json_err(403, &e.to_string()); }
         return match crate::customers::list(conn, &business_id) {
             Ok(v) => ApiResponse::Json(200, v),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    // Checked BEFORE the generic /customers/{id} route below — "search"
+    // must never be parsed as a customer id. This is the actual fix
+    // for accidental duplicate customers: a cashier can see and click
+    // an existing match WHILE typing, rather than the name/phone
+    // normalization in customers.rs only reconciling near-duplicates
+    // after the fact.
+    if parts.as_slice() == ["customers", "search"] && *method == Method::Get {
+        if let Err(e) = rbac::require(conn, &user_id, "sales", "read") { return json_err(403, &e.to_string()); }
+        let q = query_params(url);
+        let query = q.get("q").map(|s| s.as_str()).unwrap_or("");
+        return match crate::customers::search(conn, &business_id, query) {
+            Ok(v) => ApiResponse::Json(200, json!({"customers": v})),
             Err(e) => json_err(500, &e.to_string()),
         };
     }
@@ -1370,6 +1486,24 @@ fn route(
             Ok(()) => {
                 let _ = audit::log(conn, &business_id, Some(&user_id), "_modules", "enable", None, Some(&json!({"module_id": module_id})));
                 ApiResponse::Json(200, json!({"enabled": module_id}))
+            }
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
+
+    // ---- Module registry: disable a module. Mirrors "enable" above —
+    // business_panel::disable_module already existed correctly (soft
+    // disable, never drops data) but had no route calling it at all,
+    // meaning a business had no actual way to turn a module back off
+    // once enabled despite the backend function being fully ready to
+    // do it. ----
+    if parts.len() == 3 && parts[0] == "modules" && parts[2] == "disable" && *method == Method::Post {
+        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let module_id = parts[1];
+        return match crate::business_panel::disable_module(conn, &business_id, module_id) {
+            Ok(()) => {
+                let _ = audit::log(conn, &business_id, Some(&user_id), "_modules", "disable", None, Some(&json!({"module_id": module_id})));
+                ApiResponse::Json(200, json!({"disabled": module_id}))
             }
             Err(e) => json_err(400, &e.to_string()),
         };

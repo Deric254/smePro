@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { createRecord, getBusinessInfo, ApiError } from '../api';
+import { createServiceSale, getBusinessInfo, ApiError } from '../api';
 import ReceiptView from '../components/ReceiptView';
+import CustomerPicker from '../components/CustomerPicker';
 import { formatMoney, parseMoneyInput, sumMoney } from '../lib/money';
 
 // Integer cents throughout — see src/lib/money.ts.
@@ -15,14 +16,13 @@ interface ServiceLine {
  * consulting, anything without an Inventory module enabled. The main
  * Point of Sale screen fundamentally can't work here: its checkout
  * requires every line to reference a real inventory record, and a
- * service business has none. This writes directly to the same
- * "sales" module every checkout writes to (via the plain, already
- * tested generic create endpoint — not pos.rs's checkout logic at
- * all, so this can never affect or risk the goods-based checkout
- * flow), sharing one order_id across the lines so the existing,
- * unmodified receipt system (receipt.rs just queries sales by
- * order_id — it doesn't care how those rows were created) works
- * exactly the same as it does for a goods sale.
+ * service business has none. This goes through `pos::create_service_sale`
+ * instead of pos.rs's goods checkout — same atomicity and customer/
+ * lifetime-value tracking guarantees, minus the inventory dependency —
+ * so a service business's repeat customers show up in the Customers
+ * list exactly like a goods business's do, and a receipt works the
+ * same way (receipt.rs just queries sales by order_id, doesn't care
+ * how those rows were created).
  */
 export default function ServiceSale() {
   const [lines, setLines] = useState<ServiceLine[]>([{ description: '', priceText: '0.00', quantity: 1 }]);
@@ -70,25 +70,20 @@ export default function ServiceSale() {
     }
 
     setSubmitting(true);
-    // A real order_id, generated client-side, shared by every line in
-    // this sale — the same grouping key checkout() would generate
-    // server-side, just produced here instead since this path
-    // doesn't go through checkout() at all.
-    const orderId = crypto.randomUUID();
     try {
-      for (const item of parsed) {
-        await createRecord('sales', {
-          item_name: item.description,
-          quantity: item.quantity,
-          revenue: item.cents * item.quantity,
-          unit_price: item.cents,
-          customer: customer || undefined,
-          customer_phone: customerPhone || undefined,
-          payment_method: paymentMethod,
-          order_id: orderId,
-        });
-      }
-      setCompletedOrderId(orderId);
+      // One atomic call — every line commits together or none do, and
+      // a customer phone here now actually creates/updates a real
+      // customer record with correct lifetime value, exactly like the
+      // goods-based checkout already did. order_id comes back from the
+      // server now (see pos::create_service_sale) instead of being
+      // generated client-side and hoped to match.
+      const result = await createServiceSale({
+        lines: parsed.map((item) => ({ description: item.description, unit_price: item.cents, quantity: item.quantity })),
+        payment_method: paymentMethod,
+        customer: customer || undefined,
+        customer_phone: customerPhone || undefined,
+      });
+      setCompletedOrderId(result.order_id);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not record this sale');
     } finally {
@@ -163,14 +158,14 @@ export default function ServiceSale() {
         + Add line
       </button>
 
-      <div style={{ display: 'flex', gap: '0.6rem', marginBottom: '0.8rem' }}>
-        <div style={{ flex: 1 }}>
-          <label>Customer (optional)</label>
-          <input value={customer} onChange={(e) => setCustomer(e.target.value)} style={{ width: '100%' }} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <label>Phone (optional)</label>
-          <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} style={{ width: '100%' }} />
+      <div style={{ display: 'flex', gap: '0.6rem', marginBottom: '0.8rem', alignItems: 'flex-end' }}>
+        <div style={{ flex: 2 }}>
+          <CustomerPicker
+            name={customer}
+            phone={customerPhone}
+            onChangeName={setCustomer}
+            onChangePhone={setCustomerPhone}
+          />
         </div>
         <div style={{ width: 140 }}>
           <label>Payment</label>
@@ -182,6 +177,12 @@ export default function ServiceSale() {
           </select>
         </div>
       </div>
+      {(customer.trim() || customerPhone.trim()) && (
+        <div style={{ fontSize: '0.75rem', color: 'var(--ink-soft)', marginBottom: '1rem' }}>
+          Saved to your customer list — see their full purchase history under Admin → Customers.
+          {!customerPhone.trim() && ' (Matched by name only, since no phone was given — less reliable than phone if another customer shares this name.)'}
+        </div>
+      )}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>
         <span>Total</span>

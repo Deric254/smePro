@@ -110,16 +110,6 @@ pub fn apply_rate(cents: i64, rate: f64) -> i64 {
     (cents as f64 * rate).round() as i64
 }
 
-/// Converts a legacy float-dollars value (from pre-migration data)
-/// into integer minor units, rounding to the nearest unit. Used only
-/// by the v8 migration and nowhere else — this is explicitly the
-/// one-time bridge from the old representation to the new one.
-pub fn legacy_dollars_to_cents(dollars: f64, currency_code: &str) -> i64 {
-    let places = decimal_places_for(currency_code);
-    let scale = 10_i64.pow(places) as f64;
-    (dollars * scale).round() as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

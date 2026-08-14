@@ -12,7 +12,7 @@ import {
   getCurrencyRates, convertCurrency, refreshCurrencyRates,
   listTaxRates, setTaxRate, computeTax,
   changeBusinessType,
-  listModules, listAvailableModules, getModuleSchema, enableModule,
+  listModules, listAvailableModules, getModuleSchema, enableModule, disableModule,
   ApiError,
 } from '../api';
 import type { AuditLogEntry, NotificationRecord, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule } from '../api';
@@ -21,7 +21,7 @@ import { formatMoney, parseMoneyInput } from '../lib/money';
 import BusinessBranding from '../components/BusinessBranding';
 import TwoFactorSetup from '../components/TwoFactorSetup';
 
-export type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'backup' | 'audit' | 'notifications' | 'business' | 'security' | 'ai';
+export type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'backup' | 'audit' | 'notifications' | 'business' | 'security' | 'ai' | 'network';
 
 export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
@@ -33,6 +33,7 @@ export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'business', label: 'Business' },
   { id: 'ai', label: 'AI Settings' },
   { id: 'security', label: 'Security' },
+  { id: 'network', label: 'Network' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'backup', label: 'Backup & Restore' },
   { id: 'audit', label: 'Audit Log' },
@@ -59,6 +60,7 @@ export default function AdminPanel({ tab }: { tab: Tab }) {
       {tab === 'settings' && <SettingsTab />}
       {tab === 'business' && <BusinessTab />}
       {tab === 'security' && <TwoFactorSetup />}
+      {tab === 'network' && <NetworkTab />}
       {tab === 'ai' && <AiSettingsTab />}
       {tab === 'notifications' && <NotificationsTab />}
       {tab === 'backup' && <BackupTab />}
@@ -848,6 +850,19 @@ function BusinessTab() {
     }
   }
 
+  async function handleDisable(moduleId: string) {
+    setEnablingId(moduleId);
+    setError(null);
+    try {
+      await disableModule(moduleId);
+      refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : `Could not disable ${moduleId}`);
+    } finally {
+      setEnablingId(null);
+    }
+  }
+
   return (
     <div>
       <BusinessBranding />
@@ -867,7 +882,9 @@ function BusinessTab() {
                 <strong>{m.display_name}</strong>
               </div>
               {m.enabled ? (
-                <span style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Enabled</span>
+                <button className="btn btn-outline" onClick={() => handleDisable(m.id)} disabled={enablingId === m.id}>
+                  {enablingId === m.id ? 'Disabling…' : 'Disable'}
+                </button>
               ) : (
                 <button className="btn" onClick={() => handleEnable(m.id)} disabled={enablingId === m.id}>
                   {enablingId === m.id ? 'Enabling…' : 'Enable'}
@@ -1550,6 +1567,142 @@ function AiSettingsTab() {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// --------------------------------------------------------- Network
+
+interface NetworkModeState {
+  mode: 'standalone' | 'host' | 'client';
+  host_address: string | null;
+}
+
+// Reads/writes device network mode via Tauri's IPC (not the HTTP API —
+// see network_mode.rs's own doc comment on why: a "client" device may
+// have no local server running at all to ask over HTTP). Every change
+// here needs an app restart to actually take effect, since the server
+// bind address and whether a local database even opens are decided
+// once at startup (see lib.rs's setup()) — deliberately not attempting
+// a live in-place teardown/rebind of a running server and database
+// connection, which is a much larger source of bugs for very little
+// benefit over "restart the app."
+function NetworkTab() {
+  const [state, setState] = useState<NetworkModeState | null>(null);
+  const [lanAddress, setLanAddress] = useState<string | null>(null);
+  const [hostInput, setHostInput] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [pendingRestart, setPendingRestart] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const current = await invoke<NetworkModeState>('get_network_mode');
+        if (!cancelled) setState(current);
+        if (current.mode === 'host') {
+          const addr = await invoke<string | null>('get_lan_address');
+          if (!cancelled) setLanAddress(addr);
+        }
+      } catch {
+        // Not running inside Tauri (e.g. plain browser dev) — network
+        // mode has no meaning there, so this tab just shows nothing
+        // rather than a confusing error about a feature that only
+        // exists in the real desktop/Android app.
+        if (!cancelled) setState({ mode: 'standalone', host_address: null });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  async function applyMode(mode: 'standalone' | 'host' | 'client', hostAddress?: string) {
+    setError(null);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('set_network_mode', { mode, hostAddress: hostAddress ?? null });
+      setPendingRestart(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save this');
+    }
+  }
+
+  async function handleRestart() {
+    try {
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch {
+      setError('Please close and reopen the app for this to take effect.');
+    }
+  }
+
+  if (!state) return <p style={{ color: 'var(--ink-soft)' }}>Loading…</p>;
+
+  if (pendingRestart) {
+    return (
+      <div className="card" style={{ maxWidth: 420 }}>
+        <p>Saved. Restart the app for this to take effect.</p>
+        <button className="btn btn-stamp" onClick={handleRestart}>Restart now</button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxWidth: 480 }}>
+      <p style={{ color: 'var(--ink-soft)', fontSize: '0.88rem' }}>
+        By default every device runs its own separate copy of this business, with no connection to any other device.
+        To have several devices on the same WiFi share one live, real-time copy instead, pick one device to be the host
+        (usually a desktop/laptop that's reliably on) and connect the rest to it as clients.
+      </p>
+
+      <div className="card">
+        <strong>Currently: {state.mode === 'standalone' ? 'Standalone (own copy)' : state.mode === 'host' ? 'Hosting for other devices' : `Connected to ${state.host_address}`}</strong>
+      </div>
+
+      {error && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem' }}>{error}</div>}
+
+      {state.mode !== 'standalone' && (
+        <button className="btn btn-outline" onClick={() => applyMode('standalone')}>
+          Switch back to standalone (own copy)
+        </button>
+      )}
+
+      {state.mode !== 'host' && (
+        <div className="card">
+          <strong style={{ display: 'block', marginBottom: '0.4rem' }}>Host this business</strong>
+          <p style={{ fontSize: '0.82rem', color: 'var(--ink-soft)' }}>
+            Other devices on this WiFi will connect to this one for live data. Keep this device on and connected
+            while others need real-time access.
+          </p>
+          <button className="btn btn-stamp" onClick={() => applyMode('host')}>Make this device the host</button>
+        </div>
+      )}
+      {state.mode === 'host' && (
+        <div className="card">
+          <strong>Other devices should connect to:</strong>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '1.1rem', marginTop: '0.4rem' }}>
+            {lanAddress ? `${lanAddress}:8080` : 'Could not detect a network address'}
+          </div>
+        </div>
+      )}
+
+      {state.mode !== 'client' && (
+        <div className="card">
+          <strong style={{ display: 'block', marginBottom: '0.4rem' }}>Connect to another device</strong>
+          <p style={{ fontSize: '0.82rem', color: 'var(--ink-soft)' }}>
+            Enter the host address shown on the device you want to connect to.
+          </p>
+          <input
+            value={hostInput}
+            onChange={(e) => setHostInput(e.target.value)}
+            placeholder="192.168.1.42:8080"
+            style={{ width: '100%', marginBottom: '0.5rem' }}
+          />
+          <button className="btn btn-stamp" onClick={() => applyMode('client', hostInput.trim())} disabled={!hostInput.trim()}>
+            Connect
+          </button>
+        </div>
+      )}
     </div>
   );
 }

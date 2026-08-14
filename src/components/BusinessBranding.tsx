@@ -1,7 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getToken } from '../api';
-
-const API = 'http://127.0.0.1:8080';
+import { getToken, API_BASE as API } from '../api';
 
 export default function BusinessBranding() {
   const [slogan, setSlogan] = useState('');

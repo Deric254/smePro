@@ -39,18 +39,6 @@ pub fn require_owner(conn: &Connection, user_id: &str) -> Result<()> {
     }
 }
 
-/// Requires the user's role to be one of `allowed` — for actions that
-/// shouldn't be Owner-only but also shouldn't be open to Staff (sending
-/// paid notifications, viewing payment history).
-pub fn require_role(conn: &Connection, user_id: &str, allowed: &[&str]) -> Result<()> {
-    let role = role_name(conn, user_id)?;
-    if allowed.contains(&role.as_str()) {
-        Ok(())
-    } else {
-        anyhow::bail!("this action requires one of these roles: {} (your role: {role})", allowed.join(", "))
-    }
-}
-
 /// Requires the user to be Owner OR hold a role with the `can_administer`
 /// capability flag set. This is the "admin tier" gate for actions like
 /// viewing payment history, sending paid notifications, and managing

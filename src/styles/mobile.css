@@ -1,44 +1,16 @@
-/* Mobile Responsive Overrides for SME Pro */
-/* Add to your main CSS file or import separately */
+/* Mobile responsive overrides for SME Pro.
+   Only rules that target real, currently-rendered class names live
+   here — .sidebar, .modal-overlay, .pos-cart, .admin-tabs,
+   .dashboard-grid, .form-row, and .form-group were all previously
+   dead: leftovers from a layout the app no longer renders (the real
+   sidebar became a slide-in drawer using .app-sidebar, defined and
+   handled entirely in index.css — see the "Responsive sidebar"
+   section there, including its own safe-area handling). Kept dead
+   here would just be confusing, unreachable styling contradicting
+   this app's actual "no dead code" standard — removed rather than
+   left as unused scaffolding. */
 
-/* ── Base responsive rules ── */
 @media (max-width: 768px) {
-  /* Sidebar becomes bottom nav on mobile */
-  .sidebar {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    top: auto;
-    width: 100%;
-    height: 56px;
-    flex-direction: row;
-    justify-content: space-around;
-    padding: 4px 0;
-    border-top: 1px solid #e5e5e5;
-    border-right: none;
-    z-index: 100;
-  }
-  .sidebar .logo { display: none; }
-  .sidebar nav { flex-direction: row; gap: 0; width: 100%; }
-  .sidebar nav a {
-    flex: 1;
-    padding: 6px 2px;
-    font-size: 11px;
-    text-align: center;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .sidebar nav a svg { width: 20px; height: 20px; }
-  .sidebar nav a span { font-size: 10px; }
-
-  /* Main content padding accounts for bottom nav */
-  .main-content {
-    padding-bottom: 72px;
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-
   /* Tables become cards */
   .data-table {
     display: block;
@@ -70,66 +42,40 @@
     letter-spacing: 0.5px;
   }
 
-  /* Forms stack vertically */
-  .form-row {
-    flex-direction: column;
-    gap: 0;
-  }
-  .form-group {
-    width: 100%;
-  }
   input, select, textarea {
     font-size: 16px !important; /* Prevents iOS zoom */
   }
 
-  /* Modals full-screen on small devices */
-  .modal-overlay .modal {
-    width: 100%;
-    height: 100%;
-    max-width: none;
-    max-height: none;
-    border-radius: 0;
-    padding: 20px;
-  }
-
-  /* Admin tabs scroll horizontally */
-  .admin-tabs {
-    overflow-x: auto;
-    white-space: nowrap;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 4px;
-  }
-  .admin-tabs::-webkit-scrollbar { display: none; }
-
-  /* Dashboard cards stack */
-  .dashboard-grid {
-    grid-template-columns: 1fr !important;
-  }
-
-  /* POS checkout */
+  /* POS checkout: two columns (products + cart) on desktop, one
+     column on phone width — see .pos-layout's base definition in
+     index.css (display: grid; grid-template-columns: 1fr 320px).
+     This overrides grid-template-columns specifically, since the
+     previous version of this rule set flex-direction on a grid
+     container, which has no effect at all — the two-column layout
+     was never actually collapsing on phones before this. */
   .pos-layout {
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
-  .pos-cart {
-    order: -1;
-    max-height: 40vh;
-    border-bottom: 1px solid #e5e5e5;
-  }
-}
 
-/* ── Tablet adjustments ── */
-@media (min-width: 769px) and (max-width: 1024px) {
-  .sidebar {
-    width: 64px;
-    padding: 12px 8px;
-  }
-  .sidebar nav a span { display: none; }
-  .sidebar nav a { justify-content: center; }
-  .main-content {
-    margin-left: 64px;
-  }
-  .dashboard-grid {
-    grid-template-columns: repeat(2, 1fr) !important;
+  /* The AI assistant panel (AiFloatingButton.tsx) becomes a
+     full-height right-side drawer on phones — the exact same
+     slide-in treatment as .app-sidebar (see index.css), sliding from
+     the opposite edge, rather than a small floating card that reads
+     as a separate, bolted-on chat widget on a small screen. Safe-area
+     insets on all four sides for the same reason as .app-sidebar:
+     position:fixed sits outside body's own safe-area padding. */
+  .ai-panel {
+    right: 0 !important;
+    bottom: 0 !important;
+    top: 0;
+    left: auto;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100vh !important;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-right: env(safe-area-inset-right);
+    border-radius: 0 !important;
   }
 }
 
