@@ -55,14 +55,30 @@ pub mod totp;
 /// earlier database-path bug.
 static MODULES_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// Returns the resolved modules directory, or a plain relative
-/// "modules" path as a fallback for contexts where the real app never
-/// started up through `run()` at all (dev/test binaries like
-/// `demo_seed`, which call `enable_module` directly with their own
-/// paths and never go through this at all — this fallback exists for
-/// completeness, not because anything currently relies on it).
+/// Returns the resolved modules directory. When the real app has
+/// started up through `run()`, this is the actual bundled resource
+/// path (see MODULES_DIR.set() below). Otherwise — `cargo test`, or
+/// any other context that never runs `run()`'s setup — falls back to
+/// this crate's own `modules/` folder, resolved via `CARGO_MANIFEST_DIR`
+/// (a compile-time constant Cargo always sets to this crate's own root
+/// directory) rather than a bare relative path. A bare `"modules"`
+/// depends on the process's RUNTIME working directory matching
+/// wherever `cargo test` happened to be invoked from — exactly the
+/// kind of ambient assumption that broke real CI: `db_migrations.rs`'s
+/// v8 migration calls this during `cargo test --lib`, and a relative
+/// path failing to resolve doesn't error loudly — it silently
+/// `continue`s past that module (see v8_money_to_cents's `let Ok(...)
+/// else { continue }`), leaving the table exactly as unconverted as
+/// before, then failing much later and less clearly when a test tries
+/// to read a column that's still REAL instead of the INTEGER the
+/// migration was supposed to produce. CARGO_MANIFEST_DIR is a
+/// compile-time baked-in absolute path, immune to whatever the
+/// runtime CWD happens to be.
 pub fn modules_dir() -> std::path::PathBuf {
-    MODULES_DIR.get().cloned().unwrap_or_else(|| std::path::PathBuf::from("modules"))
+    MODULES_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("modules"))
 }
 pub mod report;
 pub mod roles;
