@@ -55,7 +55,15 @@ async function request(path: string, options: RequestInit = {}, needsBusinessId 
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
   if (needsBusinessId && businessId) headers['X-Business-Id'] = businessId;
 
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  // cache: 'no-store' is deliberate, not a default worth leaving
+  // implicit — every response here is live business data (sales,
+  // stock, customers) that must reflect the instant it's requested.
+  // The backend already sends Cache-Control: no-store on every
+  // response (see security.rs's security_headers) — this is the
+  // second, independent layer of the same guarantee, on the request
+  // side rather than relying solely on the server's header being
+  // honored by whichever WebView engine happens to be running.
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers, cache: 'no-store' });
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
     try {

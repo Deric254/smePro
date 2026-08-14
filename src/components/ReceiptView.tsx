@@ -36,6 +36,7 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
 
   useEffect(() => {
     fetch(`${API}/pos/receipt/${orderId}`, {
+      cache: 'no-store',
       headers: { Authorization: `Bearer ${getToken() || ''}` }
     })
       .then(r => r.json())

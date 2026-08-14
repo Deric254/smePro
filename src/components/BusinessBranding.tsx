@@ -16,7 +16,8 @@ export default function BusinessBranding() {
   const [taxMessage, setTaxMessage] = useState('');
 
   useEffect(() => {
-    fetch(`${API}/business/branding`, { headers: { Authorization: `Bearer ${getToken()}` } })
+    fetch(`${API}/business/branding`, {
+      cache: 'no-store', headers: { Authorization: `Bearer ${getToken()}` } })
       .then(r => r.json())
       .then(data => {
         if (data.slogan) { setSlogan(data.slogan); }
@@ -36,6 +37,7 @@ export default function BusinessBranding() {
     setTaxSaving(true);
     try {
       const res = await fetch(`${API}/business/settings`, {
+      cache: 'no-store',
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
         body: JSON.stringify({ tax_rate: rate }),
@@ -77,6 +79,7 @@ export default function BusinessBranding() {
 
     try {
       const res = await fetch(`${API}/business/branding`, {
+      cache: 'no-store',
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
         body: JSON.stringify(body),

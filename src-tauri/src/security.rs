@@ -139,6 +139,24 @@ pub fn security_headers() -> Vec<(&'static str, &'static str)> {
         ("X-XSS-Protection", "1; mode=block"),
         ("Referrer-Policy", "strict-origin-when-cross-origin"),
         ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"),
+        // Every response from this API is either live business data
+        // (sales, stock, customers — must reflect the truth at the
+        // exact instant it's requested) or a fast, cheap-to-regenerate
+        // computation over that data. Nothing here should EVER be
+        // served from a cache instead of hitting the real database —
+        // that's exactly the class of bug that looks like "I made a
+        // sale and the Dashboard just doesn't update," when what's
+        // actually happening is the WebView's own HTTP cache silently
+        // answering a GET request from memory instead of ever asking
+        // the server again. Without an explicit no-store here, that
+        // caching decision was left entirely to whichever WebView
+        // engine happens to be running (WebView2 on Windows,
+        // WebKitGTK on Linux, the system WebView on Android — each
+        // with its own default heuristics), which is precisely why
+        // this could be invisible on one platform and very visible on
+        // another. `no-store` is the strongest directive HTTP has:
+        // don't cache this response anywhere, ever, full stop.
+        ("Cache-Control", "no-store"),
     ]
 }
 

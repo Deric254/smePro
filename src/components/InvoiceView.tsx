@@ -39,7 +39,8 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
   const [actionError, setActionError] = useState('');
 
   function reload() {
-    return fetch(`${API}/modules/invoice/records`, { headers: { Authorization: `Bearer ${getToken()}` } })
+    return fetch(`${API}/modules/invoice/records`, {
+      cache: 'no-store', headers: { Authorization: `Bearer ${getToken()}` } })
       .then(r => r.json())
       .then((recordsData) => {
         const rec = recordsData.records?.find((r: any) => r.id === invoiceId);
@@ -63,9 +64,11 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
 
   useEffect(() => {
     Promise.all([
-      fetch(`${API}/modules/invoice/records`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      fetch(`${API}/modules/invoice/records`, {
+      cache: 'no-store', headers: { Authorization: `Bearer ${getToken()}` } })
         .then(r => r.json()),
-      fetch(`${API}/business`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      fetch(`${API}/business`, {
+      cache: 'no-store', headers: { Authorization: `Bearer ${getToken()}` } })
         .then(r => r.json())
     ]).then(([recordsData, bizData]) => {
       const rec = recordsData.records?.find((r: any) => r.id === invoiceId);

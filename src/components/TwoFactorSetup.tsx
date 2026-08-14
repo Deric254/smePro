@@ -19,7 +19,8 @@ export default function TwoFactorSetup() {
   const [disableMessage, setDisableMessage] = useState('');
 
   useEffect(() => {
-    fetch(`${API}/auth/2fa/status`, { headers: { Authorization: `Bearer ${getToken()}` } })
+    fetch(`${API}/auth/2fa/status`, {
+      cache: 'no-store', headers: { Authorization: `Bearer ${getToken()}` } })
       .then(r => r.json())
       .then(setStatus);
   }, []);
@@ -29,6 +30,7 @@ export default function TwoFactorSetup() {
     setDisableMessage('');
     try {
       const res = await fetch(`${API}/auth/2fa/disable`, {
+      cache: 'no-store',
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
         body: JSON.stringify({ code: disableCode }),
@@ -51,6 +53,7 @@ export default function TwoFactorSetup() {
     setLoading(true);
     try {
       const res = await fetch(`${API}/auth/2fa/setup`, {
+      cache: 'no-store',
         method: 'POST',
         headers: { Authorization: `Bearer ${getToken()}` },
       });
@@ -69,6 +72,7 @@ export default function TwoFactorSetup() {
     setLoading(true);
     try {
       const res = await fetch(`${API}/auth/2fa/verify`, {
+      cache: 'no-store',
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
         body: JSON.stringify({ code }),
