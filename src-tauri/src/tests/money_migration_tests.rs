@@ -62,7 +62,7 @@ fn seed_legacy_inventory_business(conn: &mut rusqlite::Connection) -> (String, S
 
 #[test]
 fn test_v8_migration_converts_legacy_float_dollars_to_integer_cents() {
-    let mut conn = test_db(); // already fully migrated to CURRENT_VERSION (8) on a clean schema
+    let mut conn = test_db(); // already fully migrated to CURRENT_VERSION on a clean schema
     let (business_id, item_id) = seed_legacy_inventory_business(&mut conn);
 
     // Roll back the version marker to simulate "this is what the file
@@ -70,7 +70,18 @@ fn test_v8_migration_converts_legacy_float_dollars_to_integer_cents() {
     // legacy data above was seeded AFTER test_db() already applied v8
     // to nothing, so this forces run() to apply v8 for real, now that
     // real legacy data actually exists to convert.
-    conn.execute("DELETE FROM _schema_version WHERE version = 8", []).unwrap();
+    //
+    // Deletes version 8 AND EVERYTHING AFTER IT, not just row 8 alone
+    // — `current` (see db_migrations::run) is computed as MAX(version)
+    // in this table, not "is row 8 specifically present." Once later
+    // migrations (v9, v10, ...) exist, leaving their rows behind while
+    // only deleting row 8 leaves MAX(version) unchanged at whatever
+    // the newest migration is — current stays >= 8, `if current < 8`
+    // never fires, and v8 silently never re-runs at all. This exact
+    // gap broke this test for real the moment migrations were added
+    // past v8 in the same session that first wrote it — confirmed via
+    // a real GitHub Actions run, not just found by reading the code.
+    conn.execute("DELETE FROM _schema_version WHERE version >= 8", []).unwrap();
 
     crate::db_migrations::run(&mut conn).expect("v8 migration");
 
@@ -119,7 +130,10 @@ fn test_v8_migration_converts_legacy_float_dollars_to_integer_cents() {
 fn test_v8_migration_is_idempotent() {
     let mut conn = test_db();
     let (_, item_id) = seed_legacy_inventory_business(&mut conn);
-    conn.execute("DELETE FROM _schema_version WHERE version = 8", []).unwrap();
+    // See the matching comment on the test above — must delete every
+    // version >= 8, not just row 8 alone, or `current` (MAX(version))
+    // never actually drops below 8 once later migrations exist.
+    conn.execute("DELETE FROM _schema_version WHERE version >= 8", []).unwrap();
 
     crate::db_migrations::run(&mut conn).expect("first run");
     let after_first: i64 = conn
