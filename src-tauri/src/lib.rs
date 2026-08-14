@@ -86,24 +86,6 @@ pub mod settings;
 pub mod users;
 pub mod xlsx_export;
 
-/// The one real entry point for the packaged app — desktop (called from
-/// `main.rs`) and mobile (called automatically via the
-/// `mobile_entry_point` attribute below) both run through here. This is
-/// what keeps "one system" true across every target: there's no
-/// separate mobile app logic anywhere, just this same function running
-/// on a different OS.
-///
-/// MOBILE-SPECIFIC NOTE this project's build environment could not
-/// verify (no Android SDK/NDK reachable — see MOBILE.md): on Android,
-/// backgrounded apps can have their threads suspended or killed by the
-/// OS more aggressively than a desktop OS ever would. The
-/// spawn-a-thread-and-forget pattern below is exactly what worked for
-/// desktop, but on Android it may need to move to a foreground service
-/// (or bind the HTTP server's lifecycle to Tauri's own app lifecycle
-/// events) to survive the user switching away from the app briefly.
-/// Flagging this now rather than assuming desktop's threading model
-/// transfers over silently.
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// The frontend needs to know this device's network mode BEFORE it can
 /// make its first HTTP call at all (see main.tsx) — a client device's
 /// entire API base URL depends on it (see api.ts's setApiBase). That's
@@ -134,6 +116,37 @@ fn get_lan_address() -> Option<String> {
     network_mode::local_lan_ip()
 }
 
+/// The one real entry point for the packaged app — desktop (called from
+/// `main.rs`) and mobile (called automatically via the
+/// `mobile_entry_point` attribute below) both run through here. This is
+/// what keeps "one system" true across every target: there's no
+/// separate mobile app logic anywhere, just this same function running
+/// on a different OS.
+///
+/// MOBILE-SPECIFIC NOTE this project's build environment could not
+/// verify (no Android SDK/NDK reachable — see MOBILE.md): on Android,
+/// backgrounded apps can have their threads suspended or killed by the
+/// OS more aggressively than a desktop OS ever would. The
+/// spawn-a-thread-and-forget pattern below is exactly what worked for
+/// desktop, but on Android it may need to move to a foreground service
+/// (or bind the HTTP server's lifecycle to Tauri's own app lifecycle
+/// events) to survive the user switching away from the app briefly.
+/// Flagging this now rather than assuming desktop's threading model
+/// transfers over silently.
+///
+/// `#[cfg_attr(mobile, tauri::mobile_entry_point)]` MUST sit directly
+/// above THIS function — an attribute attaches to the very next real
+/// item, and doc comments (`///`) don't count as that item. A previous
+/// version of this file had three `#[tauri::command]` functions'
+/// worth of doc comments and attributes sitting between this attribute
+/// and `run()`, which silently attached the mobile entry point to
+/// `get_network_mode` instead — a real compile error on Android
+/// (`mobile_entry_point` requires a zero-argument function;
+/// `get_network_mode` takes one), caught by a real Android CI build
+/// after every desktop platform had already compiled and passed
+/// cleanly, since desktop builds never evaluate this `cfg_attr` at
+/// all (`mobile` is false there).
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
         get_network_mode,
