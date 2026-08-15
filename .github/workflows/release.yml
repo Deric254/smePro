@@ -328,6 +328,29 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Cache Gradle dependencies
+        # THE ACTUAL FIX for a real failure: "Build APK" failed with
+        # HTTP 429 (Too Many Requests) from repo.maven.apache.org and
+        # plugins.gradle.org while resolving Kotlin Gradle plugin
+        # dependencies — Maven Central rate-limiting the shared IP
+        # pool GitHub-hosted runners draw from, not a code problem.
+        # Without this, every single Android run re-downloaded the
+        # ENTIRE Gradle/Kotlin plugin dependency tree from scratch —
+        # nothing was ever being reused between runs, which is exactly
+        # what makes tripping that rate limit likely. gradle/actions/
+        # setup-gradle is the official, purpose-built action for this
+        # (handles both the dependency cache and the Gradle wrapper
+        # distribution itself, with safe, known-correct cache-key
+        # invalidation) rather than a hand-rolled actions/cache config
+        # that would need to get that invalidation logic right itself.
+        # This doesn't make a 429 impossible on a stone-cold cache (the
+        # very first run after this still downloads everything once),
+        # but every run after that reuses what didn't change instead
+        # of hammering Maven Central again — the actual fix; simply
+        # re-running the failed job is a workaround for one bad
+        # moment, not a fix for hitting this repeatedly.
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
