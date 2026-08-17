@@ -27,6 +27,8 @@ mod customers_tests;
 #[cfg(test)]
 mod service_sale_tests;
 #[cfg(test)]
+mod business_pulse_tests;
+#[cfg(test)]
 mod totp_tests;
 #[cfg(test)]
 mod pos_tests;

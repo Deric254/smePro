@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { login, login2fa, setSession, getResolvedBusinessId, getPublicBranding, recoverViaSecurityQuestions, recoverViaAdminCode, API_BASE, ApiError } from '../api';
+import { login, login2fa, setSession, getResolvedBusinessId, getPublicBranding, getSecurityQuestions, recoverViaSecurityQuestions, recoverViaAdminCode, API_BASE, ApiError } from '../api';
 
 type Mode = 'login' | '2fa' | 'recover-questions' | 'recover-admin-code' | 'recover-success';
 
@@ -24,6 +24,15 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [adminCode, setAdminCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
+
+  // The actual security question TEXT, fetched by username before
+  // showing the answer fields at all — without this, the form could
+  // only ever say "Answer to question 1," a generic label the person
+  // has to somehow recall the real question behind, blind. null means
+  // "not fetched yet" (still on the username step); once fetched, the
+  // real question text renders as each field's own label.
+  const [fetchedQuestions, setFetchedQuestions] = useState<{ question1: string | null; question2: string | null } | null>(null);
+  const [questionsLoading, setQuestionsLoading] = useState(false);
 
   const [branding, setBranding] = useState<{ name: string | null; logo_url: string | null; slogan: string | null }>({ name: null, logo_url: null, slogan: null });
 
@@ -88,11 +97,25 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     setRecoverUsername(''); setAnswer1(''); setAnswer2(''); setAdminCode('');
     setNewPassword(''); setConfirmNewPassword(''); setError(null);
     setTempToken(''); setTwoFaCode('');
+    setFetchedQuestions(null); setQuestionsLoading(false);
   }
 
   function switchMode(next: Mode) {
     resetRecoveryFields();
     setMode(next);
+  }
+
+  async function handleFindQuestions() {
+    setError(null);
+    setQuestionsLoading(true);
+    try {
+      const result = await getSecurityQuestions(businessId, recoverUsername);
+      setFetchedQuestions(result);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not look up security questions');
+    } finally {
+      setQuestionsLoading(false);
+    }
   }
 
   async function handleRecoverySubmit(e: FormEvent) {
@@ -239,21 +262,42 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
             <div>
               <label>Username</label>
-              <input value={recoverUsername} onChange={(e) => setRecoverUsername(e.target.value)} required style={styles.input} />
+              <input
+                value={recoverUsername}
+                onChange={(e) => { setRecoverUsername(e.target.value); setFetchedQuestions(null); }}
+                required
+                style={styles.input}
+              />
             </div>
 
             {mode === 'recover-questions' ? (
-              <>
-                <div style={styles.hint}>Answer both security questions you set up when this account was created.</div>
-                <div>
-                  <label>Answer to question 1</label>
-                  <input value={answer1} onChange={(e) => setAnswer1(e.target.value)} required style={styles.input} />
-                </div>
-                <div>
-                  <label>Answer to question 2</label>
-                  <input value={answer2} onChange={(e) => setAnswer2(e.target.value)} required style={styles.input} />
-                </div>
-              </>
+              fetchedQuestions === null ? (
+                <>
+                  <div style={styles.hint}>Enter your username, then we'll show you the security questions you set up.</div>
+                  {error && <div style={styles.error}>{error}</div>}
+                  <button
+                    type="button"
+                    className="btn btn-stamp"
+                    disabled={questionsLoading || !recoverUsername.trim()}
+                    onClick={handleFindQuestions}
+                    style={{ width: '100%', justifyContent: 'center' }}
+                  >
+                    {questionsLoading ? 'Looking up…' : 'Find my account'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div style={styles.hint}>Answer both security questions you set up when this account was created.</div>
+                  <div>
+                    <label>{fetchedQuestions.question1 || 'Answer to question 1'}</label>
+                    <input value={answer1} onChange={(e) => setAnswer1(e.target.value)} required style={styles.input} autoFocus />
+                  </div>
+                  <div>
+                    <label>{fetchedQuestions.question2 || 'Answer to question 2'}</label>
+                    <input value={answer2} onChange={(e) => setAnswer2(e.target.value)} required style={styles.input} />
+                  </div>
+                </>
+              )
             ) : (
               <>
                 <div style={styles.hint}>
@@ -268,20 +312,24 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
               </>
             )}
 
-            <div>
-              <label>New password</label>
-              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required minLength={8} style={styles.input} />
-            </div>
-            <div>
-              <label>Confirm new password</label>
-              <input type="password" value={confirmNewPassword} onChange={(e) => setConfirmNewPassword(e.target.value)} required style={styles.input} />
-            </div>
+            {(mode === 'recover-admin-code' || fetchedQuestions !== null) && (
+              <>
+                <div>
+                  <label>New password</label>
+                  <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required minLength={8} style={styles.input} />
+                </div>
+                <div>
+                  <label>Confirm new password</label>
+                  <input type="password" value={confirmNewPassword} onChange={(e) => setConfirmNewPassword(e.target.value)} required style={styles.input} />
+                </div>
 
-            {error && <div style={styles.error}>{error}</div>}
+                {error && <div style={styles.error}>{error}</div>}
 
-            <button type="submit" className="btn btn-stamp" disabled={loading} style={{ width: '100%', justifyContent: 'center' }}>
-              {loading ? 'Resetting…' : 'Reset password'}
-            </button>
+                <button type="submit" className="btn btn-stamp" disabled={loading} style={{ width: '100%', justifyContent: 'center' }}>
+                  {loading ? 'Resetting…' : 'Reset password'}
+                </button>
+              </>
+            )}
             <button type="button" onClick={() => switchMode('login')} style={styles.linkBtn}>
               Back to sign in
             </button>

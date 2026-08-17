@@ -141,6 +141,22 @@ export const login2fa = (tempToken: string, code: string) =>
     return body;
   });
 
+export interface SecurityQuestions { question1: string | null; question2: string | null }
+export const getSecurityQuestions = (biz: string, username: string): Promise<SecurityQuestions> =>
+  // GET, not POST — and cache: 'no-store' explicitly, same reasoning
+  // as request()'s own default (see api.ts's top): this is live
+  // account data, and a GET request is exactly the kind the WebView's
+  // own HTTP cache could otherwise silently answer from memory
+  // instead of asking the server again.
+  fetch(`${API_BASE}/auth/recover/security-questions?username=${encodeURIComponent(username)}`, {
+    headers: { 'X-Business-Id': biz },
+    cache: 'no-store',
+  }).then(async (res) => {
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(res.status, body.error || 'Could not look up security questions');
+    return body;
+  });
+
 export const recoverViaSecurityQuestions = (biz: string, payload: Record<string, string>) =>
   fetch(`${API_BASE}/auth/recover/security-questions`, {
     method: 'POST',
@@ -295,7 +311,17 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 // ---- AI ----
-export const askAi = (question: string) =>
+export interface BusinessPulse {
+  has_data: boolean;
+  revenue_this_period_cents: number;
+  revenue_last_period_cents: number;
+  pct_change: number | null;
+  forecast_next_period_cents: number;
+  low_stock_count: number;
+  recommendations: string[];
+  currency: string;
+}
+export const askAi = (question: string): Promise<{ answer: string; business_pulse: BusinessPulse }> =>
   request('/ai/ask', { method: 'POST', body: JSON.stringify({ question }) });
 export const getAiContext = () => request('/ai/context');
 
@@ -313,13 +339,22 @@ export interface AiChatMessage {
   role: 'user' | 'ai';
   content: string;
   created_at: string;
+  // Only ever present on a freshly-returned 'ai' message from
+  // askAiInSession below — NOT persisted with the message (see
+  // http_api.rs's own comment on why: folding this into the stored
+  // answer text would pollute future prompts sent back to the AI
+  // provider). Reopening a past session's history will show that
+  // message without a pulse attached, which is correct, not a bug —
+  // the pulse is "how things stand right now," not a historical fact
+  // about that exact past moment.
+  business_pulse?: BusinessPulse;
 }
 export const listAiSessions = (): Promise<{ sessions: AiChatSession[] }> => request('/ai/sessions');
 export const createAiSession = (): Promise<{ session_id: string }> =>
   request('/ai/sessions', { method: 'POST' });
 export const getAiSessionMessages = (sessionId: string): Promise<{ messages: AiChatMessage[] }> =>
   request(`/ai/sessions/${sessionId}/messages`);
-export const askAiInSession = (sessionId: string, question: string): Promise<{ answer: string; session_id: string }> =>
+export const askAiInSession = (sessionId: string, question: string): Promise<{ answer: string; session_id: string; business_pulse: BusinessPulse }> =>
   request(`/ai/sessions/${sessionId}/ask`, { method: 'POST', body: JSON.stringify({ question }) });
 export const clearAiSession = (sessionId: string) =>
   request(`/ai/sessions/${sessionId}/clear`, { method: 'POST' });

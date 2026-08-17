@@ -7,6 +7,7 @@ pub mod auth;
 pub mod backup;
 pub mod business_branding;
 pub mod business_panel;
+pub mod business_pulse;
 pub mod crash_report;
 pub mod crud;
 pub mod currency;

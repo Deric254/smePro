@@ -54,9 +54,34 @@ pub fn serve(conn: Connection, addr: &str) {
             .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
         let business_id_header = header_value(request.headers(), "X-Business-Id");
 
-        let mut conn_guard = conn.lock().unwrap();
-        let response = route(&mut conn_guard, &method, &url, &body_str, bearer.as_deref(), business_id_header.as_deref(), &auth_limiter);
-        drop(conn_guard);
+        // std::panic::catch_unwind, not a bare call — this is the
+        // actual fix for the deeper problem the Mutex recovery above
+        // only partly addresses: if route() (or anything it calls,
+        // across every module this server touches) panics, an
+        // uncaught panic unwinds straight out of THIS for-loop,
+        // ending server.incoming_requests() entirely — the whole
+        // accept loop thread exits, and the server stops accepting
+        // ANY new connection at all, permanently, from one single bad
+        // request. Catching it here means one request that hits an
+        // unexpected panic becomes a clean 500 response instead of a
+        // dead server. AssertUnwindSafe is genuinely safe here, not
+        // just silencing the compiler: rusqlite::Connection isn't
+        // UnwindSafe by default (it wraps a raw C pointer via FFI),
+        // but a panic mid-request just means whatever SQL transaction
+        // was in flight never commits — SQLite's own atomicity
+        // guarantees mean nothing partial is ever left behind, so the
+        // connection is genuinely still valid and safe to keep using
+        // for the next request, which is exactly why the Mutex
+        // recovery above (poisoned.into_inner()) is also correct
+        // rather than a workaround.
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut conn_guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            route(&mut conn_guard, &method, &url, &body_str, bearer.as_deref(), business_id_header.as_deref(), &auth_limiter)
+        }))
+        .unwrap_or_else(|_| {
+            eprintln!("[api] a request handler panicked — recovered, server continues serving other requests");
+            ApiResponse::Json(500, json!({"error": "internal server error"}))
+        });
 
         let http_response = match response {
             ApiResponse::Json(status, payload) => {
@@ -401,6 +426,28 @@ fn route(
                 ApiResponse::Json(200, json!({"token": token}))
             }
             Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    // GET, not POST — this only ever reads question text, never
+    // touches a password or an answer. Checked BEFORE the POST route
+    // below so both share one code path's worth of routing logic for
+    // this same URL. Shares the EXACT SAME rate-limit key as the
+    // answer-submission endpoint below (not a separate bucket) — an
+    // attacker could otherwise hammer this lookup alone, unlimited, to
+    // probe which usernames exist, even with the answer-submission
+    // endpoint properly rate-limited on its own.
+    if parts.as_slice() == ["auth", "recover", "security-questions"] && *method == Method::Get {
+        let biz = match business_id_header { Some(b) => b, None => return json_err(400, "X-Business-Id header required") };
+        let q = query_params(url);
+        let username = q.get("username").map(|s| s.as_str()).unwrap_or("");
+
+        let limiter_key = format!("recover-sq:{biz}:{username}");
+        if let Err(retry_after) = auth_limiter.check(&limiter_key) {
+            return json_err(429, &format!("too many recovery attempts, try again in {retry_after} seconds"));
+        }
+        return match auth::get_security_questions(conn, biz, username) {
+            Ok((q1, q2)) => ApiResponse::Json(200, json!({"question1": q1, "question2": q2})),
+            Err(e) => json_err(400, &e.to_string()),
         };
     }
     if parts.as_slice() == ["auth", "recover", "security-questions"] && *method == Method::Post {
@@ -1099,7 +1146,18 @@ fn route(
             _ => return json_err(400, "'question' is required"),
         };
         return match ai_assistant::ask(conn, &business_id, &user_id, question) {
-            Ok(answer) => ApiResponse::Json(200, json!({"answer": answer})),
+            Ok(answer) => {
+                // A real, computed performance readout attached to
+                // EVERY answer — see business_pulse.rs's own doc
+                // comment on why this is deterministic arithmetic over
+                // real sales data, never something the AI model is
+                // asked to narrate from memory. compute() never
+                // returns an error — a missing pulse degrades to
+                // has_data:false rather than ever breaking the actual
+                // answer above it.
+                let pulse = crate::business_pulse::compute(conn, &business_id, &user_id);
+                ApiResponse::Json(200, json!({"answer": answer, "business_pulse": pulse}))
+            }
             Err(e) => json_err(502, &e.to_string()),
         };
     }
@@ -1156,7 +1214,19 @@ fn route(
             Err(e) => return json_err(502, &e.to_string()),
         };
         return match ai_chat::record_turn(conn, &business_id, &user_id, session_id, question, &answer) {
-            Ok(()) => ApiResponse::Json(200, json!({"answer": answer, "session_id": session_id})),
+            Ok(()) => {
+                // Computed fresh, attached to the response only — NOT
+                // folded into the stored `answer` text. record_turn
+                // above already persisted the real answer; if this
+                // pulse text got saved into that same field, it would
+                // become part of the conversation history sent back to
+                // the AI provider on every future turn in this
+                // session (see history_for_provider) — wasted tokens
+                // narrating stats the model doesn't need to see again,
+                // not an actual part of the conversation.
+                let pulse = crate::business_pulse::compute(conn, &business_id, &user_id);
+                ApiResponse::Json(200, json!({"answer": answer, "session_id": session_id, "business_pulse": pulse}))
+            }
             Err(e) => json_err(400, &e.to_string()),
         };
     }

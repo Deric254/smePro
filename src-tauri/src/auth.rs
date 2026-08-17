@@ -129,6 +129,24 @@ pub fn set_security_questions(
 
 /// Step 1 of forgot-password: security questions. Both answers must be
 /// correct — a single question is too easy to guess/social-engineer.
+/// Returns the two security question TEXTS for an account — never the
+/// answers or their hashes, just what to ask. This is what makes the
+/// recovery form able to show the actual question back to the person
+/// instead of a generic "Answer to question 1" label they have to
+/// recall blind. Same "account not found" wording as
+/// `recover_via_security_questions` below on purpose — this is a
+/// pre-auth, unauthenticated lookup by username, so it shouldn't
+/// distinguish "no such account" from any other failure any more
+/// precisely than the answer-submission endpoint already does.
+pub fn get_security_questions(conn: &Connection, business_id: &str, username: &str) -> Result<(Option<String>, Option<String>)> {
+    conn.query_row(
+        "SELECT security_q1, security_q2 FROM users WHERE business_id = ?1 AND username = ?2",
+        params![business_id, username],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .map_err(|_| anyhow!("account not found"))
+}
+
 pub fn recover_via_security_questions(
     conn: &Connection,
     business_id: &str,
