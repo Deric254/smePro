@@ -121,7 +121,7 @@ pub fn run(
                 return Err(anyhow!("'{m}' is not a field on module '{module_id}'"));
             }
             let ty = &module.fields.iter().find(|f| f.name == m).unwrap().field_type;
-            if ty != "integer" && ty != "real" {
+            if ty != "integer" && ty != "real" && ty != "money" {
                 return Err(anyhow!("field '{m}' is not numeric, cannot aggregate with {aggregation}"));
             }
             m.to_string()
