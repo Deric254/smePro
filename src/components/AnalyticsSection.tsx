@@ -5,6 +5,42 @@ import type { DateRange } from './TimeSlicer';
 import { formatMoney } from '../lib/money';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
+type Bucket = 'day' | 'week' | 'month';
+
+// The backend hands back sortable-but-opaque bucket keys ("2026-08-11"
+// for a day, "2026-08" for a month, and — since report.rs's week
+// bucket is now the Monday date that starts the week — "2026-08-11"
+// for a week too, meaning day/week share a raw format and only differ
+// in how they're displayed here). This turns those into what someone
+// actually wants to read on a chart axis: "Aug 11", "Aug 2026", or a
+// real week range like "Aug 11–17".
+//
+// Parsed with an explicit UTC midnight timestamp and formatted back
+// out in UTC deliberately — these are calendar dates with no time
+// component, and letting the browser's local timezone touch them
+// could shift a date backward by a day for anyone west of UTC.
+function formatBucketLabel(bucket: Bucket, label: string): string {
+  if (bucket === 'month') {
+    const [year, month] = label.split('-').map(Number);
+    const d = new Date(Date.UTC(year, month - 1, 1));
+    return d.toLocaleDateString(undefined, { month: 'short', year: 'numeric', timeZone: 'UTC' });
+  }
+  if (bucket === 'week') {
+    const start = new Date(`${label}T00:00:00Z`);
+    const end = new Date(start.getTime() + 6 * 86_400_000);
+    const startStr = start.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    // Only repeat the month name if the week actually crosses into a
+    // new one ("Aug 29 – Sep 4") — otherwise it's just noise ("Aug 11
+    // – Aug 17" is harder to scan at a glance than "Aug 11–17").
+    const endStr = start.getUTCMonth() === end.getUTCMonth()
+      ? String(end.getUTCDate())
+      : end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    return `${startStr}–${endStr}`;
+  }
+  const d = new Date(`${label}T00:00:00Z`);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
 // Deliberately the ONLY file in the app that imports recharts. Kept
 // separate on purpose — lazy-loaded from Dashboard.tsx via React.lazy
 // — because recharts alone roughly doubles the JS bundle. Every other
@@ -17,6 +53,7 @@ export default function AnalyticsSection() {
   const [orderCount, setOrderCount] = useState<number | null>(null);
   const [avgSale, setAvgSale] = useState<number | null>(null);
   const [series, setSeries] = useState<{ label: string; value: number }[]>([]);
+  const [bucket, setBucket] = useState<Bucket>('day');
   const [loading, setLoading] = useState(true);
   const [currency, setCurrency] = useState('USD');
 
@@ -29,7 +66,8 @@ export default function AnalyticsSection() {
     setLoading(true);
 
     const daySpan = (new Date(range.end).getTime() - new Date(range.start).getTime()) / 86_400_000;
-    const bucket = daySpan > 62 ? 'month' : daySpan > 10 ? 'week' : 'day';
+    const bucket: Bucket = daySpan > 62 ? 'month' : daySpan > 10 ? 'week' : 'day';
+    setBucket(bucket);
 
     Promise.all([
       runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'none', start: range.start, end: range.end }),
@@ -72,10 +110,17 @@ export default function AnalyticsSection() {
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={series}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} />
+              <XAxis
+                dataKey="label"
+                tick={{ fontSize: 11, fill: 'var(--ink-soft)' }}
+                tickFormatter={(v) => formatBucketLabel(bucket, v)}
+                interval="preserveStartEnd"
+                minTickGap={24}
+              />
               <YAxis tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v) => formatMoney(v, currency)} />
               <Tooltip
                 contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
+                labelFormatter={(v) => formatBucketLabel(bucket, String(v))}
                 formatter={(v) => [formatMoney(Number(v), currency), 'Revenue']}
               />
               <Bar dataKey="value" fill="var(--stamp)" radius={[3, 3, 0, 0]} />

@@ -130,6 +130,30 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
         params![req.purchase_record_id, business_id],
     )?;
 
+    // Same Bookkeeping auto-post as checkout() and process_refund(),
+    // same reasoning: one expense entry for what was actually paid to
+    // the supplier for this delivery (quantity received × the PO's
+    // unit cost, not the new weighted-average — this is the real cash
+    // outlay, not the recalculated stock valuation). Best-effort: a
+    // business without Bookkeeping enabled can still receive stock.
+    if let Ok(accounting_module) = crud::load_module(&tx, business_id, "accounting") {
+        let mut entry: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        entry.insert("description".into(), json!(format!("Purchase received — {item_name} from {supplier}")));
+        entry.insert("entry_type".into(), json!("expense"));
+        entry.insert("category".into(), json!("Purchasing"));
+        entry.insert("amount".into(), json!(quantity_received * po_unit_cost));
+        for f in &accounting_module.fields {
+            if !entry.contains_key(&f.name) {
+                if let Some(d) = &f.default {
+                    entry.insert(f.name.clone(), d.clone());
+                }
+            }
+        }
+        accounting_module.validate(&entry)?;
+        crate::reference_data::validate_field_references(&tx, business_id, &accounting_module, &entry)?;
+        crud::insert_validated_record(&tx, business_id, &accounting_module, &entry)?;
+    }
+
     // Same "commit is the one moment this becomes real" discipline as
     // checkout() — nothing above is durable until this line.
     tx.commit()?;

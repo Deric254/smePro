@@ -56,7 +56,18 @@ impl TimeBucket {
     fn sql_expr(&self, time_col: &str) -> String {
         match self {
             TimeBucket::Day => format!("strftime('%Y-%m-%d', {time_col})"),
-            TimeBucket::Week => format!("strftime('%Y-W%W', {time_col})"),
+            // The Monday that starts the calendar week `time_col` falls
+            // in — NOT SQLite's own %W week number (year-day / 7,
+            // reset every Jan 1st, so it doesn't line up with actual
+            // Monday-Sunday week boundaries and renders as an opaque
+            // "2026-W33" with no obvious meaning). A real date is both
+            // a correct week boundary AND something the frontend can
+            // format into "Aug 11–17" instead. Verified against
+            // Sundays and year boundaries: 'weekday 1' modifier moves
+            // forward to the next Monday, and the preceding '-6 days'
+            // is what makes it land on THIS week's Monday (or the same
+            // day, if time_col already is one) rather than next week's.
+            TimeBucket::Week => format!("date({time_col}, '-6 days', 'weekday 1')"),
             TimeBucket::Month => format!("strftime('%Y-%m', {time_col})"),
             TimeBucket::Year => format!("strftime('%Y', {time_col})"),
             // SQLite has no native quarter bucket — derive it: (month-1)/3 + 1

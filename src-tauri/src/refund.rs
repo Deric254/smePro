@@ -110,6 +110,24 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
         ));
     }
 
+    // THE BUG THIS FIXES: a refund used to only ever create a new row
+    // in Refunds — it never touched the original sale's `revenue`, so
+    // a fully refunded sale still counted as full revenue everywhere
+    // revenue gets totaled (the Dashboard tile, the Business-at-a-
+    // glance KPIs and chart, any future report — all of them just
+    // SUM(revenue) off the sales table with no idea refunds exist).
+    // The refund row above/below already keeps an immutable record of
+    // what was refunded and why, so nothing about that audit trail is
+    // lost by also keeping the sale's own revenue figure honest here.
+    // Clamped at 0 so it can never go negative regardless of the
+    // refund amount supplied.
+    tx.execute(
+        &format!(
+            "UPDATE {sales_table} SET revenue = MAX(0, revenue - ?1) WHERE id = ?2 AND business_id = ?3"
+        ),
+        params![req.refund_amount, req.sale_id, business_id],
+    )?;
+
     // Restocking is optional and, when requested, needs an actual
     // inventory item to credit back — a sale that was never linked to
     // one (a services sale, for instance) simply can't be restocked,
@@ -180,6 +198,31 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
     refunds_module.validate(&record)?;
     crate::reference_data::validate_field_references(&tx, business_id, &refunds_module, &record)?;
     let refund_id = crud::insert_validated_record(&tx, business_id, &refunds_module, &record)?;
+
+    // Same Bookkeeping auto-post as checkout() and receive(). Skipped
+    // when refund_amount is 0 — a valid case (an even exchange, no
+    // cash changes hands) that shouldn't leave a zero-value entry
+    // cluttering the ledger. Best-effort: a business without
+    // Bookkeeping enabled can still process a refund.
+    if req.refund_amount > 0 {
+        if let Ok(accounting_module) = crud::load_module(&tx, business_id, "accounting") {
+            let mut entry: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+            entry.insert("description".into(), json!(format!("Refund — {item_name}")));
+            entry.insert("entry_type".into(), json!("expense"));
+            entry.insert("category".into(), json!("Refunds"));
+            entry.insert("amount".into(), json!(req.refund_amount));
+            for f in &accounting_module.fields {
+                if !entry.contains_key(&f.name) {
+                    if let Some(d) = &f.default {
+                        entry.insert(f.name.clone(), d.clone());
+                    }
+                }
+            }
+            accounting_module.validate(&entry)?;
+            crate::reference_data::validate_field_references(&tx, business_id, &accounting_module, &entry)?;
+            crud::insert_validated_record(&tx, business_id, &accounting_module, &entry)?;
+        }
+    }
 
     // Same "commit is the one moment this becomes real" discipline as
     // checkout() and receive() — nothing above is durable until here.

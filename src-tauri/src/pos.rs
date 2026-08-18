@@ -237,6 +237,41 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         debt_record_id = Some(crud::insert_validated_record(&tx, business_id, debt_credit_module, &debt_record)?);
     }
 
+    // Bookkeeping used to be a completely disconnected, hand-typed
+    // ledger — nothing a sale did ever showed up there automatically,
+    // which is exactly why it tends to go stale. This posts one
+    // income entry per completed order, same transaction as
+    // everything above.
+    //
+    // Deliberately skipped for a credit sale (req.on_credit): no cash
+    // has actually come in yet — that's exactly what the Debt &
+    // Credit record above already represents (money owed, not money
+    // received). Posting it as income here too would double-count it
+    // in Bookkeeping the moment it's created, and there's no existing
+    // "settle this debt" flow anywhere in this codebase that would
+    // post the cash side later when the customer actually pays.
+    // Best-effort by design, not required: a business that hasn't
+    // enabled Bookkeeping can still ring up a sale.
+    if !req.on_credit {
+        if let Ok(accounting_module) = crud::load_module(&tx, business_id, "accounting") {
+            let mut entry: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+            entry.insert("description".into(), json!(format!("POS sale — order {order_id}")));
+            entry.insert("entry_type".into(), json!("income"));
+            entry.insert("category".into(), json!("Sales"));
+            entry.insert("amount".into(), json!(subtotal));
+            for f in &accounting_module.fields {
+                if !entry.contains_key(&f.name) {
+                    if let Some(d) = &f.default {
+                        entry.insert(f.name.clone(), d.clone());
+                    }
+                }
+            }
+            accounting_module.validate(&entry)?;
+            crate::reference_data::validate_field_references(&tx, business_id, &accounting_module, &entry)?;
+            crud::insert_validated_record(&tx, business_id, &accounting_module, &entry)?;
+        }
+    }
+
     // Everything above happened inside `tx` and nothing is durable yet.
     // This is the one moment it all becomes real, together — if the
     // process died at any point before this line, every UPDATE and
