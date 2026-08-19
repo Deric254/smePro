@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getToken, getLogoUrl } from '../api';
+import { getToken, getLogoUrl, API_BASE as API } from '../api';
 import { formatMoney } from '../lib/money';
 import '../styles/receipt-print.css';
 
