@@ -3,7 +3,7 @@ import {
   getModuleSchema, listRecords, createRecord, updateRecord, deleteRecord, exportModule,
   downloadImportTemplate, importExcel,
   runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, getBusinessInfo,
-  receiveStock, repackStock, ApiError,
+  receiveStock, repackStock, settleDebt, ApiError,
 } from '../api';
 import type { NewInvoiceItem, ImportExcelResult } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
@@ -20,8 +20,17 @@ import InvoiceView from '../components/InvoiceView';
 // guarantee doesn't cover). Excluded from both create and edit — even
 // creating a purchase order as already-received would be the same
 // bypass as editing one into that state.
+//
+// debt_credit's `settled` is the same situation: settling atomically
+// posts the real cash movement to Bookkeeping inside
+// debt_settlement.rs::settle(), and the generic form touching it
+// directly would silently skip that (debt_settlement.rs's own doc
+// comment calls out the same limitation receiving.rs does — this
+// hides the field from the intended path, it can't forbid a raw API
+// call from a role that still holds "update").
 function isActionManagedField(moduleId: string, fieldName: string): boolean {
-  return moduleId === 'purchasing' && fieldName === 'received';
+  return (moduleId === 'purchasing' && fieldName === 'received')
+    || (moduleId === 'debt_credit' && fieldName === 'settled');
 }
 
 // Reads a File into a bare base64 string (no "data:...;base64," prefix
@@ -151,6 +160,12 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [repackError, setRepackError] = useState<string | null>(null);
   const [repackSubmitting, setRepackSubmitting] = useState(false);
 
+  // Settling a debt/credit record — same shape as receiving/repacking
+  // above. See debt_settlement.rs.
+  const [settlingId, setSettlingId] = useState<string | null>(null);
+  const [settleError, setSettleError] = useState<string | null>(null);
+  const [settleSubmitting, setSettleSubmitting] = useState(false);
+
   useEffect(() => {
     if (moduleId === 'inventory') return; // schema.my_permissions already covers this case directly
     if (moduleId !== 'purchasing') return; // receiving only ever gets triggered from the Purchasing list
@@ -218,6 +233,26 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       setRepackError(err instanceof ApiError ? err.message : 'Could not complete the repack');
     } finally {
       setRepackSubmitting(false);
+    }
+  }
+
+  async function submitSettle() {
+    if (!settlingId) return;
+    setSettleSubmitting(true);
+    setSettleError(null);
+    try {
+      const summary = await settleDebt(settlingId);
+      setActionResult(
+        summary.posted_to_bookkeeping_as
+          ? `Marked "${summary.party_name}" settled and posted ${formatMoney(summary.amount, businessCurrency)} to Bookkeeping as ${summary.posted_to_bookkeeping_as}.`
+          : `Marked "${summary.party_name}" settled.`
+      );
+      setSettlingId(null);
+      await refreshRecords();
+    } catch (err) {
+      setSettleError(err instanceof ApiError ? err.message : 'Could not settle this record');
+    } finally {
+      setSettleSubmitting(false);
     }
   }
 
@@ -354,6 +389,12 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const canExport = schema?.my_permissions.includes('export');
   const canCreate = schema?.my_permissions.includes('create');
   const canUpdate = schema?.my_permissions.includes('update');
+  // "settle" lives on debt_credit's own actions list (see
+  // debt_credit.json / debt_settlement.rs) and is only ever checked
+  // from this page being the Debt & Credit module itself — same
+  // situation the inventoryCanRepack comment above already describes
+  // for "repack", so no separate schema fetch is needed here either.
+  const canSettle = moduleId === 'debt_credit' && !!schema?.my_permissions.includes('settle');
 
   if (loading) return <div style={{ padding: '1rem', color: 'var(--ink-soft)' }}>Loading…</div>;
   if (!schema) return <div style={{ padding: '1rem' }}>{error || 'Module not found'}</div>;
@@ -432,7 +473,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               <thead>
                 <tr>
                   {columns.map((c) => <th key={c} style={styles.th}>{c.replace(/_/g, ' ')}</th>)}
-                  {(canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || (moduleId === 'inventory' && inventoryCanRepack)) && moduleId !== 'invoice' && <th style={styles.th} />}
+                  {(canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || (moduleId === 'inventory' && inventoryCanRepack) || canSettle) && moduleId !== 'invoice' && <th style={styles.th} />}
                 </tr>
               </thead>
               <tbody>
@@ -453,7 +494,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                         </button>
                       </td>
                     )}
-                    {moduleId !== 'invoice' && (canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || (moduleId === 'inventory' && inventoryCanRepack)) && (
+                    {moduleId !== 'invoice' && (canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || (moduleId === 'inventory' && inventoryCanRepack) || canSettle) && (
                       <td style={styles.td}>
                         <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                           {moduleId === 'purchasing' && inventoryCanReceive && !r.received && (
@@ -464,6 +505,11 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                           {moduleId === 'inventory' && inventoryCanRepack && (
                             <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setRepackSourceId(r.id); setRepackTargetId(''); setRepackSourceQtyText('1'); setRepackTargetQtyText(''); setRepackNotes(''); setRepackError(null); }}>
                               Repack
+                            </button>
+                          )}
+                          {canSettle && !r.settled && (
+                            <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setSettlingId(r.id); setSettleError(null); }}>
+                              Settle
                             </button>
                           )}
                           {canUpdate && (
@@ -557,6 +603,34 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               <button className="btn btn-outline" onClick={() => setRepackSourceId(null)} disabled={repackSubmitting}>Cancel</button>
               <button className="btn btn-stamp" onClick={submitRepack} disabled={repackSubmitting || !repackTargetId}>
                 {repackSubmitting ? 'Repacking…' : 'Confirm repack'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {settlingId && (
+        <div style={styles.overlay} onClick={() => setSettlingId(null)}>
+          <div className="card" style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>Settle debt/credit</h3>
+            {(() => {
+              const r = records.find((rec) => rec.id === settlingId);
+              const isIncome = r?.direction === 'owed_to_business';
+              return (
+                <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+                  Marks "{String(r?.party_name ?? 'this record')}" as settled and posts{' '}
+                  {formatMoney(Number(r?.amount ?? 0), businessCurrency)} to Bookkeeping as{' '}
+                  {isIncome ? 'income (money received)' : 'an expense (money paid out)'}, if Bookkeeping is enabled.
+                  This can't be undone from here — settling again once done isn't possible, to avoid posting the
+                  same amount twice.
+                </p>
+              );
+            })()}
+            {settleError && <div style={styles.error}>{settleError}</div>}
+            <div style={styles.modalActions}>
+              <button className="btn btn-outline" onClick={() => setSettlingId(null)} disabled={settleSubmitting}>Cancel</button>
+              <button className="btn btn-stamp" onClick={submitSettle} disabled={settleSubmitting}>
+                {settleSubmitting ? 'Settling…' : 'Confirm settlement'}
               </button>
             </div>
           </div>

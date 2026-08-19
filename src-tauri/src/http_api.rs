@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, ai_chat, audit, auth, backup, crud, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
+use crate::{ai_assistant, ai_chat, audit, auth, backup, crud, debt_settlement, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -898,6 +898,22 @@ fn route(
             Err(e) => return json_err(400, &format!("invalid repack request: {e}")),
         };
         return match repack::repack(conn, &business_id, &user_id, req) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Settling a debt/credit: see debt_settlement.rs. Route
+    // segment is "debt_credit" (matching the module's own literal id,
+    // same convention as "purchasing/receive", "inventory/repack",
+    // "sales/refund" above — module id first, action second, no
+    // invented hyphenated spelling). ----
+    if parts.as_slice() == ["debt_credit", "settle"] && *method == Method::Post {
+        let req: debt_settlement::SettleDebtRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return json_err(400, &format!("invalid settle request: {e}")),
+        };
+        return match debt_settlement::settle(conn, &business_id, &user_id, req) {
             Ok(summary) => ApiResponse::Json(200, summary),
             Err(e) => crud_error(&e),
         };

@@ -257,6 +257,14 @@ export const repackStock = (req: {
   source_record_id: string; source_quantity: number;
   target_record_id: string; target_quantity_produced: number; notes?: string;
 }) => request('/inventory/repack', { method: 'POST', body: JSON.stringify(req) });
+
+// ---- Settling a debt/credit record. See debt_settlement.rs. ----
+export interface SettleDebtSummary {
+  debt_record_id: string; party_name: string; direction: string; amount: number;
+  settled: true; posted_to_bookkeeping_as: 'income' | 'expense' | null;
+}
+export const settleDebt = (debtRecordId: string): Promise<SettleDebtSummary> =>
+  request('/debt_credit/settle', { method: 'POST', body: JSON.stringify({ debt_record_id: debtRecordId }) });
 export const getModuleSchema = (moduleId: string) => request(`/modules/${moduleId}/schema`);
 export const listRecords = (moduleId: string, search?: string) =>
   request(`/modules/${moduleId}/records${search ? `?search=${encodeURIComponent(search)}` : ''}`);

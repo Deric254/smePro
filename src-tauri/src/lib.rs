@@ -14,6 +14,7 @@ pub mod currency;
 pub mod customers;
 pub mod db;
 pub mod db_migrations;
+pub mod debt_settlement;
 pub mod excel_import;
 pub mod forecast;
 pub mod http_api;

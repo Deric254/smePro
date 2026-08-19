@@ -39,7 +39,8 @@
     "read",
     "update",
     "delete",
-    "export"
+    "export",
+    "settle"
   ],
   "default_roles": {
     "Owner": [
@@ -48,13 +49,15 @@
       "update",
       "delete",
       "export",
-      "approve"
+      "approve",
+      "settle"
     ],
     "Manager": [
       "create",
       "read",
       "update",
-      "export"
+      "export",
+      "settle"
     ],
     "Staff": [
       "create",
