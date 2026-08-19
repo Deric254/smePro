@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getToken, markInvoiceSent, markInvoicePaid, cancelInvoice, ApiError, API_BASE as API } from '../api';
+import { getToken, getLogoUrl, markInvoiceSent, markInvoicePaid, cancelInvoice, ApiError, API_BASE as API } from '../api';
 import { formatMoney } from '../lib/money';
 import '../styles/invoice-print.css';
 
@@ -100,8 +100,8 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
     <div style={overlay} onClick={onClose}>
       <div style={modal} onClick={e => e.stopPropagation()} className="invoice-print-area">
         <div style={header}>
-          {business.logo_path && (
-            <img src={`${API}/uploads/${business.logo_path.split('/').pop() || ''}`} alt="" style={logo} />
+          {getLogoUrl(business.logo_path) && (
+            <img src={getLogoUrl(business.logo_path) || ''} alt="" style={logo} />
           )}
           <h2 style={bizName}>{business.name}</h2>
           {business.slogan && <p style={slogan}>{business.slogan}</p>}

@@ -97,9 +97,10 @@ pub fn ask_with_history(
          use it as ground truth and do not invent numbers that aren't in it. \
          If the snapshot doesn't contain what's needed to answer, say so plainly rather than guessing. \
          Keep answers short, concrete, and in plain language a busy shop owner would understand. \
-         This answer is shown in a plain chat bubble that does NOT render markdown — never use \
-         asterisks, #, backticks, or any markdown syntax; write plain sentences, and use a plain \
-         hyphen '-' at the start of a line for a list item if a list genuinely helps.\n\n\
+         Structure every answer with a short heading, then the direct answer, followed by a \
+         'What to do next' section when an action is useful. Use Markdown headings and bullet lists \
+         sparingly so the answer is easy to scan. Never invent numbers or recommendations that the \
+         snapshot does not support.\n\n\
          BUSINESS SNAPSHOT:\n{}",
         serde_json::to_string_pretty(&snapshot)?
     );
@@ -160,50 +161,42 @@ fn openai_style_messages(system_prompt: &str, question: &str, history: &[Turn]) 
 /// NVIDIA NIM — free tier, OpenAI-compatible chat completions API.
 fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
     let api_key = resolve_key(conn, business_id, "nvidia", "NVIDIA_API_KEY", Some("https://build.nvidia.com"))?;
-    let model = model_for(conn, business_id, "nvidia", "deepseek-ai/deepseek-v4-pro");
-
-    let body = json!({
-        "model": model,
-        "max_tokens": 500,
-        "messages": openai_style_messages(system_prompt, question, history),
-        // Required for NVIDIA NIM's DeepSeek-V4 family specifically —
-        // without this, the request can hang with no response at all
-        // rather than erroring cleanly (confirmed via NVIDIA's own
-        // official API example at build.nvidia.com/deepseek-ai/deepseek-v4-pro,
-        // which explicitly sets this, and a documented case of the
-        // exact hang when it's omitted). "thinking: false" is also the
-        // right choice functionally, not just to avoid the hang: this
-        // is a short, plain-language business Q&A assistant (see the
-        // system prompt above), not a task that benefits from
-        // DeepSeek's extended chain-of-thought reasoning mode — and
-        // thinking mode would also be slower and more expensive for
-        // no benefit here. If a future default model on this provider
-        // isn't a DeepSeek-V4-family model, an unrecognized field in
-        // extra_body/chat_template_kwargs is typically just ignored by
-        // OpenAI-compatible APIs rather than erroring, so this stays
-        // safe even if the default model changes later.
-        "chat_template_kwargs": { "thinking": false }
-    });
-
+    let model = model_for(conn, business_id, "nvidia", "meta/llama-3.3-70b-instruct");
+    let fallback_model = "meta/llama-3.3-70b-instruct";
     let agent = tls_agent()?;
-    let response = agent
-        .post("https://integrate.api.nvidia.com/v1/chat/completions")
-        .set("Authorization", &format!("Bearer {api_key}"))
-        .set("content-type", "application/json")
-        .send_json(body);
+    let request = |model_name: &str| -> Result<String> {
+        let body = json!({
+            "model": model_name,
+            "max_tokens": 500,
+            "messages": openai_style_messages(system_prompt, question, history),
+        });
+        match agent
+            .post("https://integrate.api.nvidia.com/v1/chat/completions")
+            .set("Authorization", &format!("Bearer {api_key}"))
+            .set("content-type", "application/json")
+            .send_json(body)
+        {
+            Ok(resp) => {
+                let parsed: serde_json::Value = resp.into_json()?;
+                parsed["choices"][0]["message"]["content"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| anyhow!("unexpected response shape from NVIDIA NIM"))
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                Err(anyhow!("NVIDIA NIM API returned {code}: {}", resp.into_string().unwrap_or_default()))
+            }
+            Err(e) => Err(anyhow!("failed to reach NVIDIA NIM API: {e}")),
+        }
+    };
 
-    match response {
-        Ok(resp) => {
-            let parsed: serde_json::Value = resp.into_json()?;
-            parsed["choices"][0]["message"]["content"]
-                .as_str()
-                .map(|s| s.to_string())
-                .ok_or_else(|| anyhow!("unexpected response shape from NVIDIA NIM"))
+    match request(&model) {
+        Err(error) if model != fallback_model && error.to_string().contains("returned 410") => {
+            request(fallback_model).map_err(|fallback_error| {
+                anyhow!("NVIDIA NIM model '{}' is no longer available; fallback failed: {}", model, fallback_error)
+            })
         }
-        Err(ureq::Error::Status(code, resp)) => {
-            Err(anyhow!("NVIDIA NIM API returned {code}: {}", resp.into_string().unwrap_or_default()))
-        }
-        Err(e) => Err(anyhow!("failed to reach NVIDIA NIM API: {e}")),
+        result => result,
     }
 }
 

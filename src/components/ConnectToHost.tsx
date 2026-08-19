@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { apiBaseForHost } from '../api';
 
 // Shown before App ever mounts, when this device is configured as a
 // LAN "client" (see network_mode.rs) but hasn't been told which
@@ -14,6 +15,7 @@ export default function ConnectToHost({ onConnected }: { onConnected: (address: 
     e.preventDefault();
     const trimmed = address.trim();
     if (!trimmed) return;
+    const normalized = apiBaseForHost(trimmed);
     setSaving(true);
     setError(null);
     try {
@@ -23,8 +25,8 @@ export default function ConnectToHost({ onConnected }: { onConnected: (address: 
       // onConnected right now) is what adds "http://", so there's
       // exactly one place that decides the scheme rather than two
       // copies that could drift.
-      await invoke('set_network_mode', { mode: 'client', hostAddress: trimmed });
-      onConnected(trimmed);
+      await invoke('set_network_mode', { mode: 'client', hostAddress: normalized.replace(/^https?:\/\//i, '') });
+      onConnected(normalized);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save this — try again');
       setSaving(false);

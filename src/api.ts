@@ -10,7 +10,20 @@
 // 127.0.0.1 while others correctly follow the host.
 export let API_BASE = 'http://127.0.0.1:8080';
 export function setApiBase(url: string) {
-  API_BASE = url;
+  API_BASE = url.trim().replace(/\/+$/, '');
+}
+
+export function apiBaseForHost(address: string): string {
+  const trimmed = address.trim().replace(/\/+$/, '');
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+}
+
+// Branding paths come from the backend's filesystem and are Windows paths
+// in the desktop build. Only the filename belongs in the public uploads URL.
+export function getLogoUrl(storedPath?: string | null): string | null {
+  if (!storedPath) return null;
+  const filename = storedPath.replace(/\\/g, '/').split('/').pop();
+  return filename ? `${API_BASE}/uploads/${encodeURIComponent(filename)}` : null;
 }
 
 let authToken: string | null = localStorage.getItem('erp_token');

@@ -102,6 +102,54 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
             vec![]
         };
 
+        let operational_details = match module_id.as_str() {
+            "inventory" => {
+                let places = crate::money::decimal_places_for(&currency);
+                let scale = 10_i64.pow(places) as f64;
+                let mut detail_stmt = conn.prepare(&format!(
+                    "SELECT sku, name, quantity, unit_cost, unit_price, reorder_level
+                     FROM {table} WHERE business_id = ?1 AND deleted_at IS NULL
+                     ORDER BY name LIMIT 100"
+                ))?;
+                let items: Vec<Value> = detail_stmt
+                    .query_map(rusqlite::params![business_id], |r| {
+                        Ok(json!({
+                            "sku": r.get::<_, String>(0)?,
+                            "name": r.get::<_, String>(1)?,
+                            "quantity": r.get::<_, i64>(2)?,
+                            "unit_cost": r.get::<_, i64>(3)? as f64 / scale,
+                            "unit_price": r.get::<_, i64>(4)? as f64 / scale,
+                            "reorder_level": r.get::<_, Option<i64>>(5)?,
+                        }))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                json!(items)
+            }
+            "purchasing" => {
+                let places = crate::money::decimal_places_for(&currency);
+                let scale = 10_i64.pow(places) as f64;
+                let mut detail_stmt = conn.prepare(&format!(
+                    "SELECT supplier, item_name, inventory_record_id, quantity, unit_cost, received
+                     FROM {table} WHERE business_id = ?1 AND deleted_at IS NULL
+                     ORDER BY order_date DESC, created_at DESC LIMIT 100"
+                ))?;
+                let purchases: Vec<Value> = detail_stmt
+                    .query_map(rusqlite::params![business_id], |r| {
+                        Ok(json!({
+                            "supplier": r.get::<_, String>(0)?,
+                            "item_name": r.get::<_, String>(1)?,
+                            "inventory_record_id": r.get::<_, Option<String>>(2)?,
+                            "quantity": r.get::<_, i64>(3)?,
+                            "unit_cost": r.get::<_, i64>(4)? as f64 / scale,
+                            "received": r.get::<_, bool>(5)?,
+                        }))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                json!(purchases)
+            }
+            _ => Value::Null,
+        };
+
         modules_summary.insert(
             module_id.clone(),
             json!({
@@ -109,6 +157,7 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
                 "record_count": record_count,
                 "totals": totals,
                 "low_stock_alerts": low_stock,
+                "operational_details": operational_details,
             }),
         );
     }

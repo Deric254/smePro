@@ -4,7 +4,7 @@ import './index.css'
 import './styles/mobile.css'
 import App from './App.tsx'
 import ConnectToHost from './components/ConnectToHost.tsx'
-import { setApiBase } from './api'
+import { apiBaseForHost, setApiBase } from './api'
 
 interface NetworkModeConfig {
   mode: string;
@@ -45,7 +45,7 @@ function renderApp() {
 loadNetworkMode().then((config) => {
   if (config.mode === 'client') {
     if (config.host_address) {
-      setApiBase(`http://${config.host_address}`);
+      setApiBase(apiBaseForHost(config.host_address));
       renderApp();
       return;
     }
@@ -56,7 +56,7 @@ loadNetworkMode().then((config) => {
       <StrictMode>
         <ConnectToHost
           onConnected={(address) => {
-            setApiBase(`http://${address}`);
+            setApiBase(apiBaseForHost(address));
             renderApp();
           }}
         />

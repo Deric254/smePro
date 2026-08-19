@@ -89,6 +89,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [loading, setLoading] = useState(true);
   const [units, setUnits] = useState<Unit[]>([]);
   const [currencies, setCurrencies] = useState<Currency[]>([]);
+  const [inventoryItems, setInventoryItems] = useState<Record_[]>([]);
   // The business's own currency — needed everywhere a "money"-typed
   // field is parsed (form input) or displayed (records table), so
   // decimal places are correct for e.g. JPY (0dp) or KWD (3dp), not
@@ -125,6 +126,16 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       })
       .catch((e) => setError(e instanceof ApiError ? e.message : 'Failed to load module'))
       .finally(() => setLoading(false));
+  }, [moduleId]);
+
+  useEffect(() => {
+    if (moduleId !== 'purchasing') {
+      setInventoryItems([]);
+      return;
+    }
+    listRecords('inventory')
+      .then((r) => setInventoryItems(r.records))
+      .catch(() => setInventoryItems([]));
   }, [moduleId]);
 
   const [searching, setSearching] = useState(false);
@@ -457,7 +468,15 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                 <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginBottom: '0.6rem' }}>Editing record</div>
               )}
               <div style={styles.formGrid}>
-                {schema.fields.filter((f) => !isActionManagedField(moduleId, f.name)).map((f) => (
+                {moduleId === 'purchasing' && (
+                  <PurchaseItemSelector
+                    items={inventoryItems}
+                    value={formValues.inventory_record_id ?? ''}
+                    required
+                    onChange={(id, name) => setFormValues((p) => ({ ...p, inventory_record_id: id, item_name: name }))}
+                  />
+                )}
+                {schema.fields.filter((f) => !isActionManagedField(moduleId, f.name) && !(moduleId === 'purchasing' && (f.name === 'item_name' || f.name === 'inventory_record_id'))).map((f) => (
                   <FieldInput key={f.name} field={f} value={formValues[f.name] ?? ''} units={units} currencies={currencies} businessCurrency={businessCurrency} onChange={(v) => setFormValues((p) => ({ ...p, [f.name]: v }))} />
                 ))}
               </div>
@@ -703,6 +722,34 @@ function formatCell(v: unknown, fieldType?: string, currency?: string) {
   if (v === null || v === undefined) return <span style={{ color: 'var(--ink-faint)' }}>—</span>;
   if (fieldType === 'money' && typeof v === 'number') return formatMoney(v, currency ?? 'USD');
   return String(v);
+}
+
+function PurchaseItemSelector({ items, value, required, onChange }: { items: Record_[]; value: string; required?: boolean; onChange: (id: string, name: string) => void }) {
+  return (
+    <div>
+      <label>Inventory item{required ? ' *' : ''}</label>
+      <select
+        value={value}
+        required={required}
+        onChange={(e) => {
+          const item = items.find((record) => record.id === e.target.value);
+          onChange(e.target.value, String(item?.name ?? ''));
+        }}
+      >
+        <option value="">Select an item from Inventory...</option>
+        {items.map((item) => (
+          <option key={item.id} value={item.id}>
+            {String(item.name ?? item.sku ?? item.id)} · {String(item.quantity ?? 0)} in stock
+          </option>
+        ))}
+      </select>
+      {items.length === 0 && (
+        <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginTop: '0.2em' }}>
+          Create the item in Inventory first. New catalog items start at zero stock; receiving this purchase adds the delivered quantity.
+        </div>
+      )}
+    </div>
+  );
 }
 
 function FieldInput({ field, value, units, currencies, businessCurrency, onChange }: { field: FieldDef; value: string; units: Unit[]; currencies: Currency[]; businessCurrency: string; onChange: (v: string) => void }) {

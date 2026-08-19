@@ -557,13 +557,13 @@ fn route(
     }
 
     if parts.as_slice() == ["business"] && *method == Method::Get {
-        let result: rusqlite::Result<(String, String, Option<String>)> = conn.query_row(
-            "SELECT name, currency, logo_path FROM businesses WHERE id = ?1",
+        let result: rusqlite::Result<(String, String, Option<String>, Option<String>)> = conn.query_row(
+            "SELECT name, currency, logo_path, slogan FROM businesses WHERE id = ?1",
             rusqlite::params![business_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         );
         return match result {
-            Ok((name, currency, logo_path)) => ApiResponse::Json(200, json!({"name": name, "currency": currency, "logo_path": logo_path})),
+            Ok((name, currency, logo_path, slogan)) => ApiResponse::Json(200, json!({"name": name, "currency": currency, "logo_path": logo_path, "slogan": slogan})),
             Err(e) => json_err(500, &e.to_string()),
         };
     }

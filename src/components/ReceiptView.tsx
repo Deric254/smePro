@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getToken, API_BASE as API } from '../api';
+import { getToken, getLogoUrl } from '../api';
 import { formatMoney } from '../lib/money';
 import '../styles/receipt-print.css';
 
@@ -108,9 +108,9 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
     <div style={overlay} onClick={onClose}>
       <div style={modal} onClick={e => e.stopPropagation()} className="receipt-print-area">
         <div style={header}>
-          {receipt.business_logo_path && (
+          {getLogoUrl(receipt.business_logo_path) && (
             <img
-              src={`${API}/uploads/${receipt.business_logo_path.split('/').pop() || ''}`}
+              src={getLogoUrl(receipt.business_logo_path) || ''}
               alt=""
               style={logo}
               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}

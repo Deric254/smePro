@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getToken, API_BASE as API } from '../api';
+import { getToken, getLogoUrl, API_BASE as API } from '../api';
 
 export default function BusinessBranding() {
   const [slogan, setSlogan] = useState('');
@@ -21,7 +21,7 @@ export default function BusinessBranding() {
       .then(r => r.json())
       .then(data => {
         if (data.slogan) { setSlogan(data.slogan); }
-        if (data.logo_path) setLogoPreview(`${API}/uploads/${data.logo_path.split('/').pop()}`);
+        if (data.logo_path) setLogoPreview(getLogoUrl(data.logo_path));
         if (typeof data.tax_rate === 'number') setTaxRateText(String(data.tax_rate));
       });
   }, []);

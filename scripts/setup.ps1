@@ -120,6 +120,8 @@ Step "Setup complete"
 Ok "Everything needed to build SME Pro is installed."
 
 if ($Build) {
+    Step "Regenerating installer icons from src-tauri\icons\icon.png"
+    npm run generate-icons
     Step "Building the installer (npm run tauri build)"
     npm run tauri build
     Ok "Build complete — check src-tauri\target\release\bundle\ for the installer."
