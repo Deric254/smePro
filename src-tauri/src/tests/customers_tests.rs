@@ -52,13 +52,7 @@ fn test_pos_checkout_customer_phone_matches_customers_table_for_ltv() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let mut item = serde_json::Map::new();
-    item.insert("sku".into(), serde_json::json!("ITEM-001"));
-    item.insert("name".into(), serde_json::json!("Widget"));
-    item.insert("quantity".into(), serde_json::json!(10));
-    item.insert("unit_cost".into(), serde_json::json!(100));
-    item.insert("unit_price".into(), serde_json::json!(500));
-    let inv_id = crate::crud::create(&mut conn, &biz, &uid, "inventory", &item).unwrap();
+    let inv_id = seed_inventory_item(&conn, &biz, "ITEM-001", "Widget", 10, 100, 500);
 
     let req = crate::pos::CheckoutRequest {
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 2 }],
@@ -128,13 +122,7 @@ fn test_pos_checkout_tracks_customer_by_name_only() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let mut item = serde_json::Map::new();
-    item.insert("sku".into(), serde_json::json!("ITEM-002"));
-    item.insert("name".into(), serde_json::json!("Gadget"));
-    item.insert("quantity".into(), serde_json::json!(10));
-    item.insert("unit_cost".into(), serde_json::json!(100));
-    item.insert("unit_price".into(), serde_json::json!(300));
-    let inv_id = crate::crud::create(&mut conn, &biz, &uid, "inventory", &item).unwrap();
+    let inv_id = seed_inventory_item(&conn, &biz, "ITEM-002", "Gadget", 10, 100, 300);
 
     let req = crate::pos::CheckoutRequest {
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],

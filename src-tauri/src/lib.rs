@@ -33,6 +33,7 @@ pub mod reference_data;
 pub mod refund;
 pub mod repack;
 pub mod security;
+pub mod stock_take;
 pub mod tax;
 #[cfg(test)]
 mod tests;

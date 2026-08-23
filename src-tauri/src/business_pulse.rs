@@ -13,7 +13,6 @@
 //! module enabled, or no sales yet, gets `has_data: false` and a plain
 //! "not enough history yet" message — never an invented trend.
 
-use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;

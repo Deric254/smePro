@@ -30,6 +30,18 @@ pub fn list_users(conn: &Connection, business_id: &str) -> Result<Vec<Value>> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// The two security-question/answer pairs a new user sets up at
+/// creation, the same forced recovery path the first-run Owner account
+/// requires. Bundled into one value purely to keep `create_user`'s own
+/// argument count reasonable — no behavior change from the equivalent
+/// four bare parameters this replaces.
+pub struct SecurityQuestions<'a> {
+    pub q1: &'a str,
+    pub a1: &'a str,
+    pub q2: &'a str,
+    pub a2: &'a str,
+}
+
 /// Creates a new user under an existing role, with the same forced
 /// security-question setup the first-run Owner account requires — a
 /// staff account with no recovery path is a support ticket waiting to
@@ -40,11 +52,9 @@ pub fn create_user(
     username: &str,
     password: &str,
     role_id: &str,
-    security_q1: &str,
-    security_a1: &str,
-    security_q2: &str,
-    security_a2: &str,
+    security: SecurityQuestions,
 ) -> Result<String> {
+    let SecurityQuestions { q1: security_q1, a1: security_a1, q2: security_q2, a2: security_a2 } = security;
     let username = username.trim();
     if username.is_empty() {
         return Err(anyhow!("username cannot be empty"));

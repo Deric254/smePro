@@ -6,13 +6,7 @@ fn test_checkout_deducts_stock() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let mut item = serde_json::Map::new();
-    item.insert("sku".into(), serde_json::json!("RICE-001"));
-    item.insert("name".into(), serde_json::json!("Rice"));
-    item.insert("quantity".into(), serde_json::json!(100));
-    item.insert("unit_cost".into(), serde_json::json!(5000));
-    item.insert("unit_price".into(), serde_json::json!(7500));
-    let inv_id = crate::crud::create(&mut conn, &biz, &uid, "inventory", &item).unwrap();
+    let inv_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 100, 5000, 7500);
 
     let req = crate::pos::CheckoutRequest {
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id.clone(), quantity: 5 }],
@@ -36,13 +30,7 @@ fn test_checkout_oversell_blocked() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let mut item = serde_json::Map::new();
-    item.insert("sku".into(), serde_json::json!("SUGAR-001"));
-    item.insert("name".into(), serde_json::json!("Sugar"));
-    item.insert("quantity".into(), serde_json::json!(2));
-    item.insert("unit_cost".into(), serde_json::json!(3000));
-    item.insert("unit_price".into(), serde_json::json!(5000));
-    let inv_id = crate::crud::create(&mut conn, &biz, &uid, "inventory", &item).unwrap();
+    let inv_id = seed_inventory_item(&conn, &biz, "SUGAR-001", "Sugar", 2, 3000, 5000);
 
     let req = crate::pos::CheckoutRequest {
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 5 }],

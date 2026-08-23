@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, ai_chat, audit, auth, backup, crud, debt_settlement, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, users, xlsx_export};
+use crate::{ai_assistant, ai_chat, audit, auth, backup, crud, debt_settlement, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, stock_take, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -578,7 +578,9 @@ fn route(
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
         let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
         let g = |k: &str| obj.get(k).and_then(Value::as_str).unwrap_or("");
-        return match users::create_user(conn, &business_id, g("username"), g("password"), g("role_id"), g("security_q1"), g("security_a1"), g("security_q2"), g("security_a2")) {
+        return match users::create_user(conn, &business_id, g("username"), g("password"), g("role_id"), users::SecurityQuestions {
+            q1: g("security_q1"), a1: g("security_a1"), q2: g("security_q2"), a2: g("security_a2"),
+        }) {
             Ok(id) => {
                 let _ = audit::log(conn, &business_id, Some(&user_id), "_users", "create_user", Some(&id), Some(&json!({"username": g("username")})));
                 ApiResponse::Json(201, json!({"id": id}))
@@ -903,6 +905,52 @@ fn route(
         };
     }
 
+    // ---- Stock Take: initiate -> count -> close. See stock_take.rs. ----
+    if parts.as_slice() == ["inventory", "stocktake", "initiate"] && *method == Method::Post {
+        return match stock_take::initiate(conn, &business_id, &user_id) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
+        };
+    }
+    if parts.as_slice() == ["inventory", "stocktake", "open"] && *method == Method::Get {
+        return match stock_take::get_open(conn, &business_id, &user_id) {
+            Ok(open) => ApiResponse::Json(200, json!({ "open": open })),
+            Err(e) => crud_error(&e),
+        };
+    }
+    if parts.as_slice() == ["inventory", "stocktake", "history"] && *method == Method::Get {
+        return match stock_take::list(conn, &business_id, &user_id) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
+        };
+    }
+    if let [module_seg, "stocktake", id] = parts.as_slice() {
+        if *module_seg == "inventory" && *method == Method::Get {
+            return match stock_take::get(conn, &business_id, &user_id, id) {
+                Ok(summary) => ApiResponse::Json(200, summary),
+                Err(e) => crud_error(&e),
+            };
+        }
+    }
+    if parts.as_slice() == ["inventory", "stocktake", "count"] && *method == Method::Post {
+        let req: stock_take::RecordCountRequest = match serde_json::from_str(body) {
+            Ok(r) => r,
+            Err(e) => return json_err(400, &format!("invalid stock take count request: {e}")),
+        };
+        return match stock_take::record_count(conn, &business_id, &user_id, req) {
+            Ok(()) => ApiResponse::Json(200, json!({ "ok": true })),
+            Err(e) => crud_error(&e),
+        };
+    }
+    if let [module_seg, "stocktake", id, "close"] = parts.as_slice() {
+        if *module_seg == "inventory" && *method == Method::Post {
+            return match stock_take::close(conn, &business_id, &user_id, id) {
+                Ok(summary) => ApiResponse::Json(200, summary),
+                Err(e) => crud_error(&e),
+            };
+        }
+    }
+
     // ---- Settling a debt/credit: see debt_settlement.rs. Route
     // segment is "debt_credit" (matching the module's own literal id,
     // same convention as "purchasing/receive", "inventory/repack",
@@ -1071,7 +1119,7 @@ fn route(
                 None => json_err(400, "body must be a JSON object"),
             },
             (Method::Put, Some(id)) => match json_body(body) {
-                Some(obj) => match crud::update(conn, &business_id, &user_id, module_id, id, &obj) {
+                Some(obj) => match crud::update(conn, &business_id, &user_id, module_id, id, &obj, false) {
                     Ok(()) => ApiResponse::Json(200, json!({"updated": true})),
                     Err(e) => crud_error(&e),
                 },
@@ -1626,11 +1674,13 @@ fn build_report(
         business_id,
         user_id,
         module_id,
-        measure,
-        agg,
-        dimension,
-        q.get("start").map(|s| s.as_str()),
-        q.get("end").map(|s| s.as_str()),
+        report::ReportQuery {
+            measure_field: measure,
+            aggregation: agg,
+            dimension,
+            range_start: q.get("start").map(|s| s.as_str()),
+            range_end: q.get("end").map(|s| s.as_str()),
+        },
     )
 }
 

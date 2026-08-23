@@ -28,7 +28,7 @@ interface OrderLookupItem {
   created_at: string;
 }
 
-export default function PointOfSale() {
+export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBranding?: () => void }) {
   const [mode, setMode] = useState<'sell' | 'refund'>('sell');
   const [products, setProducts] = useState<Record_[]>([]);
   const [search, setSearch] = useState('');
@@ -46,6 +46,7 @@ export default function PointOfSale() {
   // uses the business's actual currency (decimal places, not just the
   // symbol) instead of assuming USD's 2dp.
   const [currency, setCurrency] = useState('USD');
+  const [showBrandingNudge, setShowBrandingNudge] = useState(false);
   const [receipt, setReceipt] = useState<{
     order_id: string; subtotal: number; customer?: string; payment_method?: string; on_credit?: boolean;
     items: { name: string; sku: string; quantity: number; unit_price: number; line_total: number; remaining_stock: number }[];
@@ -126,7 +127,18 @@ export default function PointOfSale() {
 
   useEffect(() => {
     getBusinessInfo()
-      .then((b: any) => { if (b?.currency) setCurrency(b.currency); })
+      .then((b: any) => {
+        if (b?.currency) setCurrency(b.currency);
+        // A one-time nudge, not a recurring nag: a business that never
+        // set a logo or slogan gets receipts that print with neither —
+        // technically correct (the receipt renders cleanly either
+        // way), but easy to mistake for a missing feature if nobody
+        // ever pointed a new business toward Admin > Business to set
+        // it up. Dismissible and remembered per-device so it never
+        // shows again once acted on or closed.
+        const dismissed = localStorage.getItem('branding_nudge_dismissed') === '1';
+        if (!dismissed && !b?.logo_path && !b?.slogan) setShowBrandingNudge(true);
+      })
       .catch(() => {}); // default 'USD' stands if this fails — never blocks the POS screen
   }, []);
 
@@ -273,6 +285,40 @@ export default function PointOfSale() {
   return (
     <div>
       <h1>Point of Sale</h1>
+
+      {showBrandingNudge && (
+        <div
+          className="card"
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem',
+            marginBottom: '1rem', fontSize: '0.85rem',
+          }}
+        >
+          <span>Add your logo and slogan so receipts print with your branding.</span>
+          <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
+            <button
+              className="btn btn-stamp"
+              onClick={() => {
+                localStorage.setItem('branding_nudge_dismissed', '1');
+                setShowBrandingNudge(false);
+                onNavigateToBranding?.();
+              }}
+            >
+              Add now
+            </button>
+            <button
+              className="btn btn-outline"
+              onClick={() => {
+                localStorage.setItem('branding_nudge_dismissed', '1');
+                setShowBrandingNudge(false);
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
         <button className={mode === 'sell' ? 'btn' : 'btn btn-outline'} onClick={() => setMode('sell')}>Sell</button>
         <button className={mode === 'refund' ? 'btn' : 'btn btn-outline'} onClick={() => setMode('refund')}>Refund</button>

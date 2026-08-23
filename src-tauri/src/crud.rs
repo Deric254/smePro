@@ -10,7 +10,7 @@ use crate::{audit, rbac};
 /// from a file) — this is what makes CRUD generic at request time: any
 /// module enabled for the business, past or present, can be operated on
 /// purely from what's stored in the DB.
-pub(crate) fn load_module(conn: &Connection, business_id: &str, module_id: &str) -> Result<ModuleDef> {
+pub fn load_module(conn: &Connection, business_id: &str, module_id: &str) -> Result<ModuleDef> {
     // Belt-and-suspenders: module_id ultimately becomes part of a raw
     // SQL table name (see ModuleDef::table_name), and while the
     // existence-gated query below already means an attacker can't
@@ -28,6 +28,51 @@ pub(crate) fn load_module(conn: &Connection, business_id: &str, module_id: &str)
         )
         .map_err(|_| anyhow!("module '{module_id}' is not enabled for this business"))?;
     ModuleDef::from_json_str(&raw)
+}
+
+/// Fields that must never change through a single-record PATCH, no
+/// matter which role is calling it — the backend-side enforcement of
+/// the same boundary the frontend's own `isActionManagedField()` (see
+/// ModuleView.tsx) draws for `purchasing`'s `received` and
+/// `debt_credit`'s `settled`: those fields, and this one, are only
+/// ever supposed to change as a side effect of a specific,
+/// purpose-built action, never as a standalone field edit.
+///
+/// `inventory`'s `quantity` belongs here for the same reason: once an
+/// item exists, every legitimate way to change how much of it there is
+/// already has its own dedicated, atomic, audited action — sell
+/// (pos.rs), receive (receiving.rs), refund (refund.rs), repack
+/// (repack.rs) — each of which enforces things a plain field edit
+/// never could (oversell protection, weighted-average cost
+/// recalculation, a floor at zero). Letting a single-record PATCH
+/// touch `quantity` too would mean the stock level for an item could
+/// be silently overwritten to anything — including a negative number,
+/// or zero, wiping it out — indistinguishable in the audit log from
+/// correcting a typo in the item's name. Hiding the field from React's
+/// edit form is not enough on its own: that's a UI nicety that a raw
+/// API call bypasses entirely, so the real boundary has to live here,
+/// checked by the single-record HTTP route in http_api.rs before it
+/// ever calls `update()` below.
+///
+/// This function only concerns `update()` — a later edit of an
+/// existing record. `create()` has its own, separate rule: every
+/// inventory item is forced to `quantity: 0` at creation time, no
+/// exceptions, so there's no "caller-supplied opening count" case for
+/// this function to worry about exempting (see `create()`'s own doc
+/// comment on why).
+///
+/// Also deliberately does NOT apply when `update()`'s own `bulk_import`
+/// flag is set — excel_import.rs's own doc comment explains why a
+/// spreadsheet re-upload is a real, sanctioned way to change quantity:
+/// it exists specifically to serve "a stock take (reconciling counted
+/// quantities against what the system thinks is on the shelf)". That's
+/// a deliberate, validated, whole-batch reconciliation workflow, not
+/// the same danger as a single ad-hoc field edit slipping through the
+/// generic one-record form — so it gets to bypass this specific block
+/// (and only this one; excel_import still goes through every other
+/// validation `update()` applies, same as any other caller).
+fn is_single_record_edit_blocked_field(module_id: &str, field_name: &str) -> bool {
+    module_id == "inventory" && field_name == "quantity"
 }
 
 /// CREATE — validates against the module's field rules, inserts, audits.
@@ -49,6 +94,29 @@ pub fn create(
                 record.insert(f.name.clone(), d.clone());
             }
         }
+    }
+    // Every inventory item starts at zero stock, full stop — no
+    // exceptions, no caller-supplied opening count, on this single-record
+    // path. Stock only ever enters the system one way: Purchasing
+    // receiving an order against the item (receiving.rs::receive()),
+    // which is the only place a real vendor, cost, and delivered
+    // quantity all get recorded together. Letting a plain "create a new
+    // item" call seed its own quantity would mean two different, silently
+    // inconsistent ways for stock to appear — one traceable to a purchase,
+    // one not traceable to anything. Whatever the caller sent for
+    // "quantity" is discarded here, not validated-then-rejected, because
+    // this is a normal, expected part of creating an inventory item, not
+    // an error condition — the frontend doesn't even show the field on
+    // this form (see ModuleView.tsx).
+    //
+    // Deliberately does NOT apply to insert_validated_record() below,
+    // which is what excel_import.rs's bulk upload calls directly instead
+    // of this function — see that module's own doc comment for why a
+    // spreadsheet-driven initial catalog load (or a stock take) is a
+    // real, sanctioned way to set a starting quantity, unlike a single
+    // ad-hoc item creation through this generic form.
+    if module_id == "inventory" {
+        record.insert("quantity".to_string(), json!(0));
     }
     module.validate(&record)?;
     crate::reference_data::validate_field_references(conn, business_id, &module, &record)?;
@@ -176,6 +244,14 @@ pub fn list(
 
 /// UPDATE — partial update of any subset of fields, validated, audited
 /// with an old->new diff so the audit trail is actually useful.
+/// `bulk_import` distinguishes a single-record PATCH (the generic
+/// create/edit form, or any direct API call hitting that same route)
+/// from excel_import.rs's own internal reconciliation-by-spreadsheet
+/// path. `false` for every normal caller — pass `true` only from
+/// excel_import.rs, and only because that call site's own doc comment
+/// already explains, in detail, exactly why it's a sanctioned way to
+/// change a field this function otherwise blocks (see
+/// `is_single_record_edit_blocked_field` above).
 pub fn update(
     conn: &Connection,
     business_id: &str,
@@ -183,6 +259,7 @@ pub fn update(
     module_id: &str,
     record_id: &str,
     body: &Map<String, Value>,
+    bulk_import: bool,
 ) -> Result<()> {
     rbac::require(conn, user_id, module_id, "update")?;
     // record_id arrives straight from the URL path — every record ID
@@ -206,6 +283,11 @@ pub fn update(
     for (k, v) in body {
         if !valid_fields.contains(k.as_str()) {
             return Err(anyhow!("'{k}' is not a field on module '{module_id}'"));
+        }
+        if !bulk_import && is_single_record_edit_blocked_field(module_id, k) {
+            return Err(anyhow!(
+                "'{k}' cannot be edited directly on '{module_id}' — use the sell, receive, refund, or repack action instead"
+            ));
         }
         sets.push(format!("{k} = ?{idx}"));
         values.push(value_to_sql(v));

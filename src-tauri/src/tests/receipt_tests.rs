@@ -6,13 +6,7 @@ fn test_receipt_generation() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let mut item = serde_json::Map::new();
-    item.insert("sku".into(), serde_json::json!("MILK-001"));
-    item.insert("name".into(), serde_json::json!("Milk"));
-    item.insert("quantity".into(), serde_json::json!(20));
-    item.insert("unit_cost".into(), serde_json::json!(4000));
-    item.insert("unit_price".into(), serde_json::json!(5500));
-    let inv_id = crate::crud::create(&mut conn, &biz, &uid, "inventory", &item).unwrap();
+    let inv_id = seed_inventory_item(&conn, &biz, "MILK-001", "Milk", 20, 4000, 5500);
 
     let req = crate::pos::CheckoutRequest {
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 2 }],

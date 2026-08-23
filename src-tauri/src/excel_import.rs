@@ -182,7 +182,12 @@ pub fn import(
         match existing_id {
             Some(id) => {
                 let body_map: serde_json::Map<String, Value> = record.clone().into_iter().collect();
-                match crud::update(&tx, business_id, user_id, &module.id, &id, &body_map) {
+                // bulk_import=true — a spreadsheet reconciliation (e.g.
+                // a stock take) is a sanctioned way to change quantity,
+                // unlike a single ad-hoc field edit through the generic
+                // one-record form. See is_single_record_edit_blocked_field
+                // in crud.rs for the full reasoning.
+                match crud::update(&tx, business_id, user_id, &module.id, &id, &body_map, true) {
                     Ok(_) => updated += 1,
                     Err(e) => errors.push(json!({"row": row_num, "error": e.to_string()})),
                 }

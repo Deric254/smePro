@@ -19,7 +19,7 @@ fn test_disable_module_flips_enabled_flag_but_keeps_data() {
     item.insert("quantity".into(), serde_json::json!(10));
     item.insert("unit_cost".into(), serde_json::json!(100));
     item.insert("unit_price".into(), serde_json::json!(200));
-    let record_id = crate::crud::create(&mut conn, &biz, &uid, "inventory", &item).unwrap();
+    let record_id = crate::crud::create(&conn, &biz, &uid, "inventory", &item).unwrap();
 
     crate::business_panel::disable_module(&conn, &biz, "inventory").unwrap();
 

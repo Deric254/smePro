@@ -142,8 +142,8 @@ fn model_for(conn: &Connection, business_id: &str, provider_key: &str, default: 
     crate::settings::get(conn, business_id, &format!("ai_{provider_key}_model")).unwrap_or_else(|| default.to_string())
 }
 
-/// Builds the OpenAI-compatible `messages` array (system + prior turns
-/// + the new question) shared by NIM and OpenAI — the only two
+/// Builds the OpenAI-compatible `messages` array (system, prior turns,
+/// and the new question) shared by NIM and OpenAI — the only two
 /// providers here using that exact wire shape. `Turn.role` of "ai" is
 /// translated to the API's own "assistant" here, since "ai" is this
 /// app's internal storage vocabulary (see ai_chat.rs), not any

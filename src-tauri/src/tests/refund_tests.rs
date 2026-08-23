@@ -1,13 +1,11 @@
 use super::common::*;
 
-fn make_inventory_item(conn: &mut rusqlite::Connection, biz: &str, uid: &str, sku: &str, name: &str, qty: i64, cost_cents: i64, price_cents: i64) -> String {
-    let mut item = serde_json::Map::new();
-    item.insert("sku".into(), serde_json::json!(sku));
-    item.insert("name".into(), serde_json::json!(name));
-    item.insert("quantity".into(), serde_json::json!(qty));
-    item.insert("unit_cost".into(), serde_json::json!(cost_cents));
-    item.insert("unit_price".into(), serde_json::json!(price_cents));
-    crate::crud::create(conn, biz, uid, "inventory", &item).unwrap()
+fn make_inventory_item(conn: &rusqlite::Connection, biz: &str, sku: &str, name: &str, qty: i64, cost_cents: i64, price_cents: i64) -> String {
+    // Delegates to seed_inventory_item() — crud::create() now forces
+    // inventory to start at zero stock, so a test needing pre-existing
+    // stock to refund against has to seed it like a real bulk catalog
+    // migration would.
+    seed_inventory_item(conn, biz, sku, name, qty, cost_cents, price_cents)
 }
 
 fn checkout_one(conn: &mut rusqlite::Connection, biz: &str, uid: &str, inv_id: &str, qty: i64) -> serde_json::Value {
@@ -29,7 +27,7 @@ fn test_refund_restocks_and_records_correctly() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "FLOUR-001", "Flour", 50, 2000, 3000);
+    let inv_id = make_inventory_item(&conn, &biz, "FLOUR-001", "Flour", 50, 2000, 3000);
     let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 10);
     let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
 
@@ -57,7 +55,7 @@ fn test_refund_without_restock_leaves_inventory_untouched() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "EGGS-001", "Eggs", 30, 500, 800);
+    let inv_id = make_inventory_item(&conn, &biz, "EGGS-001", "Eggs", 30, 500, 800);
     let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 6);
     let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
 
@@ -82,7 +80,7 @@ fn test_refunding_more_than_was_sold_is_blocked() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "OIL-001", "Cooking Oil", 20, 10000, 15000);
+    let inv_id = make_inventory_item(&conn, &biz, "OIL-001", "Cooking Oil", 20, 10000, 15000);
     let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 3);
     let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
 
@@ -107,7 +105,7 @@ fn test_repeated_partial_refunds_correctly_accumulate() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "SOAP-001", "Bar Soap", 100, 1000, 1500);
+    let inv_id = make_inventory_item(&conn, &biz, "SOAP-001", "Bar Soap", 100, 1000, 1500);
     let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 10);
     let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
 

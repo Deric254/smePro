@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard';
 import PointOfSale from './pages/PointOfSale';
 import ServiceSale from './pages/ServiceSale';
 import Customers from './pages/Customers';
+import StockTakePage from './pages/StockTake';
 import Sidebar from './components/Sidebar';
 import AiFloatingButton from './components/AiFloatingButton';
 import UpdateChecker from './components/UpdateChecker';
@@ -154,9 +155,20 @@ export default function App() {
           // instead, with no inventory dependency, and still gets a
           // real receipt out of it (receipt.rs only cares about the
           // shared order_id, not how the rows were created).
-          modules.some((m) => m.id === 'inventory' && m.enabled) ? <PointOfSale /> : <ServiceSale />
+          modules.some((m) => m.id === 'inventory' && m.enabled) ? (
+            <PointOfSale
+              onNavigateToBranding={() => {
+                setAdminTab('business');
+                setSelected('__admin__');
+              }}
+            />
+          ) : (
+            <ServiceSale />
+          )
         ) : selected === '__customers__' ? (
           <Customers />
+        ) : selected === '__stocktake__' ? (
+          <StockTakePage />
         ) : selected ? (
           <ModuleView moduleId={selected} />
         ) : (

@@ -217,7 +217,7 @@ function PermissionEditor({ role, onClose }: { role: Role; onClose: () => void }
       </div>
       <ErrorBox error={error} />
       <label>Module</label>
-      <select value={moduleId} onChange={(e) => setModuleId(e.target.value)} style={{ marginBottom: '0.8rem' }}>
+      <select value={moduleId} onChange={(e) => setModuleId(e.target.value)} style={{ width: 'auto', marginBottom: '0.8rem' }}>
         <option value="">Choose a module…</option>
         {modules.map((m) => <option key={m.id} value={m.id}>{m.display_name}</option>)}
       </select>
@@ -1252,7 +1252,7 @@ function AuditLogTab() {
       </p>
       <div style={{ marginBottom: '0.8rem' }}>
         <label>Filter by module</label>
-        <select value={moduleFilter} onChange={(e) => setModuleFilter(e.target.value)} style={{ marginLeft: '0.6rem' }}>
+        <select value={moduleFilter} onChange={(e) => setModuleFilter(e.target.value)} style={{ width: 'auto', marginLeft: '0.6rem' }}>
           <option value="">All</option>
           {moduleOptions.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>

@@ -60,9 +60,14 @@ const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
 /// keeping it out of the `sessions` table means there's never a moment
 /// where a half-finished login looks like a valid one to any other
 /// code path that queries `sessions`.
-static PENDING: OnceLock<Mutex<HashMap<String, (String, String, Instant)>>> = OnceLock::new();
+/// A pending 2FA token's stored value: (user_id, business_id,
+/// issued_at). Named purely to satisfy clippy's type-complexity lint —
+/// no behavior change from the bare tuple this replaces.
+type PendingEntry = (String, String, Instant);
 
-fn pending_store() -> &'static Mutex<HashMap<String, (String, String, Instant)>> {
+static PENDING: OnceLock<Mutex<HashMap<String, PendingEntry>>> = OnceLock::new();
+
+fn pending_store() -> &'static Mutex<HashMap<String, PendingEntry>> {
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

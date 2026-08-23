@@ -79,6 +79,7 @@ export default function Sidebar({
   }
 
   const enabledModules = modules.filter((m) => m.enabled);
+  const inventoryEnabled = modules.some((m) => m.id === 'inventory' && m.enabled);
   // A module stays visible in its group even while collapsed, IF it's
   // the one currently open — collapsing "Operations" while you're
   // sitting inside Inventory shouldn't make Inventory disappear from
@@ -140,6 +141,24 @@ export default function Sidebar({
           </span>
           <span>Customers</span>
         </button>
+
+        {inventoryEnabled && (
+          <button
+            onClick={() => select('__stocktake__')}
+            style={{ ...styles.item, ...(selected === '__stocktake__' ? styles.itemActive : {}) }}
+          >
+            <span
+              className="stamp-badge"
+              style={{
+                width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
+                color: selected === '__stocktake__' ? 'var(--stamp)' : 'var(--ink-faint)',
+              }}
+            >
+              #
+            </span>
+            <span>Stock Take</span>
+          </button>
+        )}
 
         <button
           onClick={() => { onOpenAi(); onCloseMobile?.(); }}

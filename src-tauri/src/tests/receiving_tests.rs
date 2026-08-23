@@ -9,14 +9,14 @@ fn test_food_business(conn: &mut rusqlite::Connection) -> String {
 // cost_cents/price_cents are integer minor units (e.g. 2000 = $20.00),
 // matching the "money" field type's on-the-wire and on-disk
 // representation everywhere in the app now — see money.rs.
-fn make_inventory_item(conn: &mut rusqlite::Connection, biz: &str, uid: &str, sku: &str, name: &str, qty: i64, cost_cents: i64, price_cents: i64) -> String {
-    let mut item = serde_json::Map::new();
-    item.insert("sku".into(), serde_json::json!(sku));
-    item.insert("name".into(), serde_json::json!(name));
-    item.insert("quantity".into(), serde_json::json!(qty));
-    item.insert("unit_cost".into(), serde_json::json!(cost_cents));
-    item.insert("unit_price".into(), serde_json::json!(price_cents));
-    crate::crud::create(conn, biz, uid, "inventory", &item).unwrap()
+//
+// Delegates to common.rs's seed_inventory_item() rather than
+// crud::create() directly: every inventory item created through
+// create() is now forced to start at zero stock (see crud.rs), so a
+// test needing pre-existing stock to receive more against has to seed
+// it the same way a real bulk catalog migration would.
+fn make_inventory_item(conn: &rusqlite::Connection, biz: &str, sku: &str, name: &str, qty: i64, cost_cents: i64, price_cents: i64) -> String {
+    seed_inventory_item(conn, biz, sku, name, qty, cost_cents, price_cents)
 }
 
 fn make_purchase_order(conn: &mut rusqlite::Connection, biz: &str, uid: &str, inv_id: &str, item_name: &str, qty: i64, unit_cost_cents: i64) -> String {
@@ -36,7 +36,7 @@ fn test_receiving_computes_real_weighted_average_cost() {
     let (uid, _) = test_owner(&mut conn, &biz);
 
     // 50 on hand at $20.00 (2000 cents) each.
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "SUGAR-001", "Sugar", 50, 2000, 3000);
+    let inv_id = make_inventory_item(&conn, &biz, "SUGAR-001", "Sugar", 50, 2000, 3000);
     // Receiving 50 more, this time at $30.00 (3000 cents) each (price went up).
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Sugar", 50, 3000);
 
@@ -57,7 +57,7 @@ fn test_first_receipt_on_zero_stock_takes_the_new_cost_exactly() {
     let (uid, _) = test_owner(&mut conn, &biz);
 
     // Zero on hand -- a brand new item, or one that was fully sold out.
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "RICE-002", "Basmati Rice", 0, 0, 0);
+    let inv_id = make_inventory_item(&conn, &biz, "RICE-002", "Basmati Rice", 0, 0, 0);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Basmati Rice", 40, 4550);
 
     let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
@@ -73,14 +73,14 @@ fn test_partial_delivery_receives_less_than_ordered() {
     let biz = test_food_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "OIL-002", "Sunflower Oil", 10, 10000, 15000);
+    let inv_id = make_inventory_item(&conn, &biz, "OIL-002", "Sunflower Oil", 10, 10000, 15000);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Sunflower Oil", 100, 11000);
 
     // Ordered 100, only 60 actually arrived.
     let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: Some(60) };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
-    assert_eq!(result["partial_delivery"].as_bool().unwrap(), true);
+    assert!(result["partial_delivery"].as_bool().unwrap());
     assert_eq!(result["new_stock_level"].as_i64().unwrap(), 70); // 10 + 60
 }
 
@@ -90,7 +90,7 @@ fn test_cannot_receive_the_same_purchase_order_twice() {
     let biz = test_food_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "SALT-001", "Salt", 20, 500, 800);
+    let inv_id = make_inventory_item(&conn, &biz, "SALT-001", "Salt", 20, 500, 800);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Salt", 30, 600);
 
     let first = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None };
@@ -115,7 +115,7 @@ fn test_weighted_average_rounds_to_nearest_cent_on_uneven_division() {
     // (10*1000 + 7*1333) / 17 = (10000 + 9331) / 17 = 19331 / 17 =
     // 1137.117... which must round to 1137, not truncate to 1136 the
     // way plain integer division would.
-    let inv_id = make_inventory_item(&mut conn, &biz, &uid, "FLOUR-001", "Flour", 10, 1000, 1500);
+    let inv_id = make_inventory_item(&conn, &biz, "FLOUR-001", "Flour", 10, 1000, 1500);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Flour", 7, 1333);
 
     let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
@@ -136,7 +136,7 @@ fn test_purchase_order_without_inventory_link_is_rejected() {
     po.insert("quantity".into(), serde_json::json!(10));
     po.insert("unit_cost".into(), serde_json::json!(500));
     // Deliberately no inventory_record_id.
-    let po_id = crate::crud::create(&mut conn, &biz, &uid, "purchasing", &po).unwrap();
+    let po_id = crate::crud::create(&conn, &biz, &uid, "purchasing", &po).unwrap();
 
     let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
     assert!(crate::receiving::receive(&mut conn, &biz, &uid, req).is_err());

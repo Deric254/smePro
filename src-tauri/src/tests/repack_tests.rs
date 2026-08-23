@@ -1,14 +1,12 @@
 use super::common::*;
 use serde_json::json;
 
-fn make_inventory_item(conn: &mut rusqlite::Connection, biz: &str, uid: &str, sku: &str, name: &str, qty: i64, cost_cents: i64, price_cents: i64) -> String {
-    let mut item = serde_json::Map::new();
-    item.insert("sku".into(), json!(sku));
-    item.insert("name".into(), json!(name));
-    item.insert("quantity".into(), json!(qty));
-    item.insert("unit_cost".into(), json!(cost_cents));
-    item.insert("unit_price".into(), json!(price_cents));
-    crate::crud::create(conn, biz, uid, "inventory", &item).unwrap()
+fn make_inventory_item(conn: &rusqlite::Connection, biz: &str, sku: &str, name: &str, qty: i64, cost_cents: i64, price_cents: i64) -> String {
+    // Delegates to seed_inventory_item() — crud::create() now forces
+    // inventory to start at zero stock, so a test needing pre-existing
+    // stock to repack against has to seed it like a real bulk catalog
+    // migration would.
+    seed_inventory_item(conn, biz, sku, name, qty, cost_cents, price_cents)
 }
 
 fn get_item(conn: &rusqlite::Connection, biz: &str, uid: &str, id: &str) -> serde_json::Value {
@@ -28,8 +26,8 @@ fn test_repack_a_dozen_eggs_into_singles_produces_the_exact_correct_cost() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let dozen_id = make_inventory_item(&mut conn, &biz, &uid, "EGGS-DOZEN", "Eggs (dozen)", 5, 300, 400);
-    let single_id = make_inventory_item(&mut conn, &biz, &uid, "EGGS-SINGLE", "Eggs (single)", 0, 0, 20);
+    let dozen_id = make_inventory_item(&conn, &biz, "EGGS-DOZEN", "Eggs (dozen)", 5, 300, 400);
+    let single_id = make_inventory_item(&conn, &biz, "EGGS-SINGLE", "Eggs (single)", 0, 0, 20);
 
     let req = crate::repack::RepackRequest {
         source_record_id: dozen_id.clone(),
@@ -66,8 +64,8 @@ fn test_repack_blends_with_existing_target_stock_at_a_different_cost() {
 
     // 10kg sack costing 1000 cents, broken into loose kg already
     // holding 5kg at 90 cents/kg.
-    let sack_id = make_inventory_item(&mut conn, &biz, &uid, "RICE-SACK", "Rice (10kg sack)", 3, 1000, 1500);
-    let loose_id = make_inventory_item(&mut conn, &biz, &uid, "RICE-LOOSE", "Rice (loose kg)", 5, 90, 120);
+    let sack_id = make_inventory_item(&conn, &biz, "RICE-SACK", "Rice (10kg sack)", 3, 1000, 1500);
+    let loose_id = make_inventory_item(&conn, &biz, "RICE-LOOSE", "Rice (loose kg)", 5, 90, 120);
 
     let req = crate::repack::RepackRequest {
         source_record_id: sack_id,
@@ -91,8 +89,8 @@ fn test_repack_cannot_consume_more_than_available_stock() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let dozen_id = make_inventory_item(&mut conn, &biz, &uid, "EGGS-D2", "Eggs (dozen)", 2, 300, 400);
-    let single_id = make_inventory_item(&mut conn, &biz, &uid, "EGGS-S2", "Eggs (single)", 0, 0, 20);
+    let dozen_id = make_inventory_item(&conn, &biz, "EGGS-D2", "Eggs (dozen)", 2, 300, 400);
+    let single_id = make_inventory_item(&conn, &biz, "EGGS-S2", "Eggs (single)", 0, 0, 20);
 
     let req = crate::repack::RepackRequest {
         source_record_id: dozen_id.clone(),
@@ -115,7 +113,7 @@ fn test_repack_rejects_same_source_and_target() {
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
-    let id = make_inventory_item(&mut conn, &biz, &uid, "SELF-001", "Self", 10, 100, 150);
+    let id = make_inventory_item(&conn, &biz, "SELF-001", "Self", 10, 100, 150);
 
     let req = crate::repack::RepackRequest {
         source_record_id: id.clone(),

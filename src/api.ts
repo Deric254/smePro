@@ -271,6 +271,53 @@ export const repackStock = (req: {
   target_record_id: string; target_quantity_produced: number; notes?: string;
 }) => request('/inventory/repack', { method: 'POST', body: JSON.stringify(req) });
 
+// ---- Stock Take: initiate -> count -> close. See stock_take.rs. ----
+export interface StockTakeItem {
+  id: string;
+  inventory_record_id: string;
+  item_name: string;
+  expected_qty: number;
+  counted_qty: number | null;
+}
+export interface StockTake {
+  id: string;
+  status: 'in_progress' | 'closed';
+  created_at: string;
+  closed_at: string | null;
+  items: StockTakeItem[];
+}
+export interface StockTakeSummary {
+  id: string;
+  status: 'in_progress' | 'closed';
+  created_at: string;
+  closed_at: string | null;
+  item_count: number;
+  counted_count: number;
+}
+export interface StockTakeCloseResult {
+  stock_take_id: string;
+  items_counted: number;
+  items_skipped: number;
+  total_variance_units: number;
+  adjustments: { inventory_record_id: string; item_name: string; expected_qty: number; counted_qty: number; variance: number }[];
+  skipped: { inventory_record_id: string; item_name: string; expected_qty: number }[];
+}
+export const initiateStockTake = (): Promise<StockTake> =>
+  request('/inventory/stocktake/initiate', { method: 'POST' });
+export const getOpenStockTake = (): Promise<{ open: StockTake | null }> =>
+  request('/inventory/stocktake/open');
+export const getStockTake = (id: string): Promise<StockTake> =>
+  request(`/inventory/stocktake/${id}`);
+export const getStockTakeHistory = (): Promise<{ stock_takes: StockTakeSummary[] }> =>
+  request('/inventory/stocktake/history');
+export const recordStockTakeCount = (stockTakeId: string, itemId: string, countedQty: number) =>
+  request('/inventory/stocktake/count', {
+    method: 'POST',
+    body: JSON.stringify({ stock_take_id: stockTakeId, item_id: itemId, counted_qty: countedQty }),
+  });
+export const closeStockTake = (stockTakeId: string): Promise<StockTakeCloseResult> =>
+  request(`/inventory/stocktake/${stockTakeId}/close`, { method: 'POST' });
+
 // ---- Settling a debt/credit record. See debt_settlement.rs. ----
 export interface SettleDebtSummary {
   debt_record_id: string; party_name: string; direction: string; amount: number;

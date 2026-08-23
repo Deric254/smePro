@@ -52,7 +52,14 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
         for f in &module.fields {
             if f.field_type == "integer" || f.field_type == "real" || f.field_type == "money" {
                 let points = report::run(
-                    conn, business_id, user_id, &module_id, Some(&f.name), "sum", Dimension::None, None, None,
+                    conn, business_id, user_id, &module_id,
+                    report::ReportQuery {
+                        measure_field: Some(&f.name),
+                        aggregation: "sum",
+                        dimension: Dimension::None,
+                        range_start: None,
+                        range_end: None,
+                    },
                 );
                 if let Ok(points) = points {
                     if let Some(p) = points.first() {

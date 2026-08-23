@@ -1,9 +1,9 @@
 //! Schema migration system — idempotent, transactional, version-tracked.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 10;
+const CURRENT_VERSION: i32 = 11;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -30,7 +30,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 8 { v8_money_to_cents(conn)?; }
     if current < 9 { v9_ai_chat_history(conn)?; }
     if current < 10 { v10_customers_name_only(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 10, "bump this alongside the last `if current < N` check above");
+    if current < 11 { v11_stock_takes(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 11, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -395,6 +396,159 @@ fn v10_customers_name_only(conn: &mut Connection) -> Result<()> {
     )?;
 
     tx.execute("INSERT INTO _schema_version (version) VALUES (10)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Adds the Stock Take feature: a dedicated initiate → count → close
+/// workflow for reconciling physical stock counts against what the
+/// system thinks is on the shelf, distinct from (and complementary to)
+/// the Excel bulk-import reconciliation path — this one is a guided,
+/// point-in-time, per-item counting session with its own audit trail
+/// and variance report, for a business that wants to do a real
+/// walk-the-floor count rather than re-upload a spreadsheet.
+///
+/// Only one stock take can be open (`status = 'in_progress'`) per
+/// business at a time — enforced by the partial unique index below,
+/// not just application logic, so a second `initiate()` call racing
+/// against the first fails at the database level regardless of what
+/// bug might exist in the Rust code calling it. A stock take counting
+/// against a moving, simultaneously-open second count would make
+/// "what does this variance even mean" ambiguous — there's no clean
+/// way to attribute a quantity change to one count or the other, so
+/// this is prevented outright rather than allowed and reasoned about
+/// after the fact.
+///
+/// THE REAL GAP THIS ALSO CLOSES, beyond the new tables: this app
+/// stores each business's module definition (including which actions
+/// are enabled for the Roles screen) as a SNAPSHOT in
+/// `modules.schema_json`, captured once when that module was first
+/// turned on — not read live from this crate's bundled
+/// `modules/inventory.json` on every request (see crud.rs's
+/// `load_module`). That means simply adding `"stocktake"` to
+/// `inventory.json`'s `actions` and `default_roles` only affects a
+/// business enabling Inventory for the very first time AFTER this
+/// version ships — every business that already has Inventory enabled
+/// today would silently never see the new action at all: not in the
+/// Roles screen's checkbox list, and not granted to their existing
+/// Owner/Manager roles, since `rbac::seed_default_roles` also only
+/// ever runs once, at enable time. Both parts of that gap are patched
+/// here, for every business that already has inventory enabled:
+///  1. `modules.schema_json` is rewritten to add "stocktake" to its
+///     stored `actions` list, if it isn't already there (so the Roles
+///     screen can even show the checkbox).
+///  2. Existing `Owner` and `Manager` roles (matched by name, the same
+///     heuristic `seed_default_roles` itself already uses — a purely
+///     cosmetic default, not an authorization rule, since an Owner can
+///     freely rename or reconfigure roles afterward either way) are
+///     directly granted the `stocktake` permission on `inventory`,
+///     since there's no "first enable" moment left to seed it at.
+fn v11_stock_takes(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS stock_takes (
+            id                  TEXT PRIMARY KEY,
+            business_id         TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            status              TEXT NOT NULL DEFAULT 'in_progress' CHECK (status IN ('in_progress','closed')),
+            created_by_user_id  TEXT NOT NULL,
+            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+            closed_at           TEXT,
+            closed_by_user_id   TEXT
+        )",
+        [],
+    )?;
+    // Enforced at the database level, not just in application code —
+    // see the module doc comment above for why a second concurrent
+    // stock take is prevented outright rather than reasoned about
+    // after the fact.
+    tx.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_takes_one_open_per_business
+         ON stock_takes(business_id) WHERE status = 'in_progress'",
+        [],
+    )?;
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stock_takes_business
+         ON stock_takes(business_id, created_at)",
+        [],
+    )?;
+
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS stock_take_items (
+            id                   TEXT PRIMARY KEY,
+            stock_take_id        TEXT NOT NULL REFERENCES stock_takes(id) ON DELETE CASCADE,
+            inventory_record_id  TEXT NOT NULL,
+            item_name            TEXT NOT NULL,
+            expected_qty         INTEGER NOT NULL,
+            counted_qty          INTEGER,
+            counted_at           TEXT
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stock_take_items_stock_take
+         ON stock_take_items(stock_take_id)",
+        [],
+    )?;
+
+    // --- Backfill for businesses that already have inventory enabled ---
+    let existing_inventory: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT business_id, schema_json FROM modules WHERE id = 'inventory' AND enabled = 1",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    for (business_id, schema_json) in existing_inventory {
+        // Part 1: patch the stored schema snapshot so the Roles screen
+        // can show "stocktake" as a real, checkable action for this
+        // business, not just for businesses onboarding from today
+        // onward.
+        let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+            Ok(v) => v,
+            Err(_) => continue, // corrupt snapshot pre-dating this migration is out of scope to repair here; leave it untouched rather than risk making it worse
+        };
+        let mut changed = false;
+        if let Some(actions) = parsed.get_mut("actions").and_then(|a| a.as_array_mut()) {
+            if !actions.iter().any(|a| a.as_str() == Some("stocktake")) {
+                actions.push(serde_json::Value::String("stocktake".to_string()));
+                changed = true;
+            }
+        }
+        if changed {
+            let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+            tx.execute(
+                "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'inventory'",
+                rusqlite::params![new_json, business_id],
+            )?;
+        }
+
+        // Part 2: grant the permission directly to this business's
+        // existing Owner/Manager roles — the one-time seeding function
+        // that would normally do this has already run, for this
+        // business, in the past; there's no "enable" moment left to
+        // hook into.
+        for role_name in ["Owner", "Manager"] {
+            let role_id: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM roles WHERE business_id = ?1 AND name = ?2",
+                    rusqlite::params![business_id, role_name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(role_id) = role_id {
+                tx.execute(
+                    "INSERT INTO permissions (id, role_id, module_id, action)
+                     VALUES (lower(hex(randomblob(16))), ?1, 'inventory', 'stocktake')
+                     ON CONFLICT(role_id, module_id, action) DO NOTHING",
+                    rusqlite::params![role_id],
+                )?;
+            }
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (11)", [])?;
     tx.commit()?;
     Ok(())
 }

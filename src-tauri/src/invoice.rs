@@ -163,15 +163,15 @@ fn transition_status(
         |r| r.get(0),
     ).map_err(|_| anyhow!("invoice not found"))?;
 
-    let valid = match (current.as_str(), new_status) {
-        ("draft", "sent") => true,
-        ("draft", "cancelled") => true,
-        ("sent", "paid") => true,
-        ("sent", "overdue") => true,
-        ("sent", "cancelled") => true,
-        ("overdue", "paid") => true,
-        _ => false,
-    };
+    let valid = matches!(
+        (current.as_str(), new_status),
+        ("draft", "sent")
+            | ("draft", "cancelled")
+            | ("sent", "paid")
+            | ("sent", "overdue")
+            | ("sent", "cancelled")
+            | ("overdue", "paid")
+    );
     if !valid {
         return Err(anyhow!("cannot change invoice status from '{}' to '{}'", current, new_status));
     }

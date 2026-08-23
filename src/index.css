@@ -186,6 +186,24 @@ input, select {
   border-radius: var(--radius-card);
   background: #fff;
   color: var(--ink);
+  /* This was the actual cause of the "dropdown overflow/wrapping"
+     look: with no width set here, a <select> falls back to sizing
+     itself off its widest <option> text — one field in a form grid
+     ending up wider than its neighbors, or overflowing its own grid
+     cell entirely, purely because that particular item's name (or a
+     long unit/currency label) happened to be long. Half the selects
+     in this codebase had already been individually patched with an
+     inline `width: '100%'` to work around exactly this; the other
+     half hadn't. Setting it once, here, makes every ordinary form
+     field — input or select — fill its container by default,
+     consistently, everywhere, matching what most of them were
+     already doing by hand. A handful of intentionally-compact,
+     standalone controls (a "filter by module" dropdown, a per-row
+     role picker in a table) opt back OUT of this with their own
+     `width: 'auto'`, so the default here is "fill the field" and the
+     exception is explicit in that control's own code, not accidental
+     in this one. */
+  width: 100%;
 }
 input:focus, select:focus { border-color: var(--stamp); }
 

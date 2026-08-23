@@ -40,3 +40,9 @@ mod receiving_tests;
 mod refund_tests;
 #[cfg(test)]
 mod repack_tests;
+#[cfg(test)]
+mod receipt_branding_tests;
+#[cfg(test)]
+mod report_tests;
+#[cfg(test)]
+mod stock_take_tests;

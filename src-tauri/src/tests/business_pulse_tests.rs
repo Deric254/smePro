@@ -86,14 +86,10 @@ fn test_low_stock_count_reflected_in_recommendations() {
     seed_sale(&conn, &business_id, 10000, "2026-01-15 10:00:00");
     seed_sale(&conn, &business_id, 10000, "2026-02-10 10:00:00");
 
-    let mut item = serde_json::Map::new();
-    item.insert("sku".into(), serde_json::json!("LOW-001"));
-    item.insert("name".into(), serde_json::json!("Almost Out"));
-    item.insert("quantity".into(), serde_json::json!(1));
-    item.insert("reorder_level".into(), serde_json::json!(5));
-    item.insert("unit_cost".into(), serde_json::json!(100));
-    item.insert("unit_price".into(), serde_json::json!(200));
-    crate::crud::create(&mut conn, &business_id, &user_id, "inventory", &item).unwrap();
+    let inv_id = seed_inventory_item(&conn, &business_id, "LOW-001", "Almost Out", 1, 100, 200);
+    let mut reorder_patch = serde_json::Map::new();
+    reorder_patch.insert("reorder_level".into(), serde_json::json!(5));
+    crate::crud::update(&conn, &business_id, &user_id, "inventory", &inv_id, &reorder_patch, false).unwrap();
 
     let pulse = business_pulse::compute(&conn, &business_id, &user_id);
     assert_eq!(pulse.low_stock_count, 1);
@@ -105,10 +101,10 @@ fn test_never_panics_on_a_business_with_no_sales_module_enabled() {
     // A business type that never enabled "sales" at all (e.g. one
     // still mid-onboarding) must degrade gracefully, not panic the
     // whole chat response over an optional performance summary.
-    let mut conn = test_db();
-    let business_id = crate::business_panel::create_business(&mut conn, "No Sales Yet", "USD", "UTC").unwrap();
+    let conn = test_db();
+    let business_id = crate::business_panel::create_business(&conn, "No Sales Yet", "USD", "UTC").unwrap();
     let hash = crate::auth::hash_secret("password123").unwrap();
-    let user_id = crate::business_panel::add_user(&mut conn, &business_id, "owner", &hash, "Owner").unwrap();
+    let user_id = crate::business_panel::add_user(&conn, &business_id, "owner", &hash, "Owner").unwrap();
 
     let pulse = business_pulse::compute(&conn, &business_id, &user_id);
     assert!(!pulse.has_data);

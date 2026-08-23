@@ -105,7 +105,7 @@ fn send_via_twilio(channel: &str, recipient: &str, message: &str) -> Result<Stri
     let response = agent
         .post(&url)
         .set("Authorization", &format!("Basic {basic_auth}"))
-        .send_form(&[("From", &from_addr), ("To", &to_addr), ("Body", &message.to_string())]);
+        .send_form(&[("From", &from_addr), ("To", &to_addr), ("Body", message)]);
 
     match response {
         Ok(resp) => Ok(resp.into_string()?),

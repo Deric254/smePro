@@ -93,23 +93,36 @@ pub struct ReportPoint {
     pub value: f64,
 }
 
-/// Runs a report: SUM/COUNT/AVG of `measure_field` (ignored for Count),
-/// optionally grouped by a time bucket or category field, optionally
-/// filtered to a date range on `time_field`. Every piece of this is
-/// derived from the module's own field list at request time — this
-/// function has never heard of "inventory" or "sales" specifically,
-/// which is what lets one reporting engine serve every module.
+/// Bundles every "what shape should this report take" parameter into
+/// one value. Purely to keep `run()`'s own argument count reasonable —
+/// `conn`/`business_id`/`user_id`/`module_id` stay as their own
+/// parameters since they answer a different question (who's asking,
+/// about what data) than this struct does (what shape the answer
+/// should take). No behavior change from the equivalent five bare
+/// parameters this replaces.
+pub struct ReportQuery<'a> {
+    pub measure_field: Option<&'a str>,
+    pub aggregation: &'a str,
+    pub dimension: Dimension<'a>,
+    pub range_start: Option<&'a str>,
+    pub range_end: Option<&'a str>,
+}
+
+/// Runs a report: SUM/COUNT/AVG of `query.measure_field` (ignored for
+/// Count), optionally grouped by a time bucket or category field,
+/// optionally filtered to a date range on `time_field`. Every piece of
+/// this is derived from the module's own field list at request time —
+/// this function has never heard of "inventory" or "sales"
+/// specifically, which is what lets one reporting engine serve every
+/// module.
 pub fn run(
     conn: &Connection,
     business_id: &str,
     user_id: &str,
     module_id: &str,
-    measure_field: Option<&str>,
-    aggregation: &str,
-    dimension: Dimension,
-    range_start: Option<&str>,
-    range_end: Option<&str>,
+    query: ReportQuery,
 ) -> Result<Vec<ReportPoint>> {
+    let ReportQuery { measure_field, aggregation, dimension, range_start, range_end } = query;
     rbac::require(conn, user_id, module_id, "read")?;
 
     let schema_json: String = conn.query_row(
@@ -201,7 +214,16 @@ pub fn run(
     let mut stmt = conn.prepare(&sql)?;
     let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
-        let label: String = row.get(0)?;
+        // A category-dimension grouping field can be genuinely NULL —
+        // e.g. sales.payment_method is optional (see pos.rs), so a
+        // sale with no method recorded groups into SQL's own NULL
+        // bucket. That's a completely normal, valid group, not an
+        // error: reading it straight into a non-nullable String used
+        // to fail the entire report the moment any row had an unset
+        // value for the field being grouped on. "(not set)" gives that
+        // real group a real, non-empty label a chart can show, instead
+        // of every other group's data being unreachable because of it.
+        let label: String = row.get::<_, Option<String>>(0)?.unwrap_or_else(|| "(not set)".to_string());
         // SUM()/AVG() over zero matching rows is SQL NULL, not 0 — a
         // completely normal, valid result (e.g. "revenue today" before
         // the first sale of the day), not an error condition. Reading

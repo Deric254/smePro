@@ -1,9 +1,19 @@
 import { useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
 import { runReport, getBusinessInfo } from '../api';
 import TimeSlicer, { defaultRange } from './TimeSlicer';
 import type { DateRange } from './TimeSlicer';
 import { formatMoney } from '../lib/money';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LabelList,
+  PieChart, Pie, Cell,
+} from 'recharts';
+
+// A small, fixed palette reused across every chart on this page —
+// deliberately not derived from data (e.g. hashing a label to a
+// color), so the same payment method or item always reads the same
+// color if it happens to appear in more than one chart.
+const PALETTE = ['var(--stamp)', '#7c9885', '#c98a4b', '#5b7b9a', '#a15c5c', '#8a7ca8'];
 
 type Bucket = 'day' | 'week' | 'month';
 
@@ -53,6 +63,8 @@ export default function AnalyticsSection() {
   const [orderCount, setOrderCount] = useState<number | null>(null);
   const [avgSale, setAvgSale] = useState<number | null>(null);
   const [series, setSeries] = useState<{ label: string; value: number }[]>([]);
+  const [topItems, setTopItems] = useState<{ label: string; value: number }[]>([]);
+  const [paymentMix, setPaymentMix] = useState<{ label: string; value: number }[]>([]);
   const [bucket, setBucket] = useState<Bucket>('day');
   const [loading, setLoading] = useState(true);
   const [currency, setCurrency] = useState('USD');
@@ -74,15 +86,26 @@ export default function AnalyticsSection() {
       runReport('sales', { agg: 'count', dimension: 'none', start: range.start, end: range.end }),
       runReport('sales', { agg: 'avg', measure: 'revenue', dimension: 'none', start: range.start, end: range.end }),
       runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'time', field: 'created_at', bucket, start: range.start, end: range.end }),
+      // Already sorted DESC by the aggregate on the backend (see
+      // report.rs's Category dimension) — top sellers first, no
+      // client-side sort needed, just slice to a chart-sized top N.
+      runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'category', field: 'item_name', start: range.start, end: range.end }),
+      runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'category', field: 'payment_method', start: range.start, end: range.end }),
     ])
-      .then(([rev, count, avg, trend]) => {
+      .then(([rev, count, avg, trend, items, payments]) => {
         if (cancelled) return;
         setRevenue(rev.report?.[0]?.value ?? 0);
         setOrderCount(count.report?.[0]?.value ?? 0);
         setAvgSale(avg.report?.[0]?.value ?? 0);
         setSeries((trend.report ?? []).map((p: { label: string; value: number }) => ({ label: p.label, value: p.value })));
+        setTopItems((items.report ?? []).slice(0, 6));
+        // "(not set)" is report.rs's own label for a group with no
+        // value for the field being grouped on (e.g. a sale with no
+        // payment_method recorded) — already a real, non-empty string
+        // from the backend, nothing to substitute here.
+        setPaymentMix((payments.report ?? []).map((p: { label: string; value: number }) => ({ label: p.label, value: p.value })));
       })
-      .catch(() => { if (!cancelled) { setRevenue(0); setOrderCount(0); setAvgSale(0); setSeries([]); } })
+      .catch(() => { if (!cancelled) { setRevenue(0); setOrderCount(0); setAvgSale(0); setSeries([]); setTopItems([]); setPaymentMix([]); } })
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => { cancelled = true; };
@@ -108,7 +131,7 @@ export default function AnalyticsSection() {
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No sales in this period yet.</div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={series}>
+            <BarChart data={series} margin={{ top: 18 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" />
               <XAxis
                 dataKey="label"
@@ -123,10 +146,91 @@ export default function AnalyticsSection() {
                 labelFormatter={(v) => formatBucketLabel(bucket, String(v))}
                 formatter={(v) => [formatMoney(Number(v), currency), 'Revenue']}
               />
-              <Bar dataKey="value" fill="var(--stamp)" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="value" fill="var(--stamp)" radius={[3, 3, 0, 0]}>
+                <LabelList
+                  dataKey="value"
+                  position="top"
+                  formatter={(v: ReactNode) => formatMoney(Number(v), currency)}
+                  style={{ fontSize: 10, fill: 'var(--ink-soft)' }}
+                />
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         )}
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+          gap: '0.8rem',
+          marginTop: '0.9rem',
+        }}
+      >
+        <div className="card" style={{ height: 260 }}>
+          <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem' }}>Top sellers by revenue</div>
+          {loading ? (
+            <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
+          ) : topItems.length === 0 ? (
+            <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No sales in this period yet.</div>
+          ) : (
+            <ResponsiveContainer width="100%" height="90%">
+              <BarChart data={topItems} layout="vertical" margin={{ left: 8, right: 40 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v) => formatMoney(v, currency)} />
+                <YAxis
+                  type="category"
+                  dataKey="label"
+                  width={110}
+                  tick={{ fontSize: 11, fill: 'var(--ink-soft)' }}
+                />
+                <Tooltip
+                  contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
+                  formatter={(v) => [formatMoney(Number(v), currency), 'Revenue']}
+                />
+                <Bar dataKey="value" fill="var(--stamp)" radius={[0, 3, 3, 0]}>
+                  <LabelList
+                    dataKey="value"
+                    position="right"
+                    formatter={(v: ReactNode) => formatMoney(Number(v), currency)}
+                    style={{ fontSize: 10, fill: 'var(--ink-soft)' }}
+                  />
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        <div className="card" style={{ height: 260 }}>
+          <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem' }}>Revenue by payment method</div>
+          {loading ? (
+            <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
+          ) : paymentMix.length === 0 ? (
+            <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No sales in this period yet.</div>
+          ) : (
+            <ResponsiveContainer width="100%" height="90%">
+              <PieChart>
+                <Pie
+                  data={paymentMix}
+                  dataKey="value"
+                  nameKey="label"
+                  innerRadius={40}
+                  outerRadius={80}
+                  label={(props: { name?: string; percent?: number }) => `${props.name ?? ''} ${((props.percent ?? 0) * 100).toFixed(0)}%`}
+                  labelLine={false}
+                >
+                  {paymentMix.map((entry, i) => (
+                    <Cell key={entry.label} fill={PALETTE[i % PALETTE.length]} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
+                  formatter={(v) => formatMoney(Number(v), currency)}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -9,7 +9,7 @@ fn test_totp_setup_and_verify_enables_2fa() {
     let setup = crate::totp::generate_secret(&conn, &uid, "owner").unwrap();
     assert_eq!(setup.recovery_codes.len(), 10);
 
-    assert!(crate::totp::status(&conn, &uid).unwrap().enabled == false);
+    assert!(!crate::totp::status(&conn, &uid).unwrap().enabled);
 
     // Compute a real, currently-valid code from the freshly generated
     // secret the same way an authenticator app would, rather than

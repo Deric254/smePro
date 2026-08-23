@@ -17,6 +17,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// The columns pulled from a sale row when looking one up for a refund:
+/// (item_name, quantity, order_id, customer, <reserved/unused>). Named
+/// here purely to satisfy clippy's type-complexity lint on a bare
+/// 5-tuple — no behavior change, just a label for what was already
+/// being destructured immediately below.
+type SaleRow = (String, i64, Option<String>, Option<String>, Option<String>);
+
 #[derive(Debug, Deserialize)]
 pub struct RefundRequest {
     pub sale_id: String,
@@ -70,7 +77,7 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
 
     let tx = conn.transaction()?;
 
-    let sale_row: Option<(String, i64, Option<String>, Option<String>, Option<String>)> = tx
+    let sale_row: Option<SaleRow> = tx
         .query_row(
             &format!(
                 "SELECT item_name, quantity, order_id, customer, NULL

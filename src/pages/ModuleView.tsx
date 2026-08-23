@@ -28,9 +28,24 @@ import InvoiceView from '../components/InvoiceView';
 // comment calls out the same limitation receiving.rs does — this
 // hides the field from the intended path, it can't forbid a raw API
 // call from a role that still holds "update").
+//
+// inventory's `quantity` is the same category of field, but stricter
+// still: every inventory item starts at zero stock, full stop, on
+// BOTH create and edit — sell (pos.rs), receive (receiving.rs), refund
+// (refund.rs), and repack (repack.rs) are the only paths that should
+// ever move a stock level, each with its own oversell/floor
+// protections a plain field edit doesn't have. Unlike
+// `received`/`settled`, this one doesn't even need the `isEditing`
+// distinction — there's no legitimate caller-supplied opening count on
+// this form; stock enters the system exactly one way, by Purchasing
+// receiving an order. The real enforcement lives server-side in
+// crud.rs (`create()` forces quantity to 0; `is_single_record_edit_blocked_field`
+// blocks it on update); hiding the input here is just so nobody sees a
+// field they can't actually change.
 function isActionManagedField(moduleId: string, fieldName: string): boolean {
   return (moduleId === 'purchasing' && fieldName === 'received')
-    || (moduleId === 'debt_credit' && fieldName === 'settled');
+    || (moduleId === 'debt_credit' && fieldName === 'settled')
+    || (moduleId === 'inventory' && fieldName === 'quantity');
 }
 
 // Reads a File into a bare base64 string (no "data:...;base64," prefix
@@ -466,6 +481,16 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             <form onSubmit={handleSubmit} className="card" style={styles.form}>
               {editingId !== null && (
                 <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginBottom: '0.6rem' }}>Editing record</div>
+              )}
+              {editingId !== null && moduleId === 'inventory' && (
+                <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginBottom: '0.6rem' }}>
+                  Stock quantity isn't edited here — use Sell, Receive (via Purchasing), or Repack to change how much is in stock.
+                </div>
+              )}
+              {editingId === null && moduleId === 'inventory' && (
+                <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginBottom: '0.6rem' }}>
+                  New items start at 0 in stock — receive them through Purchasing to bring stock in.
+                </div>
               )}
               <div style={styles.formGrid}>
                 {moduleId === 'purchasing' && (

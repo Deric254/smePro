@@ -60,7 +60,7 @@ fn test_excel_import_updates_existing_record_by_key_field() {
     record.insert("quantity".into(), json!(5));
     record.insert("unit_cost".into(), json!(1000));
     record.insert("unit_price".into(), json!(1500));
-    crate::crud::create(&mut conn, &biz, &uid, "inventory", &record).unwrap();
+    crate::crud::create(&conn, &biz, &uid, "inventory", &record).unwrap();
 
     // Re-importing the same SKU with a corrected price must UPDATE the
     // existing row, not create a duplicate.

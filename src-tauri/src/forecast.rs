@@ -32,11 +32,13 @@ pub fn moving_average_forecast(
         business_id,
         user_id,
         module_id,
-        Some(measure),
-        "sum",
-        Dimension::Time { field: "created_at", bucket: time_bucket },
-        None,
-        None,
+        report::ReportQuery {
+            measure_field: Some(measure),
+            aggregation: "sum",
+            dimension: Dimension::Time { field: "created_at", bucket: time_bucket },
+            range_start: None,
+            range_end: None,
+        },
     )?;
 
     let values: Vec<f64> = history.iter().map(|p| p.value).collect();
@@ -73,11 +75,13 @@ pub fn exponential_smoothing_forecast(
         business_id,
         user_id,
         module_id,
-        Some(measure),
-        "sum",
-        Dimension::Time { field: "created_at", bucket: time_bucket },
-        None,
-        None,
+        report::ReportQuery {
+            measure_field: Some(measure),
+            aggregation: "sum",
+            dimension: Dimension::Time { field: "created_at", bucket: time_bucket },
+            range_start: None,
+            range_end: None,
+        },
     )?;
 
     let values: Vec<f64> = history.iter().map(|p| p.value).collect();
