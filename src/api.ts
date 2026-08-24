@@ -325,6 +325,21 @@ export interface SettleDebtSummary {
 }
 export const settleDebt = (debtRecordId: string): Promise<SettleDebtSummary> =>
   request('/debt_credit/settle', { method: 'POST', body: JSON.stringify({ debt_record_id: debtRecordId }) });
+export interface DebtSummary {
+  owed_to_business_unpaid: number;
+  owed_to_business_unpaid_count: number;
+  owed_by_business_unpaid: number;
+  owed_by_business_unpaid_count: number;
+  overdue_amount: number;
+  overdue_count: number;
+  due_soon_amount: number;
+  due_soon_count: number;
+}
+// Real totals over the WHOLE Debt & Credit table (see
+// debt_settlement::summary on the backend) — deliberately not derived
+// from listRecords('debt_credit'), which caps at 1000 rows and would
+// silently undercount for a business with more open debt than that.
+export const getDebtSummary = (): Promise<DebtSummary> => request('/debt_credit/summary');
 export const getModuleSchema = (moduleId: string) => request(`/modules/${moduleId}/schema`);
 export const listRecords = (moduleId: string, search?: string) =>
   request(`/modules/${moduleId}/records${search ? `?search=${encodeURIComponent(search)}` : ''}`);
@@ -475,7 +490,7 @@ export const deleteCurrency = (currencyId: string) => request(`/currencies/${cur
 // nudging the owner to refresh, rather than hitting the external
 // exchange-rate API on every page load). Amounts are integer minor
 // units (cents) — see money.rs.
-export interface CurrencyRate { from_currency: string; to_currency: string; rate: number; fetched_at: string }
+export interface CurrencyRate { from_currency: string; to_currency: string; rate: number; fetched_at: number }
 export const getCurrencyRates = (base: string): Promise<{ rates: CurrencyRate[]; stale: boolean }> =>
   request(`/currency/rates?base=${encodeURIComponent(base)}`);
 export const convertCurrency = (from: string, to: string, amountCents: number): Promise<{ result: number }> =>

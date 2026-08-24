@@ -192,10 +192,27 @@ pub fn import(
                     Err(e) => errors.push(json!({"row": row_num, "error": e.to_string()})),
                 }
             }
-            None => match crud::insert_validated_record(&tx, business_id, module, &record) {
-                Ok(_) => created += 1,
-                Err(e) => errors.push(json!({"row": row_num, "error": e.to_string()})),
-            },
+            None => {
+                // Same "never sell at a loss" rule crud::create()/update()
+                // enforce for the single-record form — a new inventory
+                // item created via spreadsheet import is just as capable
+                // of carrying a bad price as one typed in by hand, and
+                // this insert path calls insert_validated_record()
+                // directly rather than crud::create(), so it doesn't get
+                // that check for free.
+                if module.id == "inventory" {
+                    let unit_cost = record.get("unit_cost").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let unit_price = record.get("unit_price").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if unit_price < unit_cost {
+                        errors.push(json!({"row": row_num, "error": "selling price cannot be lower than the cost price — this would sell at a loss"}));
+                        continue;
+                    }
+                }
+                match crud::insert_validated_record(&tx, business_id, module, &record) {
+                    Ok(_) => created += 1,
+                    Err(e) => errors.push(json!({"row": row_num, "error": e.to_string()})),
+                }
+            }
         }
     }
 

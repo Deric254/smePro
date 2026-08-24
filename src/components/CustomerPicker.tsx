@@ -67,7 +67,13 @@ export default function CustomerPicker({
 
   return (
     <div style={{ display: 'flex', gap: '0.6rem', position: 'relative' }}>
-      <div style={{ flex: 1 }}>
+      {/* minWidth: 0 overrides the browser's intrinsic min-width on
+          text inputs (~170-200px), which otherwise refuses to shrink
+          below that even inside a flex:1 parent — in the 320px-wide
+          POS cart panel that pushed these two fields into an overflow
+          or a forced wrap instead of the intended single left/right
+          row. */}
+      <div style={{ flex: 1, minWidth: 0 }}>
         <label>Customer name (optional)</label>
         <input
           value={name}
@@ -76,7 +82,7 @@ export default function CustomerPicker({
           style={{ width: '100%' }}
         />
       </div>
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
         <label>Phone (optional)</label>
         <input
           value={phone}

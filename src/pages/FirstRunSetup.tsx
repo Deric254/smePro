@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { createBusiness, setSession, restoreBackupFreshInstall, ApiError } from '../api';
 import { login } from '../api';
+import { parseBackendTimestamp } from '../lib/date';
 
 const BUSINESS_TYPES = [
   { value: 'retail', label: 'Retail / General Store' },
@@ -204,7 +205,7 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
                     <div style={{ fontSize: '0.85rem' }}>
                       <strong>{restoreFile.name}</strong>
                       {restoreFile.created_at && (
-                        <span style={{ color: 'var(--ink-soft)' }}> — backed up {new Date(restoreFile.created_at).toLocaleString()}</span>
+                        <span style={{ color: 'var(--ink-soft)' }}> — backed up {parseBackendTimestamp(restoreFile.created_at).toLocaleString()}</span>
                       )}
                     </div>
                     <label style={{ display: 'block', marginTop: '0.8rem' }}>

@@ -131,7 +131,15 @@ export default function AnalyticsSection() {
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No sales in this period yet.</div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={series} margin={{ top: 18 }}>
+            {/* Recharts' inner <svg> clips anything outside its own
+                pixel bounds (the browser's default `overflow: hidden`
+                on nested svg elements) — the previous top:18 margin
+                was too tight for the value-label text sitting above
+                the tallest bar, which is exactly what was getting cut
+                off. Room added on every side, not just the top, so a
+                wide currency-formatted label on the first/last bar
+                doesn't clip left/right either. */}
+            <BarChart data={series} margin={{ top: 26, right: 12, left: 4, bottom: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" />
               <XAxis
                 dataKey="label"
@@ -175,7 +183,12 @@ export default function AnalyticsSection() {
             <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No sales in this period yet.</div>
           ) : (
             <ResponsiveContainer width="100%" height="90%">
-              <BarChart data={topItems} layout="vertical" margin={{ left: 8, right: 40 }}>
+              {/* right:40 was sized for the value label on a
+                  medium-length bar; a long currency-formatted total
+                  on the top row (the widest bar) needs more room than
+                  that or its label clips against the SVG's right
+                  edge. */}
+              <BarChart data={topItems} layout="vertical" margin={{ top: 8, left: 8, right: 56, bottom: 4 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" horizontal={false} />
                 <XAxis type="number" tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v) => formatMoney(v, currency)} />
                 <YAxis
@@ -209,7 +222,12 @@ export default function AnalyticsSection() {
             <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No sales in this period yet.</div>
           ) : (
             <ResponsiveContainer width="100%" height="90%">
-              <PieChart>
+              {/* No margin at all previously — at the card's minimum
+                  width (280px, from the auto-fit grid above), the
+                  percentage labels sitting just outside outerRadius=80
+                  had nowhere to go but past the SVG's own edge, where
+                  they got clipped. */}
+              <PieChart margin={{ top: 16, right: 16, bottom: 16, left: 16 }}>
                 <Pie
                   data={paymentMix}
                   dataKey="value"

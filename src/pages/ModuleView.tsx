@@ -9,6 +9,7 @@ import type { NewInvoiceItem, ImportExcelResult } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
 import InvoiceView from '../components/InvoiceView';
+import DebtSummaryWidget from '../components/DebtSummary';
 
 // Some fields must only ever change through a specific, purpose-built
 // backend action — never through the generic create/edit form — because
@@ -81,6 +82,22 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [excelImporting, setExcelImporting] = useState(false);
   const [excelError, setExcelError] = useState<string | null>(null);
   const [excelResult, setExcelResult] = useState<ImportExcelResult | null>(null);
+  const [templateDownloading, setTemplateDownloading] = useState(false);
+  const [templateStatus, setTemplateStatus] = useState<string | null>(null);
+
+  async function handleDownloadTemplate() {
+    setTemplateDownloading(true);
+    setTemplateStatus(null);
+    setExcelError(null);
+    try {
+      await downloadImportTemplate(moduleId);
+      setTemplateStatus('Template downloaded.');
+    } catch (err) {
+      setExcelError(err instanceof ApiError ? err.message : 'Could not download the template');
+    } finally {
+      setTemplateDownloading(false);
+    }
+  }
 
   async function handleExcelImport() {
     if (!excelFile) return;
@@ -282,9 +299,18 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
 
+  // Bumped every time refreshRecords() runs for the Debt & Credit
+  // module, so DebtSummaryWidget above re-fetches its totals in
+  // lockstep with the records list — settle a debt, edit one, delete
+  // one, or import a batch via Excel, and the summary tiles (and the
+  // overdue alarm) update immediately alongside the table, not on the
+  // next unrelated re-render.
+  const [debtSummaryRefreshKey, setDebtSummaryRefreshKey] = useState(0);
+
   async function refreshRecords(searchTerm?: string) {
     const r = await listRecords(moduleId, searchTerm);
     setRecords(r.records);
+    if (moduleId === 'debt_credit') setDebtSummaryRefreshKey((k) => k + 1);
   }
 
   // The initial module load (above) already fetches records once for
@@ -437,6 +463,8 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
       {error && <div style={styles.error}>{error}</div>}
 
+      {moduleId === 'debt_credit' && tab === 'records' && <DebtSummaryWidget refreshKey={debtSummaryRefreshKey} />}
+
       {tab === 'records' ? (
         <>
           <div style={styles.toolbar}>
@@ -452,7 +480,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             <div style={{ display: 'flex', gap: '0.5rem' }}>
               {canExport && <button className="btn btn-outline" onClick={() => exportModule(moduleId)}>Export to Excel</button>}
               {canCreate && moduleId !== 'invoice' && (
-                <button className="btn btn-outline" onClick={() => { setShowExcelImport(true); setExcelResult(null); setExcelError(null); setExcelFile(null); }}>
+                <button className="btn btn-outline" onClick={() => { setShowExcelImport(true); setExcelResult(null); setExcelError(null); setExcelFile(null); setTemplateStatus(null); }}>
                   Import from Excel
                 </button>
               )}
@@ -691,9 +719,10 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               duplicate — this is also how to do a stock take: export, correct the counted quantities in
               the spreadsheet, then reimport.
             </p>
-            <button className="btn btn-outline" onClick={() => downloadImportTemplate(moduleId)} style={{ marginBottom: '0.8rem' }}>
-              Download template
+            <button className="btn btn-outline" onClick={handleDownloadTemplate} disabled={templateDownloading} style={{ marginBottom: '0.4rem' }}>
+              {templateDownloading ? 'Downloading…' : 'Download template'}
             </button>
+            {templateStatus && <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', marginBottom: '0.8rem' }}>{templateStatus}</div>}
 
             <label>File to import</label>
             <input

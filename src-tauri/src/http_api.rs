@@ -967,6 +967,19 @@ fn route(
         };
     }
 
+    // ---- Debt & Credit summary widget: paid/unpaid/overdue/due-soon
+    // totals for the dashboard-style card at the top of that module's
+    // screen — see debt_settlement::summary for why this is computed
+    // fresh from the whole table rather than derived from whatever
+    // page of records the generic list endpoint already has loaded.
+    if parts.as_slice() == ["debt_credit", "summary"] && *method == Method::Get {
+        let today = chrono::Utc::now().date_naive().to_string();
+        return match debt_settlement::summary(conn, &business_id, &user_id, &today) {
+            Ok(summary) => ApiResponse::Json(200, json!(summary)),
+            Err(e) => crud_error(&e),
+        };
+    }
+
     // ---- Audit log: the actual point of recording all of this is being
     // able to look at it. Owner-only — this is oversight data about
     // what every user in the business has done, not something a Staff

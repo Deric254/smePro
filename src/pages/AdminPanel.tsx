@@ -18,6 +18,7 @@ import {
 import type { AuditLogEntry, NotificationRecord, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
+import { parseBackendTimestamp } from '../lib/date';
 import BusinessBranding from '../components/BusinessBranding';
 import TwoFactorSetup from '../components/TwoFactorSetup';
 
@@ -591,7 +592,12 @@ function CurrenciesTab() {
                 <tr key={r.to_currency}>
                   <td className="mono" style={styles.td}>{r.to_currency}</td>
                   <td className="mono" style={styles.td}>{r.rate}</td>
-                  <td style={styles.td}>{new Date(r.fetched_at).toLocaleString()}</td>
+                  {/* fetched_at is Unix epoch SECONDS from the backend
+                      (currency.rs's SystemTime::…as_secs()) — JS Date
+                      expects MILLISECONDS, so this was previously
+                      rendering dates near January 1970 instead of the
+                      real fetch time. */}
+                  <td style={styles.td}>{new Date(r.fetched_at * 1000).toLocaleString()}</td>
                 </tr>
               ))}
             </tbody>
@@ -1059,7 +1065,7 @@ function BackupTab() {
       const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      const dateStamp = new Date(data.created_at).toISOString().slice(0, 10);
+      const dateStamp = parseBackendTimestamp(data.created_at).toISOString().slice(0, 10);
       a.href = url;
       a.download = `sme-pro-backup-${dateStamp}.json`;
       document.body.appendChild(a);
@@ -1171,7 +1177,7 @@ function BackupTab() {
                 <div style={{ fontSize: '0.85rem' }}>
                   <strong>{restoreFile.name}</strong>
                   {restoreFile.created_at && (
-                    <span style={{ color: 'var(--ink-soft)' }}> — backed up {new Date(restoreFile.created_at).toLocaleString()}</span>
+                    <span style={{ color: 'var(--ink-soft)' }}> — backed up {parseBackendTimestamp(restoreFile.created_at).toLocaleString()}</span>
                   )}
                 </div>
                 <label style={{ display: 'block', marginTop: '0.8rem' }}>
@@ -1277,7 +1283,7 @@ function AuditLogTab() {
             ) : (
               entries.map((e) => (
                 <tr key={e.id}>
-                  <td style={styles.td} className="mono">{new Date(e.timestamp).toLocaleString()}</td>
+                  <td style={styles.td} className="mono">{parseBackendTimestamp(e.timestamp).toLocaleString()}</td>
                   <td style={styles.td}>{e.user_id ? (users[e.user_id] ?? 'Unknown user') : 'System'}</td>
                   <td style={styles.td}>{e.module_id}</td>
                   <td style={styles.td}>{e.action}</td>
@@ -1428,7 +1434,7 @@ function NotificationsTab() {
             ) : (
               history.map((n) => (
                 <tr key={n.id}>
-                  <td style={styles.td} className="mono">{new Date(n.created_at).toLocaleString()}</td>
+                  <td style={styles.td} className="mono">{parseBackendTimestamp(n.created_at).toLocaleString()}</td>
                   <td style={styles.td}>{n.channel}</td>
                   <td style={styles.td} className="mono">{n.recipient}</td>
                   <td style={styles.td}>{n.message.length > 60 ? n.message.slice(0, 60) + '…' : n.message}</td>

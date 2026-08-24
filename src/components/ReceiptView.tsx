@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { getToken, getLogoUrl, API_BASE as API } from '../api';
 import { formatMoney } from '../lib/money';
+import { formatBackendDateTime } from '../lib/date';
 import '../styles/receipt-print.css';
 
 // unit_price, line_total, subtotal, tax_amount, total below are all
@@ -60,7 +61,7 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
       receipt.business_slogan || '',
       '',
       `Receipt #${receipt.order_id.slice(0, 8).toUpperCase()}`,
-      new Date(receipt.date).toLocaleString(),
+      formatBackendDateTime(receipt.date),
       '',
       ...lines,
       '',
@@ -122,7 +123,7 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
 
         <div style={meta}>
           <div><strong>Receipt #:</strong> {shortOrder}</div>
-          <div><strong>Date:</strong> {new Date(receipt.date).toLocaleString()}</div>
+          <div><strong>Date:</strong> {formatBackendDateTime(receipt.date)}</div>
           {receipt.customer && <div><strong>Customer:</strong> {receipt.customer}</div>}
           <div><strong>Cashier:</strong> {receipt.cashier_name}</div>
         </div>

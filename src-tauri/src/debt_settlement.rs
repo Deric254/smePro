@@ -149,3 +149,92 @@ pub fn settle(conn: &mut Connection, business_id: &str, user_id: &str, req: Sett
 
     Ok(summary)
 }
+
+/// Aggregate totals for the Debt & Credit dashboard widget — computed
+/// directly from the full table with real SQL SUM/COUNT, not from
+/// whatever page of records the generic list endpoint happens to have
+/// returned (that endpoint caps at 1000 rows; a business with more
+/// open debt records than that would get a silently wrong total from
+/// a client-side sum). "Truthful" numbers here specifically means
+/// numbers computed over every unsettled row, every time, not a
+/// cached or partial view of them.
+///
+/// `today` is passed in from the caller (http_api.rs) rather than
+/// computed here with `date('now')` in SQL, so this always compares
+/// against the exact same real, current calendar date the rest of the
+/// app is using at request time — one source of truth for "what day
+/// is it", not two clocks (the database's and the request's) that
+/// could disagree.
+#[derive(Debug, serde::Serialize)]
+pub struct DebtSummary {
+    pub owed_to_business_unpaid: i64,
+    pub owed_to_business_unpaid_count: i64,
+    pub owed_by_business_unpaid: i64,
+    pub owed_by_business_unpaid_count: i64,
+    pub overdue_amount: i64,
+    pub overdue_count: i64,
+    /// Due within the next 7 days (inclusive), not yet overdue —
+    /// the early-warning tier before something actually becomes
+    /// overdue.
+    pub due_soon_amount: i64,
+    pub due_soon_count: i64,
+}
+
+pub fn summary(conn: &Connection, business_id: &str, user_id: &str, today: &str) -> Result<DebtSummary> {
+    crate::rbac::require(conn, user_id, "debt_credit", "read")?;
+    let debt_module = crud::load_module(conn, business_id, "debt_credit")
+        .map_err(|_| anyhow!("the Debt & Credit module isn't enabled for this business"))?;
+    let table = debt_module.table_name();
+
+    let (owed_to_business_unpaid, owed_to_business_unpaid_count): (i64, i64) = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM {table}
+             WHERE business_id = ?1 AND deleted_at IS NULL AND settled = 0 AND direction = 'owed_to_business'"
+        ),
+        params![business_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    // Same interpretation of `direction` as settle() above: anything
+    // that isn't literally "owed_to_business" means the business owes
+    // someone else.
+    let (owed_by_business_unpaid, owed_by_business_unpaid_count): (i64, i64) = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM {table}
+             WHERE business_id = ?1 AND deleted_at IS NULL AND settled = 0 AND direction != 'owed_to_business'"
+        ),
+        params![business_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    let (overdue_amount, overdue_count): (i64, i64) = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM {table}
+             WHERE business_id = ?1 AND deleted_at IS NULL AND settled = 0
+             AND due_date IS NOT NULL AND due_date != '' AND due_date < ?2"
+        ),
+        params![business_id, today],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    let (due_soon_amount, due_soon_count): (i64, i64) = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM {table}
+             WHERE business_id = ?1 AND deleted_at IS NULL AND settled = 0
+             AND due_date IS NOT NULL AND due_date != '' AND due_date >= ?2 AND due_date <= date(?2, '+7 days')"
+        ),
+        params![business_id, today],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    Ok(DebtSummary {
+        owed_to_business_unpaid,
+        owed_to_business_unpaid_count,
+        owed_by_business_unpaid,
+        owed_by_business_unpaid_count,
+        overdue_amount,
+        overdue_count,
+        due_soon_amount,
+        due_soon_count,
+    })
+}

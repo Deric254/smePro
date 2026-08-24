@@ -4,6 +4,7 @@ import {
   ApiError,
 } from '../api';
 import type { StockTake, StockTakeSummary, StockTakeCloseResult } from '../api';
+import { formatBackendDateTime } from '../lib/date';
 
 export default function StockTakePage() {
   const [open, setOpen] = useState<StockTake | null>(null);
@@ -133,7 +134,7 @@ export default function StockTakePage() {
                 <tbody>
                   {history.map((h) => (
                     <tr key={h.id} style={{ borderTop: '1px solid var(--paper-line)' }}>
-                      <td style={{ padding: '0.3rem 0.5rem' }}>{h.closed_at ? new Date(h.closed_at).toLocaleString() : '—'}</td>
+                      <td style={{ padding: '0.3rem 0.5rem' }}>{h.closed_at ? formatBackendDateTime(h.closed_at) : '—'}</td>
                       <td style={{ padding: '0.3rem 0.5rem' }}>{h.counted_count} of {h.item_count}</td>
                     </tr>
                   ))}
@@ -146,7 +147,7 @@ export default function StockTakePage() {
         <>
           <div className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
             <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-              {countedCount} of {open.items.length} items counted · started {new Date(open.created_at).toLocaleString()}
+              {countedCount} of {open.items.length} items counted · started {formatBackendDateTime(open.created_at)}
             </div>
             <button className="btn btn-stamp" onClick={handleClose} disabled={closing}>
               {closing ? 'Closing…' : 'Close Stock Take'}

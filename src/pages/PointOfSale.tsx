@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { listRecords, checkout, getOrder, processRefund, getBusinessInfo, ApiError } from '../api';
 import ReceiptView from '../components/ReceiptView';
 import CustomerPicker from '../components/CustomerPicker';
@@ -114,6 +114,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       });
       setRefundSuccess(`Refunded ${refundQty} unit(s), ${formatMoney(refundAmountCents, currency)} returned.`);
       setRefundingSaleId(null);
+      if (refundRestock) refreshProducts(); // stock just changed — reflect it immediately, not on the next search keystroke
       // Re-look-up the order so the screen reflects what's now
       // actually left refundable, rather than showing stale numbers.
       const refreshed = await getOrder(orderIdInput.trim());
@@ -142,27 +143,47 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       .catch(() => {}); // default 'USD' stands if this fails — never blocks the POS screen
   }, []);
 
+  // Guards against a slow response for an OLDER product-list request
+  // overwriting the screen after a newer one has already resolved —
+  // e.g. checkout's fetch and a debounced search fetch landing back
+  // to back in the wrong order. Each call to refreshProducts stamps
+  // its own request; only the response matching the latest stamp is
+  // ever applied.
+  const productsRequestRef = useRef(0);
+
   useEffect(() => {
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      listRecords('inventory', search || undefined)
-        .then((r) => {
-          if (cancelled) return;
-          // Highest stock first by default — the products a cashier is
-          // most likely to be selling right now, front and center,
-          // without having to search for them. A search term still
-          // takes over the ordering the backend itself returns for
-          // that search, this sort only applies to the "browse
-          // everything" no-search-term view.
-          const sorted = search
-            ? r.records
-            : [...r.records].sort((a, b) => Number(b.quantity ?? 0) - Number(a.quantity ?? 0));
-          setProducts(sorted);
-        })
-        .catch(() => {});
-    }, search ? 250 : 0); // instant on initial load / cleared search, debounced while typing
-    return () => { cancelled = true; clearTimeout(timer); };
+    const timer = setTimeout(() => { refreshProducts(); }, search ? 250 : 0); // instant on initial load / cleared search, debounced while typing
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
+
+  // Pulled out of the debounced useEffect above so a completed
+  // checkout (or refund) can call it directly, right after the
+  // change, instead of only ever re-running on the next keystroke in
+  // the search box. Before this, the product grid kept showing
+  // PRE-sale stock quantities until something else happened to touch
+  // `search` — ringing up the same item twice in a row could show it
+  // as still in stock when it had just sold out seconds earlier, only
+  // caught for real by the backend's own stock check at the next
+  // checkout, not reflected on screen until then.
+  function refreshProducts() {
+    const requestId = ++productsRequestRef.current;
+    return listRecords('inventory', search || undefined)
+      .then((r) => {
+        if (requestId !== productsRequestRef.current) return; // a newer request already landed
+        // Highest stock first by default — the products a cashier is
+        // most likely to be selling right now, front and center,
+        // without having to search for them. A search term still
+        // takes over the ordering the backend itself returns for
+        // that search, this sort only applies to the "browse
+        // everything" no-search-term view.
+        const sorted = search
+          ? r.records
+          : [...r.records].sort((a, b) => Number(b.quantity ?? 0) - Number(a.quantity ?? 0));
+        setProducts(sorted);
+      })
+      .catch(() => {});
+  }
 
   function addToCart(p: Record_) {
     const existing = cart.find((c) => c.inventory_record_id === p.id);
@@ -238,6 +259,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       setCustomerPhone('');
       setDueDate('');
       setOnCredit(false);
+      refreshProducts(); // stock just changed — the grid should show it now, not after the next search keystroke
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Checkout failed');
     } finally {
@@ -465,6 +487,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
         </div>
 
         <div className="card" style={styles.cartPanel}>
+        <div style={styles.cartScroll}>
           <h3 style={{ marginTop: 0 }}>Cart</h3>
           {cart.length === 0 ? (
             <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Tap a product to add it.</div>
@@ -532,12 +555,17 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
             <input type="checkbox" checked={allowOversell} onChange={(e) => setAllowOversell(e.target.checked)} />
             Allow selling more than what's in stock
           </label>
+        </div>
 
+          {/* Pinned below the scrollable area, never inside it, so the
+              checkout button (and any error blocking it) is always on
+              screen without scrolling — regardless of how long the
+              cart or the customer/payment fields above get. */}
           {error && <div style={{ background: 'var(--stamp-wash)', color: 'var(--stamp)', padding: '0.5em 0.7em', borderRadius: 3, fontSize: '0.85rem', marginTop: '0.8rem' }}>{error}</div>}
 
           <button
             className="btn btn-stamp"
-            style={{ width: '100%', justifyContent: 'center', marginTop: '1rem' }}
+            style={{ width: '100%', justifyContent: 'center', marginTop: '1rem', flexShrink: 0 }}
             disabled={cart.length === 0 || loading || (onCredit && !customer)}
             onClick={handleCheckout}
           >
@@ -553,6 +581,17 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
 const styles: Record<string, React.CSSProperties> = {
   productGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '0.7rem' },
   productTile: { textAlign: 'left', cursor: 'pointer' },
-  cartPanel: { position: 'sticky', top: '1rem' },
+  // display: flex + column so the checkout button below (a sibling of
+  // cartScroll, not a child) is laid out as a pinned footer rather
+  // than just trailing after however tall the scrollable content is.
+  // maxHeight caps the whole panel to the viewport (minus the sticky
+  // top offset and a matching bottom margin) so it's the *inner*
+  // cartScroll area that scrolls on a long cart/checkout form, not the
+  // page — the button stays on screen either way.
+  cartPanel: {
+    position: 'sticky', top: '1rem', display: 'flex', flexDirection: 'column',
+    maxHeight: 'calc(100vh - 2rem)',
+  },
+  cartScroll: { overflowY: 'auto', minHeight: 0, flex: '1 1 auto' },
   cartLine: { display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.5rem 0', borderBottom: '1px solid var(--paper-line)' },
 };

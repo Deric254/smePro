@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { listCustomers, getCustomer, getBusinessInfo } from '../api';
 import type { CustomerSummary, CustomerDetail } from '../api';
 import { formatMoney } from '../lib/money';
+import { formatBackendDate, formatBackendDateTime } from '../lib/date';
 
 export default function Customers() {
   const [customers, setCustomers] = useState<CustomerSummary[]>([]);
@@ -56,7 +57,7 @@ export default function Customers() {
                 <h1 style={{ margin: 0 }}>{detail.name || detail.phone}</h1>
                 <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
                   {detail.phone ? `${detail.phone} · ` : 'No phone on file (matched by name) · '}
-                  customer since {new Date(detail.customer_since).toLocaleDateString()}
+                  customer since {formatBackendDate(detail.customer_since)}
                 </div>
               </div>
             </div>
@@ -88,7 +89,7 @@ export default function Customers() {
                     <td style={{ padding: '0.5rem' }}>{p.item_name}</td>
                     <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{p.quantity}</td>
                     <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{formatMoney(p.revenue, currency)}</td>
-                    <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>{new Date(p.date).toLocaleString()}</td>
+                    <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>{formatBackendDateTime(p.date)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -158,7 +159,7 @@ export default function Customers() {
                 <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{c.order_count}</td>
                 <td style={{ textAlign: 'right', padding: '0.5rem', fontWeight: 600, color: 'var(--stamp)' }} className="mono">{formatMoney(c.lifetime_value, currency)}</td>
                 <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>
-                  {c.last_purchase_at ? new Date(c.last_purchase_at).toLocaleDateString() : '—'}
+                  {c.last_purchase_at ? formatBackendDate(c.last_purchase_at) : '—'}
                 </td>
               </tr>
             ))}
