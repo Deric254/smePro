@@ -321,10 +321,14 @@ export const closeStockTake = (stockTakeId: string): Promise<StockTakeCloseResul
 // ---- Settling a debt/credit record. See debt_settlement.rs. ----
 export interface SettleDebtSummary {
   debt_record_id: string; party_name: string; direction: string; amount: number;
-  settled: true; posted_to_bookkeeping_as: 'income' | 'expense' | null;
+  settled: true; payment_method: string; posted_to_bookkeeping_as: 'income' | 'expense' | null;
 }
-export const settleDebt = (debtRecordId: string): Promise<SettleDebtSummary> =>
-  request('/debt_credit/settle', { method: 'POST', body: JSON.stringify({ debt_record_id: debtRecordId }) });
+// payment_method is required — the backend rejects a blank one (see
+// debt_settlement::settle). A settlement is a real cash event; how it
+// was paid is a known fact by the time anyone is settling it, not
+// something that should ever land in the ledger as "(not set)".
+export const settleDebt = (debtRecordId: string, paymentMethod: string): Promise<SettleDebtSummary> =>
+  request('/debt_credit/settle', { method: 'POST', body: JSON.stringify({ debt_record_id: debtRecordId, payment_method: paymentMethod }) });
 export interface DebtSummary {
   owed_to_business_unpaid: number;
   owed_to_business_unpaid_count: number;

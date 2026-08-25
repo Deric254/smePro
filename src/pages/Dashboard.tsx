@@ -1,6 +1,7 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting } from '../api';
+import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary } from '../api';
 import type { ModuleListItem } from '../types';
+import type { DebtSummary } from '../api';
 import { formatMoney } from '../lib/money';
 
 // Lazy-loaded specifically because it's the only thing in the app that
@@ -47,6 +48,11 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
   const [userCount, setUserCount] = useState<number | null>(null);
   const [checklistDismissed, setChecklistDismissed] = useState<boolean | null>(null);
   const [currency, setCurrency] = useState('USD');
+  // null = not fetched yet / module not enabled / no permission — the
+  // KPI card below only renders once this is a real object, so an
+  // in-progress or failed fetch never shows a wrong or half-formed
+  // number.
+  const [debtSummary, setDebtSummary] = useState<DebtSummary | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -89,6 +95,11 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
     // and that's fine, the dashboard just quietly shows less.
     listUsers().then((r) => { if (!cancelled) setUserCount(r.users.filter((u: { active: boolean }) => u.active).length); }).catch(() => {});
     getSettings().then((s) => { if (!cancelled) setChecklistDismissed(s.onboarding_dismissed === 'true'); }).catch(() => { if (!cancelled) setChecklistDismissed(false); });
+    // Also best-effort: fails silently (module not enabled, or this
+    // role lacks "read" on it) and the KPI card below just doesn't
+    // render — same as every module tile already does when its own
+    // metric fetch fails.
+    getDebtSummary().then((d) => { if (!cancelled) setDebtSummary(d); }).catch(() => {});
 
     return () => { cancelled = true; };
   }, []);
@@ -107,6 +118,8 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
         <div style={styles.eyebrow}>Welcome back</div>
         <h1 style={{ margin: '0.15rem 0 0' }}>{businessName || 'Your business'}</h1>
       </div>
+
+      {debtSummary && <DebtStandingKpi data={debtSummary} currency={currency} onOpen={() => onSelectModule('debt_credit')} />}
 
       {stats.some((s) => s.module.id === 'sales') && (
         <Suspense fallback={<div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem', marginBottom: '1.6rem' }}>Loading analytics…</div>}>
@@ -168,6 +181,58 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
         </div>
       )}
     </div>
+  );
+}
+
+// Answers the one question "debt standing" actually means, at a
+// glance, with no ambiguity: net position (owed to you minus what you
+// owe — positive means you're net owed money, negative means you owe
+// more than you're owed) and an unmissable overdue alarm if anything
+// has actually gone past its due date. Both numbers come straight from
+// debt_settlement::summary — real SQL SUM/COUNT over the whole table,
+// not a client-side estimate — so this is the same truthful total
+// shown on the Debt & Credit module's own summary tiles, just
+// distilled to the single figure that matters most from the
+// dashboard.
+function DebtStandingKpi({ data, currency, onOpen }: { data: DebtSummary; currency: string; onOpen: () => void }) {
+  const netPosition = data.owed_to_business_unpaid - data.owed_by_business_unpaid;
+  const hasOverdue = data.overdue_count > 0;
+  const openCount = data.owed_to_business_unpaid_count + data.owed_by_business_unpaid_count;
+
+  return (
+    <button
+      className="card"
+      onClick={onOpen}
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
+        width: '100%', textAlign: 'left', cursor: 'pointer', marginBottom: '1.2rem',
+        ...(hasOverdue ? { borderColor: 'var(--stamp)', background: 'var(--stamp-wash)' } : {}),
+      }}
+    >
+      <div>
+        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          Debt standing
+        </div>
+        <div style={{ fontSize: '1.7rem', fontWeight: 700, marginTop: '0.15rem' }}>
+          {netPosition >= 0 ? '+' : '−'}{formatMoney(Math.abs(netPosition), currency)}
+        </div>
+        <div style={{ fontSize: '0.82rem', color: 'var(--ink-soft)', marginTop: '0.1rem' }}>
+          {netPosition >= 0
+            ? `Net owed to you, across ${openCount} open record${openCount === 1 ? '' : 's'}`
+            : `Net you owe, across ${openCount} open record${openCount === 1 ? '' : 's'}`}
+        </div>
+      </div>
+      {hasOverdue ? (
+        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+          <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--stamp)', display: 'flex', alignItems: 'center', gap: '0.3rem', justifyContent: 'flex-end' }}>
+            <span aria-hidden>⚠</span> {data.overdue_count} overdue
+          </div>
+          <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--stamp)' }}>{formatMoney(data.overdue_amount, currency)}</div>
+        </div>
+      ) : (
+        <div style={{ fontSize: '0.82rem', color: 'var(--ok)', fontWeight: 600, flexShrink: 0 }}>Nothing overdue</div>
+      )}
+    </button>
   );
 }
 

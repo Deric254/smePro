@@ -222,6 +222,14 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         debt_record.insert("amount".into(), json!(subtotal));
         debt_record.insert("settled".into(), json!(false));
         debt_record.insert("notes".into(), json!(format!("Credit sale, POS order {order_id}")));
+        // Structured pointer back to the sale this debt came from —
+        // the notes text above is for a human reading the record, this
+        // is for settle() to actually find and update the matching
+        // sales row's payment_method once the debt is paid off (see
+        // debt_settlement.rs). Kept as its own field rather than
+        // parsed back out of `notes` because notes is free text a
+        // person can edit later; this isn't.
+        debt_record.insert("source_order_id".into(), json!(order_id));
         if let Some(d) = &req.due_date {
             debt_record.insert("due_date".into(), json!(d));
         }
@@ -259,6 +267,9 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             entry.insert("entry_type".into(), json!("income"));
             entry.insert("category".into(), json!("Sales"));
             entry.insert("amount".into(), json!(subtotal));
+            if let Some(p) = &req.payment_method {
+                entry.insert("payment_method".into(), json!(p));
+            }
             for f in &accounting_module.fields {
                 if !entry.contains_key(&f.name) {
                     if let Some(d) = &f.default {

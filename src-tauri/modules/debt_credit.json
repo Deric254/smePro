@@ -29,6 +29,16 @@
       "default": false
     },
     {
+      "name": "payment_method",
+      "type": "text",
+      "required": false
+    },
+    {
+      "name": "source_order_id",
+      "type": "text",
+      "required": false
+    },
+    {
       "name": "notes",
       "type": "text",
       "required": false

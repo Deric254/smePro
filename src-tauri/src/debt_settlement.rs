@@ -51,6 +51,16 @@ use serde_json::{json, Value};
 #[derive(Debug, Deserialize)]
 pub struct SettleDebtRequest {
     pub debt_record_id: String,
+    /// How the money actually moved — required, not optional: a
+    /// settlement IS a real cash event (see the module doc comment
+    /// above), and leaving this blank is exactly the "(not set)"
+    /// ambiguity report.rs's own comment already has to work around
+    /// for sales.payment_method. A credit sale's payment_method is
+    /// honestly unset AT THE TIME OF SALE — that's a true fact, not a
+    /// gap to fix. But by the time someone is settling it, the actual
+    /// payment method is a known, real fact, and there's no reason for
+    /// it to stay a blank in the ledger.
+    pub payment_method: String,
 }
 
 /// Runs the whole settlement as one atomic transaction: marks the
@@ -63,23 +73,28 @@ pub fn settle(conn: &mut Connection, business_id: &str, user_id: &str, req: Sett
     // plain "update" for what is really a distinct financial action.
     crate::rbac::require(conn, user_id, "debt_credit", "settle")?;
 
+    let payment_method = req.payment_method.trim();
+    if payment_method.is_empty() {
+        return Err(anyhow!("select how this was paid before settling — a settlement must record its payment method"));
+    }
+
     let debt_module = crud::load_module(conn, business_id, "debt_credit")
         .map_err(|_| anyhow!("the Debt & Credit module isn't enabled for this business"))?;
     let debt_table = debt_module.table_name();
 
     let tx = conn.transaction()?;
 
-    let row: Option<(String, String, i64, bool)> = tx
+    let row: Option<(String, String, i64, bool, Option<String>)> = tx
         .query_row(
             &format!(
-                "SELECT party_name, direction, amount, settled
+                "SELECT party_name, direction, amount, settled, source_order_id
                  FROM {debt_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
             ),
             params![req.debt_record_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((party_name, direction, amount, already_settled)) = row else {
+    let Some((party_name, direction, amount, already_settled, source_order_id)) = row else {
         return Err(anyhow!("debt/credit record not found: {}", req.debt_record_id));
     };
 
@@ -93,9 +108,35 @@ pub fn settle(conn: &mut Connection, business_id: &str, user_id: &str, req: Sett
     }
 
     tx.execute(
-        &format!("UPDATE {debt_table} SET settled = 1, updated_at = datetime('now') WHERE id = ?1 AND business_id = ?2"),
-        params![req.debt_record_id, business_id],
+        &format!("UPDATE {debt_table} SET settled = 1, payment_method = ?3, updated_at = datetime('now') WHERE id = ?1 AND business_id = ?2"),
+        params![req.debt_record_id, business_id, payment_method],
     )?;
+
+    // Closes the exact ambiguity report.rs's own comment names: a
+    // credit sale's original sales row has payment_method = NULL
+    // (honestly — no cash had moved yet), which groups into the
+    // payment-method breakdown chart's "(not set)" bucket forever,
+    // even after the debt is fully paid off. Now that it genuinely
+    // has been paid, and we know how, the sales row that started this
+    // debt gets that real, final answer recorded on it — not a rewrite
+    // of what happened at sale time (item, quantity, price, date all
+    // stay exactly as they were), just filling in the one fact that
+    // wasn't yet knowable then. Scoped tightly: only the specific
+    // order this debt came from, and only if it's still genuinely
+    // unset, so this can never overwrite a real payment_method that
+    // (for whatever reason) already exists on that row.
+    if let Some(order_id) = &source_order_id {
+        if let Ok(sales_module) = crud::load_module(&tx, business_id, "sales") {
+            let sales_table = sales_module.table_name();
+            tx.execute(
+                &format!(
+                    "UPDATE {sales_table} SET payment_method = ?3, updated_at = datetime('now')
+                     WHERE business_id = ?1 AND order_id = ?2 AND deleted_at IS NULL AND payment_method IS NULL"
+                ),
+                params![business_id, order_id, payment_method],
+            )?;
+        }
+    }
 
     // See the module doc comment above: "owed_to_business" is the
     // only direction this codebase itself ever writes (pos.rs, a
@@ -118,6 +159,7 @@ pub fn settle(conn: &mut Connection, business_id: &str, user_id: &str, req: Sett
             entry.insert("entry_type".into(), json!(if is_income { "income" } else { "expense" }));
             entry.insert("category".into(), json!("Debt & Credit"));
             entry.insert("amount".into(), json!(amount));
+            entry.insert("payment_method".into(), json!(payment_method));
             for f in &accounting_module.fields {
                 if !entry.contains_key(&f.name) {
                     if let Some(d) = &f.default {
@@ -142,6 +184,7 @@ pub fn settle(conn: &mut Connection, business_id: &str, user_id: &str, req: Sett
         "direction": direction,
         "amount": amount,
         "settled": true,
+        "payment_method": payment_method,
         "posted_to_bookkeeping_as": if amount > 0 { Some(if is_income { "income" } else { "expense" }) } else { None },
     });
 

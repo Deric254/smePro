@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 11;
+const CURRENT_VERSION: i32 = 12;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -31,7 +31,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 9 { v9_ai_chat_history(conn)?; }
     if current < 10 { v10_customers_name_only(conn)?; }
     if current < 11 { v11_stock_takes(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 11, "bump this alongside the last `if current < N` check above");
+    if current < 12 { v12_debt_settlement_payment_method(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 12, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -549,6 +550,120 @@ fn v11_stock_takes(conn: &mut Connection) -> Result<()> {
     }
 
     tx.execute("INSERT INTO _schema_version (version) VALUES (11)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Adds the columns debt_settlement.rs's `settle` (and pos.rs's
+/// credit-sale path) now need on the shared `module_debt_credit` /
+/// `module_accounting` tables — `payment_method` and
+/// `source_order_id` on the former, `payment_method` on the latter.
+///
+/// THE SAME TWO-PART GAP v11's own doc comment already names, for the
+/// same reason: this app stores each business's module definition as
+/// a SNAPSHOT in `modules.schema_json`, captured once at enable time —
+/// not read live from this crate's bundled `modules/*.json` on every
+/// request (see crud.rs's `load_module`). Editing debt_credit.json /
+/// accounting.json only affects a business enabling those modules for
+/// the very first time after this ships. Every business that already
+/// had them enabled needs BOTH parts patched here:
+///  1. The physical columns added to the actual table (this is NOT
+///     covered by `ModuleDef::create_table`'s own
+///     `CREATE TABLE IF NOT EXISTS` — that only builds from the
+///     current schema the first time a module is enabled at all;
+///     module tables are shared across every business on an install,
+///     see `ModuleDef::table_name`, so it never runs again after
+///     that).
+///  2. The stored `modules.schema_json` snapshot itself, so
+///     `ModuleDef::validate()` and the generic create/update form
+///     both actually recognize these as real fields for this
+///     business — without this part, the columns would exist but
+///     every write to them would still be rejected as an unknown
+///     field.
+/// Skipping either part half-fixes it: columns without the schema
+/// update means "unknown field" validation errors; schema update
+/// without columns means "no such column" SQL errors. Both, together,
+/// one transaction.
+fn v12_debt_settlement_payment_method(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    // --- Part 1: physical columns ---
+    for (table, column, col_type) in [
+        ("module_debt_credit", "payment_method", "TEXT"),
+        ("module_debt_credit", "source_order_id", "TEXT"),
+        ("module_accounting", "payment_method", "TEXT"),
+    ] {
+        let table_exists: i64 = tx.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![table],
+            |r| r.get(0),
+        )?;
+        if table_exists == 0 {
+            continue; // module never enabled on this install — create_table will build it right, whenever it first is
+        }
+        // SQLite has no `ADD COLUMN IF NOT EXISTS`; PRAGMA table_info
+        // is the standard way to check first, same reasoning as the
+        // table-existence check above.
+        let already_has_column: i64 = tx.query_row(
+            &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name=?1"),
+            rusqlite::params![column],
+            |r| r.get(0),
+        )?;
+        if already_has_column == 0 {
+            tx.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {col_type}"), [])?;
+        }
+    }
+
+    // --- Part 2: schema_json snapshot backfill, same technique as v11 ---
+    let new_fields: &[(&str, &str)] = &[
+        ("payment_method", "text"),
+        ("source_order_id", "text"),
+    ];
+    for (module_id, fields_to_add) in [
+        ("debt_credit", new_fields),
+        ("accounting", &new_fields[..1]), // accounting only gets payment_method, not source_order_id
+    ] {
+        let rows: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT business_id, schema_json FROM modules WHERE id = ?1 AND enabled = 1",
+            )?;
+            let mapped = stmt.query_map(rusqlite::params![module_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (business_id, schema_json) in rows {
+            let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+                Ok(v) => v,
+                Err(_) => continue, // corrupt snapshot pre-dating this migration is out of scope to repair here; leave it untouched rather than risk making it worse
+            };
+            let mut changed = false;
+            if let Some(fields) = parsed.get_mut("fields").and_then(|f| f.as_array_mut()) {
+                for (name, field_type) in fields_to_add {
+                    let already_present = fields.iter().any(|f| f.get("name").and_then(|n| n.as_str()) == Some(*name));
+                    if !already_present {
+                        fields.push(serde_json::json!({
+                            "name": name,
+                            "type": field_type,
+                            "required": false,
+                            "unique": false,
+                            "default": null,
+                        }));
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+                tx.execute(
+                    "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = ?3",
+                    rusqlite::params![new_json, business_id, module_id],
+                )?;
+            }
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (12)", [])?;
     tx.commit()?;
     Ok(())
 }

@@ -72,7 +72,38 @@ pub fn load_module(conn: &Connection, business_id: &str, module_id: &str) -> Res
 /// (and only this one; excel_import still goes through every other
 /// validation `update()` applies, same as any other caller).
 fn is_single_record_edit_blocked_field(module_id: &str, field_name: &str) -> bool {
-    module_id == "inventory" && field_name == "quantity"
+    (module_id == "inventory" && field_name == "quantity")
+        // The doc comment above has claimed parity with these two
+        // fields since it was written, but the check itself never
+        // actually included them — a real gap between what this
+        // function's own documentation promised and what the code
+        // did. Confirmed while auditing every module for this rollout:
+        // without this, anyone holding plain "update" on purchasing or
+        // debt_credit (Manager and Staff both have it — see those
+        // modules' default_roles) could PATCH `received: true` or
+        // `settled: true` directly, completely bypassing
+        // receiving.rs's atomic stock/cost update and
+        // debt_settlement.rs's atomic Bookkeeping post — the exact
+        // "silently skip all of that" failure receiving.rs's own doc
+        // comment already calls out as the one gap its guarantee
+        // doesn't cover, except this closes it instead of just naming
+        // it. Hiding these fields from the React edit form (see
+        // ModuleView.tsx) was never enough on its own, same reasoning
+        // as inventory's `quantity` above.
+        || (module_id == "purchasing" && field_name == "received")
+        || (module_id == "debt_credit" && field_name == "settled")
+        // debt_credit's payment_method and source_order_id are
+        // system-recorded facts about HOW and FROM WHICH sale a debt
+        // was settled — set only by debt_settlement::settle() /
+        // pos.rs's credit-sale path, never hand-typed. Letting a plain
+        // edit set payment_method on an unsettled debt (or change it
+        // after the fact) would make it indistinguishable from a real
+        // settlement record without the Bookkeeping post and sales
+        // payment_method backfill that a real settlement actually
+        // performs — precisely the "ambiguous, not clear" data the
+        // Debt & Credit and payment-method-breakdown charts need to
+        // avoid.
+        || (module_id == "debt_credit" && (field_name == "payment_method" || field_name == "source_order_id"))
 }
 
 /// CREATE — validates against the module's field rules, inserts, audits.
@@ -117,6 +148,24 @@ pub fn create(
     // ad-hoc item creation through this generic form.
     if module_id == "inventory" {
         record.insert("quantity".to_string(), json!(0));
+    }
+    // A brand-new debt/credit record is, by definition, not yet
+    // settled — same "starts at a forced, correct baseline, no
+    // exceptions" treatment as inventory's quantity above, for the
+    // same reason: without this, a raw POST to this generic create
+    // endpoint could hand-create a debt already marked `settled: true`
+    // with a `payment_method` attached, with none of the atomic
+    // Bookkeeping-posting or sales-record backfill that
+    // debt_settlement::settle() actually performs — a "settlement"
+    // that never really moved any recorded cash, indistinguishable in
+    // the UI from a real one. `source_order_id` is stripped the same
+    // way: it's meant to trace a debt back to the specific POS sale
+    // that created it (see pos.rs), never a value a person types by
+    // hand.
+    if module_id == "debt_credit" {
+        record.insert("settled".to_string(), json!(false));
+        record.remove("payment_method");
+        record.remove("source_order_id");
     }
     // Hard business rule, not just a UI nicety: an inventory item can
     // never be saved with a selling price below its cost price. Both

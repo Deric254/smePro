@@ -28,6 +28,11 @@
       "required": false
     },
     {
+      "name": "payment_method",
+      "type": "text",
+      "required": false
+    },
+    {
       "name": "notes",
       "type": "text",
       "required": false

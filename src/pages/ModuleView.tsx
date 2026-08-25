@@ -46,6 +46,7 @@ import DebtSummaryWidget from '../components/DebtSummary';
 function isActionManagedField(moduleId: string, fieldName: string): boolean {
   return (moduleId === 'purchasing' && fieldName === 'received')
     || (moduleId === 'debt_credit' && fieldName === 'settled')
+    || (moduleId === 'debt_credit' && (fieldName === 'payment_method' || fieldName === 'source_order_id'))
     || (moduleId === 'inventory' && fieldName === 'quantity');
 }
 
@@ -208,6 +209,11 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [settlingId, setSettlingId] = useState<string | null>(null);
   const [settleError, setSettleError] = useState<string | null>(null);
   const [settleSubmitting, setSettleSubmitting] = useState(false);
+  // Defaults to 'cash', same as PointOfSale.tsx's own payment-method
+  // selector — matching the one other place in the app that already
+  // asks this question, rather than defaulting to a blank choice that
+  // would need an extra click before Confirm even does anything.
+  const [settlePaymentMethod, setSettlePaymentMethod] = useState('cash');
 
   useEffect(() => {
     if (moduleId === 'inventory') return; // schema.my_permissions already covers this case directly
@@ -284,7 +290,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     setSettleSubmitting(true);
     setSettleError(null);
     try {
-      const summary = await settleDebt(settlingId);
+      const summary = await settleDebt(settlingId, settlePaymentMethod);
       setActionResult(
         summary.posted_to_bookkeeping_as
           ? `Marked "${summary.party_name}" settled and posted ${formatMoney(summary.amount, businessCurrency)} to Bookkeeping as ${summary.posted_to_bookkeeping_as}.`
@@ -436,7 +442,17 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
 
-  const columns = useMemo(() => schema?.fields.map((f) => f.name) ?? [], [schema]);
+  // source_order_id is an internal traceability pointer (see pos.rs /
+  // debt_settlement.rs) — a raw UUID meaningful to the system, not to
+  // a person reading this table. Every other field on every module is
+  // shown; this is the one deliberate exception, for the same
+  // "not ambiguous, not clutter" reason payment_method IS shown: one
+  // is a real fact someone wants to see at a glance, the other is
+  // plumbing.
+  const columns = useMemo(
+    () => schema?.fields.map((f) => f.name).filter((n) => n !== 'source_order_id') ?? [],
+    [schema]
+  );
   const canDelete = schema?.my_permissions.includes('delete');
   const canExport = schema?.my_permissions.includes('export');
   const canCreate = schema?.my_permissions.includes('create');
@@ -580,7 +596,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                             </button>
                           )}
                           {canSettle && !r.settled && (
-                            <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setSettlingId(r.id); setSettleError(null); }}>
+                            <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setSettlingId(r.id); setSettleError(null); setSettlePaymentMethod('cash'); }}>
                               Settle
                             </button>
                           )}
@@ -699,6 +715,14 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               );
             })()}
             {settleError && <div style={styles.error}>{settleError}</div>}
+            <div style={{ marginTop: '0.6rem' }}>
+              <label>Payment method</label>
+              <select value={settlePaymentMethod} onChange={(e) => setSettlePaymentMethod(e.target.value)} style={{ width: '100%' }}>
+                <option value="cash">Cash</option>
+                <option value="mobile_money">Mobile money</option>
+                <option value="card">Card</option>
+              </select>
+            </div>
             <div style={styles.modalActions}>
               <button className="btn btn-outline" onClick={() => setSettlingId(null)} disabled={settleSubmitting}>Cancel</button>
               <button className="btn btn-stamp" onClick={submitSettle} disabled={settleSubmitting}>
