@@ -225,7 +225,18 @@ fn test_migration_backfills_stocktake_permission_for_a_business_that_predates_it
         "DELETE FROM permissions WHERE module_id = 'inventory' AND action = 'stocktake'",
         [],
     ).unwrap();
-    conn.execute("DELETE FROM _schema_version WHERE version = 11", []).unwrap();
+    // DELETE ...version >= 11 here, not just ...version = 11: current
+    // is computed as MAX(version) below, so simulating "pre-v11"
+    // requires clearing every version at or above it, not just the one
+    // row that happened to be the highest at the time this test was
+    // first written. Deleting only 11 stopped correctly simulating
+    // "current = 10" the moment a later migration (v12) shipped and
+    // left its own row sitting above it — MAX(version) would read
+    // back as 12, `current < 11` would be false, and v11 would never
+    // re-run, which is exactly the bug this fix closes rather than
+    // papering over: the technique itself needed to not assume 11 is
+    // the newest migration forever.
+    conn.execute("DELETE FROM _schema_version WHERE version >= 11", []).unwrap();
 
     // Confirm the rollback actually took — Owner can no longer
     // initiate a stock take, same as any genuinely pre-v11 business.
