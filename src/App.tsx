@@ -126,7 +126,20 @@ export default function App() {
       />
       <div className={`app-sidebar-backdrop${mobileMenuOpen ? ' mobile-open' : ''}`} onClick={() => setMobileMenuOpen(false)} />
 
-      <main className="app-main-content" style={{ flex: 1, padding: '1.6rem 2rem', maxWidth: 980 }}>
+      {/* maxWidth was 980 — far narrower than the 1920px-class monitor
+          these screenshots came from. Every grid on this page (the
+          KPI row, the two-chart row, the module tiles) is already
+          `repeat(auto-fit/auto-fill, minmax(...))` — capping the
+          available width that low forces them to wrap into more ROWS
+          than the actual screen has room for side by side, which is
+          the real reason the Dashboard needed scrolling: not the
+          padding, the wasted horizontal space. Widening this doesn't
+          change a single number or a single query — it just lets the
+          same grids that were already responsive actually use the
+          width they have. Padding also trimmed slightly (1.6/2rem →
+          1.2/1.6rem) — comfortable, not cramped, but no longer eating
+          more vertical space than the content itself needs. */}
+      <main className="app-main-content" style={{ flex: 1, padding: '1.2rem 1.6rem', maxWidth: 1400 }}>
         <div className="app-mobile-topbar">
           <button className="app-hamburger" onClick={() => setMobileMenuOpen(true)} aria-label="Open menu">☰</button>
           <div style={{ fontWeight: 600, flex: 1 }}>{businessName || 'SME Pro'}</div>

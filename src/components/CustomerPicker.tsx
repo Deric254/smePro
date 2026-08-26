@@ -74,7 +74,15 @@ export default function CustomerPicker({
           or a forced wrap instead of the intended single left/right
           row. */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <label>Customer name (optional)</label>
+        {/* labelBox reserves 2 lines of height regardless of how many
+            this particular label actually wraps to. Without it,
+            "Customer name (optional)" wraps to 2 lines at this width
+            while "Phone (optional)" fits on 1 — so the two inputs
+            below them landed at different heights, visibly not "one
+            line" even though the columns themselves sit side by side.
+            Reserving the same space for both labels is what actually
+            keeps the two inputs level. */}
+        <label style={styles.labelBox}>Customer name (optional)</label>
         <input
           value={name}
           onChange={(e) => { onChangeName(e.target.value); setShowDropdown(true); }}
@@ -83,7 +91,7 @@ export default function CustomerPicker({
         />
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <label>Phone (optional)</label>
+        <label style={styles.labelBox}>Phone (optional)</label>
         <input
           value={phone}
           onChange={(e) => { onChangePhone(e.target.value); setShowDropdown(true); }}
@@ -109,6 +117,11 @@ export default function CustomerPicker({
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  // 2 lines at this label's line-height, so "Customer name (optional)"
+  // wrapping to 2 lines and "Phone (optional)" fitting on 1 both
+  // reserve identical space — see the comment above where this is
+  // used for why that's what actually keeps the two inputs level.
+  labelBox: { minHeight: '2.4em', lineHeight: '1.2em' },
   dropdown: {
     position: 'absolute', top: '100%', left: 0, right: 0, marginTop: '0.2rem', zIndex: 20,
     background: 'var(--paper-card)', border: '1px solid var(--paper-line)', borderRadius: 3,

@@ -130,7 +130,7 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
       {showChecklist && (
         <div className="card" style={styles.checklistCard}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-            <h3 style={{ margin: '0 0 0.9rem' }}>Getting started</h3>
+            <h3 style={{ margin: '0 0 0.6rem' }}>Getting started</h3>
             <button className="btn btn-outline" style={styles.dismissBtn} onClick={dismissChecklist}>Dismiss</button>
           </div>
           <ChecklistItem
@@ -148,7 +148,7 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
         </div>
       )}
 
-      <h3 style={{ margin: '1.6rem 0 0.8rem' }}>Your modules</h3>
+      <h3 style={{ margin: '1rem 0 0.6rem' }}>Your modules</h3>
       {loading ? (
         <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
       ) : stats.length === 0 ? (
@@ -205,7 +205,7 @@ function DebtStandingKpi({ data, currency, onOpen }: { data: DebtSummary; curren
       onClick={onOpen}
       style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
-        width: '100%', textAlign: 'left', cursor: 'pointer', marginBottom: '1.2rem',
+        width: '100%', textAlign: 'left', cursor: 'pointer', marginBottom: '0.9rem', padding: '0.8rem 1.1rem',
         ...(hasOverdue ? { borderColor: 'var(--stamp)', background: 'var(--stamp-wash)' } : {}),
       }}
     >
@@ -254,11 +254,11 @@ function ChecklistItem({ done, label, detail, onClick }: { done: boolean; label:
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  header: { marginBottom: '1.2rem' },
+  header: { marginBottom: '0.9rem' },
   eyebrow: { fontSize: '0.72rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-soft)' },
-  checklistCard: { marginBottom: '1.2rem' },
+  checklistCard: { marginBottom: '0.9rem', padding: '0.9rem 1.1rem' },
   dismissBtn: { padding: '0.25em 0.6em', fontSize: '0.76rem' },
-  checklistItem: { display: 'flex', gap: '0.7rem', alignItems: 'flex-start', padding: '0.55rem 0' },
+  checklistItem: { display: 'flex', gap: '0.7rem', alignItems: 'flex-start', padding: '0.4rem 0' },
   checkCircle: {
     width: '1.3rem', height: '1.3rem', borderRadius: '999px', border: '1.5px solid var(--ink-faint)',
     display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', flexShrink: 0, marginTop: '0.05rem',

@@ -112,19 +112,25 @@ export default function AnalyticsSection() {
   }, [range]);
 
   return (
-    <div style={{ marginBottom: '1.6rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', marginBottom: '0.9rem' }}>
+    <div style={{ marginBottom: '1rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', marginBottom: '0.7rem' }}>
         <h3 style={{ margin: 0 }}>Business at a glance</h3>
         <TimeSlicer value={range} onChange={setRange} />
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.8rem', marginBottom: '0.9rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.7rem', marginBottom: '0.7rem' }}>
         <KpiCard label={`Revenue — ${range.label}`} value={revenue} loading={loading} format="money" currency={currency} />
         <KpiCard label="Sales" value={orderCount} loading={loading} format="count" currency={currency} />
         <KpiCard label="Average sale" value={avgSale} loading={loading} format="money" currency={currency} />
       </div>
 
-      <div className="card" style={{ height: 220 }}>
+      {/* 220 → 180: the single largest fixed height on this page.
+          Every value that used to need vertical room here (bar +
+          value-label above it) still fits — margin.top was already
+          generous (26px) specifically to stop label clipping; 180 just
+          removes the leftover slack below that, not the room the
+          labels actually need. */}
+      <div className="card" style={{ height: 180 }}>
         {loading ? (
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
         ) : series.length === 0 ? (
@@ -171,11 +177,23 @@ export default function AnalyticsSection() {
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-          gap: '0.8rem',
-          marginTop: '0.9rem',
+          gap: '0.7rem',
+          marginTop: '0.7rem',
         }}
       >
-        <div className="card" style={{ height: 260 }}>
+        {/* Same height as the pie chart card below it, deliberately —
+            they sit in the same grid row and an explicit height on a
+            grid item overrides the row's default stretch-to-match
+            behavior, so two different heights here would visibly
+            misalign the row. 220 (not the more aggressive 180/200 cut
+            used elsewhere on this page) because the OTHER card in
+            this row has fixed-pixel geometry (recharts' Pie
+            outerRadius is an absolute px value, not responsive) that
+            can't safely shrink past a certain point without clipping
+            again — see that card's own comment. This bar chart itself
+            would be fine smaller; it's kept in step with its row
+            partner instead. */}
+        <div className="card" style={{ height: 220 }}>
           <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem' }}>Top sellers by revenue</div>
           {loading ? (
             <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
@@ -214,7 +232,18 @@ export default function AnalyticsSection() {
           )}
         </div>
 
-        <div className="card" style={{ height: 260 }}>
+        {/* Same height as "Top sellers" above — see that card's own
+            comment on why these two stay matched. Reduced from 260 to
+            220, together with shrinking the Pie's own outerRadius/
+            innerRadius/margin below by the same proportion — NOT
+            reduced on its own. This chart's geometry is fixed pixels,
+            not responsive to its container the way every other chart
+            on this page is, so shrinking the card without also
+            shrinking the circle would put the percentage labels right
+            back outside the SVG's bounds — exactly the clipping bug
+            already fixed once above. Smaller circle, same safe
+            margin-to-label ratio, same guarantee. */}
+        <div className="card" style={{ height: 220 }}>
           <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem' }}>Revenue by payment method</div>
           {loading ? (
             <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
@@ -222,18 +251,18 @@ export default function AnalyticsSection() {
             <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No sales in this period yet.</div>
           ) : (
             <ResponsiveContainer width="100%" height="90%">
-              {/* No margin at all previously — at the card's minimum
-                  width (280px, from the auto-fit grid above), the
-                  percentage labels sitting just outside outerRadius=80
-                  had nowhere to go but past the SVG's own edge, where
-                  they got clipped. */}
-              <PieChart margin={{ top: 16, right: 16, bottom: 16, left: 16 }}>
+              {/* Margin shrunk from 16 to 10 in proportion with the
+                  smaller radius below — still enough room for the
+                  percentage labels sitting just outside outerRadius,
+                  just scaled down with everything else instead of
+                  left oversized for a circle that's no longer as big. */}
+              <PieChart margin={{ top: 10, right: 10, bottom: 10, left: 10 }}>
                 <Pie
                   data={paymentMix}
                   dataKey="value"
                   nameKey="label"
-                  innerRadius={40}
-                  outerRadius={80}
+                  innerRadius={28}
+                  outerRadius={58}
                   label={(props: { name?: string; percent?: number }) => `${props.name ?? ''} ${((props.percent ?? 0) * 100).toFixed(0)}%`}
                   labelLine={false}
                 >
@@ -256,7 +285,7 @@ export default function AnalyticsSection() {
 
 function KpiCard({ label, value, loading, format, currency }: { label: string; value: number | null; loading: boolean; format: 'money' | 'count'; currency: string }) {
   return (
-    <div className="card" style={{ padding: '0.9rem 1rem' }}>
+    <div className="card" style={{ padding: '0.7rem 0.9rem' }}>
       <div style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
       <div style={{ fontSize: '1.5rem', fontWeight: 600, color: 'var(--stamp)', marginTop: '0.2rem' }}>
         {loading || value === null ? '—' : format === 'money' ? formatMoney(value, currency) : value.toLocaleString()}
