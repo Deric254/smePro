@@ -76,7 +76,29 @@ async function request(path: string, options: RequestInit = {}, needsBusinessId 
   // second, independent layer of the same guarantee, on the request
   // side rather than relying solely on the server's header being
   // honored by whichever WebView engine happens to be running.
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers, cache: 'no-store' });
+  //
+  // A THIRD layer, for GET requests specifically: append a
+  // cache-busting query param, making every GET URL unique. This
+  // exists because "no-store" is a policy the CACHE has to choose to
+  // honor — most do, but Tauri's embedded WebView (WebView2 on
+  // Windows, WebKit elsewhere) is a different HTTP stack per platform
+  // than a regular desktop browser, with its own historically
+  // inconsistent record on respecting cache-control for the local
+  // fetch() calls this app makes against its own 127.0.0.1 server —
+  // and this app also supports pointing at a REMOTE host over LAN
+  // (see API_BASE above), adding a real network path with its own
+  // potential caching layers in between. A unique URL per request
+  // can't be served from a stale cache entry no matter which layer in
+  // that chain didn't honor the header — it doesn't rely on anyone's
+  // policy being followed correctly. Harmless on the backend: its own
+  // router matches routes by splitting the URL on '?' before looking
+  // at the path (see http_api.rs's query_params/route dispatch), so
+  // an extra query param it never looks for is silently ignored.
+  const method = (options.method ?? 'GET').toUpperCase();
+  const url = method === 'GET'
+    ? `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_t=${Date.now()}`
+    : `${API_BASE}${path}`;
+  const res = await fetch(url, { ...options, headers, cache: 'no-store' });
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
     try {

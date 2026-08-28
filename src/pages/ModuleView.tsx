@@ -161,6 +161,21 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       .finally(() => setLoading(false));
   }, [moduleId]);
 
+  // Same reasoning as PointOfSale.tsx's own focus listener: this page
+  // has no live push/sync mechanism telling it when something changed
+  // elsewhere — another module's action, another window, or a second
+  // device on the same LAN server (see API_BASE in api.ts). Ordinary
+  // in-app navigation away and back already remounts this component
+  // fresh with a brand new `moduleId` effect run above; this covers
+  // the gap that alone doesn't: returning focus to the window while
+  // still sitting on the same module screen the whole time.
+  useEffect(() => {
+    function onFocus() { refreshRecords(search || undefined); }
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moduleId, search]);
+
   useEffect(() => {
     if (moduleId !== 'purchasing') {
       setInventoryItems([]);

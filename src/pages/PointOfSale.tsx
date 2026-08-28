@@ -157,6 +157,28 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
+  // Stock can change from somewhere other than this screen — most
+  // commonly, a purchase getting marked "received" over on the
+  // Purchasing page — and this page has no live push/sync mechanism
+  // (no WebSocket, no polling) telling it that happened while it
+  // wasn't the active view. Ordinary in-app navigation away from POS
+  // and back already remounts this component fresh (different pages
+  // are different component types at the same spot in the tree, so
+  // React tears this one down and builds a new one — that alone
+  // re-runs the effect above from scratch). This listener is the
+  // belt to that suspenders: it also refetches whenever the window
+  // itself regains focus — switching back from another app, another
+  // window, or a second device's browser tab pointed at the same LAN
+  // server (see API_BASE in api.ts) — so stock is never more than a
+  // window-switch stale, even in a scenario the remount alone
+  // wouldn't cover.
+  useEffect(() => {
+    function onFocus() { refreshProducts(); }
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+
   // Pulled out of the debounced useEffect above so a completed
   // checkout (or refund) can call it directly, right after the
   // change, instead of only ever re-running on the next keystroke in
@@ -581,17 +603,27 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
 const styles: Record<string, React.CSSProperties> = {
   productGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '0.7rem' },
   productTile: { textAlign: 'left', cursor: 'pointer' },
-  // display: flex + column so the checkout button below (a sibling of
-  // cartScroll, not a child) is laid out as a pinned footer rather
-  // than just trailing after however tall the scrollable content is.
-  // maxHeight caps the whole panel to the viewport (minus the sticky
-  // top offset and a matching bottom margin) so it's the *inner*
-  // cartScroll area that scrolls on a long cart/checkout form, not the
-  // page — the button stays on screen either way.
+  // Grid, not flexbox, for the same "scrollable middle + pinned
+  // footer, capped to a max total height" job the previous version of
+  // this used flexbox for. That version (flex column + maxHeight +
+  // flex:1 on cartScroll) turned out not to reliably force cartScroll
+  // to actually shrink once a real cart's content — 5+ line items
+  // plus the customer/payment fields — exceeded the available space:
+  // in practice the checkout button still got pushed below the
+  // visible screen on a real device, confirmed against an actual
+  // build rather than just reasoned about. `grid-template-rows:
+  // minmax(0, 1fr) auto` is the well-established, more reliable
+  // pattern for exactly this: the `minmax(0, ...)` — not just `1fr`
+  // — is what makes the first row track actually willing to shrink
+  // below its content's natural size to fit the remaining space,
+  // instead of the row (and everything after it) just overflowing the
+  // maxHeight boundary the way the flex version did.
   cartPanel: {
-    position: 'sticky', top: '1rem', display: 'flex', flexDirection: 'column',
+    position: 'sticky', top: '1rem', display: 'grid',
+    gridTemplateRows: 'minmax(0, 1fr) auto auto',
     maxHeight: 'calc(100vh - 2rem)',
+    overflow: 'hidden', // safety net: with the grid row properly shrinking above, this should never actually need to clip anything — but it guarantees nothing can silently render past the cap either way.
   },
-  cartScroll: { overflowY: 'auto', minHeight: 0, flex: '1 1 auto' },
+  cartScroll: { overflowY: 'auto', minHeight: 0 },
   cartLine: { display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.5rem 0', borderBottom: '1px solid var(--paper-line)' },
 };
