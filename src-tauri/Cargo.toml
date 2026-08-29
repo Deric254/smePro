@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.40"
+version = "0.1.45"
 edition = "2021"
 
 [lib]
