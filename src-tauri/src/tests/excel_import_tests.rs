@@ -109,6 +109,24 @@ fn test_excel_import_reports_invalid_money_cell_as_a_clear_row_error() {
 /// "chrono" feature: ExcelDateTime alone is already enough to write a
 /// real date cell, so there's no reason to widen this project's
 /// dependency feature set just for a test fixture.
+///
+/// Deliberately applies a date-formatted `Format` via
+/// `write_datetime_with_format` rather than the plain `write_datetime`
+/// — rust_xlsxwriter only applies a date NUMBER FORMAT to a cell when
+/// one is explicitly given; a bare `write_datetime` with no format
+/// stores the exact same underlying serial number but leaves the
+/// cell's number format at General (xf_index 0). calamine's own date
+/// detection (see calamine::formats::detect_custom_number_format /
+/// builtin_format_by_id) keys off THAT number format, not the cell's
+/// storage type — so an unformatted date cell round-trips back as an
+/// ordinary Data::Float, not Data::DateTime, same as any other number.
+/// Without an explicit format here this fixture wasn't actually
+/// reproducing "a real Excel date cell" (the ordinary way anyone
+/// enters a date always carries an associated date format, whether
+/// from the date picker or a pre-formatted column) — it was silently
+/// building the untyped-number case instead, which happens to also
+/// import as Null today but for a completely different, untested
+/// reason than the one this test exists to prove closed.
 fn build_xlsx_with_date_cell(
     headers: &[&str],
     text_cells: &[(u32, u16, &str)],
@@ -124,7 +142,8 @@ fn build_xlsx_with_date_cell(
     }
     let (row, col, year, month, day) = date_cell;
     let date = rust_xlsxwriter::ExcelDateTime::from_ymd(year as u16, month, day).unwrap();
-    sheet.write_datetime(row, col, &date).unwrap();
+    let date_format = rust_xlsxwriter::Format::new().set_num_format("yyyy-mm-dd");
+    sheet.write_datetime_with_format(row, col, &date, &date_format).unwrap();
     wb.save_to_buffer().unwrap()
 }
 
