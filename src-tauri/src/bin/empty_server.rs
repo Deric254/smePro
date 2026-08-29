@@ -9,6 +9,6 @@ use core_engine::{db, http_api};
 fn main() -> Result<()> {
     let conn = db::open("erp.db")?;
     println!("[empty_server] serving with zero businesses — first-run setup flow should trigger");
-    http_api::serve(conn, "127.0.0.1:8080");
+    http_api::serve(conn, "127.0.0.1:8080").map_err(anyhow::Error::msg)?;
     Ok(())
 }

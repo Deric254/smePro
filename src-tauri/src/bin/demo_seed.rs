@@ -100,6 +100,6 @@ fn main() -> Result<()> {
     std::fs::write("seed_ids.json", serde_json::to_string_pretty(&seed)?)?;
     println!("[seed] {seed}");
 
-    http_api::serve(conn, "127.0.0.1:8080");
+    http_api::serve(conn, "127.0.0.1:8080").map_err(anyhow::Error::msg)?;
     Ok(())
 }

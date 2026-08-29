@@ -178,13 +178,48 @@ jobs:
           fi
 
   # ------------------------------------------------------------------
+  # THE ACTUAL BUG THIS FIXES: `desktop` (a 4-way matrix) and `android`
+  # both only depended on `bump-version`, so all 5 jobs started at the
+  # same time. Each one independently asks "does a release for this
+  # tag exist yet?" before creating one — but `desktop` uses
+  # tauri-apps/tauri-action and `android` uses softprops/action-gh-release,
+  # two entirely separate codebases with no coordination between them.
+  # When both check before either has finished creating the release,
+  # each concludes "no" and creates its own — producing TWO separate
+  # draft releases for the same tag, each holding only whichever
+  # assets happened to land in it, instead of one release with all of
+  # them. (The 4 desktop matrix jobs racing each other is fine —
+  # tauri-action is built for exactly that. It's specifically a
+  # *different* action running in true parallel with it that isn't
+  # coordinated.)
+  #
+  # Fix: create the draft release exactly once, here, and have every
+  # other job attach to that specific release (by id) instead of each
+  # independently finding-or-creating it by tag name.
+  # ------------------------------------------------------------------
+  create-release:
+    needs: bump-version
+    runs-on: ubuntu-24.04
+    outputs:
+      release_id: ${{ steps.create.outputs.id }}
+    steps:
+      - name: Create the draft release
+        id: create
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.bump-version.outputs.new_tag }}
+          name: "SME Pro ${{ needs.bump-version.outputs.new_tag }}"
+          body: "Automated release. See commit history for what changed."
+          draft: true
+
+  # ------------------------------------------------------------------
   # Desktop: Windows / macOS (Intel + Apple Silicon) / Linux, exactly
   # as before — now just parameterized on bump-version's output tag
   # instead of the raw push ref, so it builds the exact bumped-version
   # commit whether this run came from an auto-bump or a manual tag.
   # ------------------------------------------------------------------
   desktop:
-    needs: bump-version
+    needs: [bump-version, create-release]
     strategy:
       fail-fast: false
       matrix:
@@ -251,17 +286,32 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          # releaseId pins this to the ONE release create-release
+          # already made — tauri-action skips its own find-or-create
+          # lookup entirely once releaseId is set (its README: "If
+          # releaseId is set, the action will use this release to
+          # upload assets to"), which is what stops it from racing the
+          # android job's own release creation — see create-release's
+          # doc comment above.
+          #
+          # tagName is kept alongside it (not either/or — the action
+          # supports passing both) specifically because tauri-action's
+          # own README warns that a releaseId with no tagName makes
+          # the generated latest.json point updater downloads at
+          # `releases/latest/download/<bundle>` instead of this exact
+          # tagged release, which UpdateChecker.tsx relies on being
+          # unambiguous.
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ needs.bump-version.outputs.new_tag }}
-          releaseName: "SME Pro ${{ needs.bump-version.outputs.new_tag }}"
-          releaseBody: "Automated release. See commit history for what changed."
-          releaseDraft: true
-          prerelease: false
           args: ${{ matrix.args }}
 
   # ------------------------------------------------------------------
-  # Android: builds a real APK and attaches it to the SAME release the
-  # desktop job above creates/updates (matched by tag name — whichever
-  # job finishes first creates the release, the other attaches to it).
+  # Android: builds a real APK and attaches it to the SAME release
+  # create-release already made (by id, not by re-deriving it from the
+  # tag — see create-release's doc comment for why "whichever job
+  # finishes first creates it, the other attaches" turned out to be
+  # unsafe across two different release-management actions running in
+  # parallel).
   #
   # Uses DEBUG signing by default, which Android genuinely allows you to
   # install and run — it is NOT a placeholder or a broken build, just
@@ -273,7 +323,7 @@ jobs:
   # secret is actually set.
   # ------------------------------------------------------------------
   android:
-    needs: bump-version
+    needs: [bump-version, create-release]
     runs-on: ubuntu-24.04
     # NOTE ON ANDROID ARCHITECTURES: only building aarch64 (64-bit ARM)
     # and armv7 (32-bit ARM) — real Android phones. i686 and x86_64 are
@@ -612,9 +662,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Attach APK to the release
+        # tag_name is still required here (this action has no separate
+        # "upload to this exact release id" input) — but by this point
+        # create-release has already made the release and `needs:`
+        # guarantees this step never runs before it exists, so this
+        # finds and updates that one release rather than racing
+        # anything to create a second one.
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.bump-version.outputs.new_tag }}
-          name: "SME Pro ${{ needs.bump-version.outputs.new_tag }}"
           draft: true
           files: ${{ steps.find-apk.outputs.apk_paths }}

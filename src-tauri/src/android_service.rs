@@ -70,8 +70,27 @@ pub fn start_server_platform(conn: rusqlite::Connection, addr: &'static str, app
     }
     #[cfg(not(target_os = "android"))]
     {
+        // `serve()` used to be `.expect()`-ed at the bind step inside
+        // http_api.rs itself: a bind failure (most commonly: another
+        // instance of this app, or something else, already holding
+        // port 8080) panicked this background thread. A panic here
+        // doesn't crash the app — the Tauri window keeps running
+        // normally — it just silently kills the server thread, and
+        // with `#![windows_subsystem = "windows"]` suppressing the
+        // console on Windows, that panic message went nowhere anyone
+        // could see it. The frontend was left permanently retrying a
+        // server that would never come up, with no way to tell why.
+        //
+        // Now that `serve()` returns a `Result` instead of panicking,
+        // capture the real error here and write it to a plain-text
+        // log file in the app's own data directory — the one place
+        // guaranteed to exist and be readable without a console.
+        let app_data_dir = app_data_dir.to_path_buf();
         std::thread::spawn(move || {
-            crate::http_api::serve(conn, addr);
+            if let Err(e) = crate::http_api::serve(conn, addr) {
+                eprintln!("[api] {e}");
+                let _ = std::fs::write(app_data_dir.join("server_error.log"), &e);
+            }
         });
     }
 }
@@ -91,10 +110,14 @@ fn start_android_thread(conn: rusqlite::Connection, addr: &'static str, app_data
     // A named thread only for logcat readability — this is NOT a
     // foreground service, and Android's background execution limits
     // apply to it exactly as they would to any other thread.
+    let error_dir = app_data_dir.to_path_buf();
     std::thread::Builder::new()
         .name("smepro-api".into())
         .spawn(move || {
-            crate::http_api::serve(conn, addr);
+            if let Err(e) = crate::http_api::serve(conn, addr) {
+                eprintln!("[api] {e}");
+                let _ = std::fs::write(error_dir.join("server_error.log"), &e);
+            }
         })
         .expect("failed to spawn API server thread");
 }

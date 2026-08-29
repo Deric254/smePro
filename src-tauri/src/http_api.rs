@@ -15,8 +15,9 @@ enum ApiResponse {
     Image(u16, Vec<u8>, String), // status, bytes, mime type
 }
 
-pub fn serve(conn: Connection, addr: &str) {
-    let server = Server::http(addr).expect("failed to bind local API server");
+pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
+    let server = Server::http(addr)
+        .map_err(|e| format!("failed to bind local API server at {addr}: {e}"))?;
     let conn = Arc::new(Mutex::new(conn));
     // 5 attempts per 15-minute rolling window — generous enough that a
     // real user fumbling their password isn't locked out, tight enough
@@ -110,6 +111,7 @@ pub fn serve(conn: Connection, addr: &str) {
         });
         let _ = request.respond(http_response);
     }
+    Ok(())
 }
 
 /// CORS is wide-open (`*`). This API binds to 127.0.0.1-only in the
