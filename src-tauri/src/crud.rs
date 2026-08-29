@@ -288,12 +288,38 @@ pub fn list(
         .chain(module.fields.iter().map(|f| f.name.clone()))
         .collect();
 
+    // SQLite has no native boolean type — `value_to_sql` writes a
+    // "boolean"-typed field as INTEGER 0/1 (see its `Value::Bool(b) =>
+    // Box::new(*b as i64)` arm), and debt_settlement.rs/pos.rs etc.
+    // write/query `settled` the same way. Read back through
+    // `row.get_ref` below, that's indistinguishable from any other
+    // INTEGER column, so without this the row-to-JSON conversion two
+    // lines down would silently hand back `0`/`1` (a JSON *number*)
+    // for every boolean field instead of `false`/`true` (a JSON
+    // *bool*) — same value, wrong JSON type. That breaks anything
+    // comparing this field with `==`/`===` against a real boolean
+    // (this is exactly the shape a naive round-trip check would catch:
+    // `0 != false` in JSON) and is inconsistent with create()/update(),
+    // which both work with genuine `Value::Bool` in memory right up
+    // until `value_to_sql` converts it for storage. Fixing it here,
+    // right where every other module read already goes through the
+    // module's own field-type list, keeps this consistent with the
+    // rest of the app rather than adding a second, parallel notion of
+    // "which fields are boolean."
+    let boolean_fields: std::collections::HashSet<&str> = module
+        .fields
+        .iter()
+        .filter(|f| f.field_type == "boolean")
+        .map(|f| f.name.as_str())
+        .collect();
+
     let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         let mut obj = Map::new();
         for (i, name) in col_names.iter().enumerate() {
             let v: Value = match row.get_ref(i)? {
                 rusqlite::types::ValueRef::Null => Value::Null,
+                rusqlite::types::ValueRef::Integer(n) if boolean_fields.contains(name.as_str()) => json!(n != 0),
                 rusqlite::types::ValueRef::Integer(n) => json!(n),
                 rusqlite::types::ValueRef::Real(f) => json!(f),
                 rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
