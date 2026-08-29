@@ -94,7 +94,7 @@
      structure changes even slightly. */
   .pos-cart-panel {
     position: static !important;
-    max-height: none !important;
+    height: auto !important;
     overflow: visible !important;
   }
   /* The scrollable middle region (cart items + customer/payment

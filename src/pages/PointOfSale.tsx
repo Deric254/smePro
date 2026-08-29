@@ -603,25 +603,29 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
 const styles: Record<string, React.CSSProperties> = {
   productGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '0.7rem' },
   productTile: { textAlign: 'left', cursor: 'pointer' },
-  // Grid, not flexbox, for the same "scrollable middle + pinned
-  // footer, capped to a max total height" job the previous version of
-  // this used flexbox for. That version (flex column + maxHeight +
-  // flex:1 on cartScroll) turned out not to reliably force cartScroll
-  // to actually shrink once a real cart's content — 5+ line items
-  // plus the customer/payment fields — exceeded the available space:
-  // in practice the checkout button still got pushed below the
-  // visible screen on a real device, confirmed against an actual
-  // build rather than just reasoned about. `grid-template-rows:
-  // minmax(0, 1fr) auto` is the well-established, more reliable
-  // pattern for exactly this: the `minmax(0, ...)` — not just `1fr`
-  // — is what makes the first row track actually willing to shrink
-  // below its content's natural size to fit the remaining space,
-  // instead of the row (and everything after it) just overflowing the
-  // maxHeight boundary the way the flex version did.
+  // Grid, not flexbox, for the "scrollable middle + pinned footer,
+  // capped to a max total height" job. `minmax(0, 1fr)` on the middle
+  // row is what lets it shrink below its own content's natural size
+  // instead of pushing the rows after it (the checkout button) off
+  // screen — but that only actually works when the GRID CONTAINER
+  // itself has a definite height from the start of layout. The
+  // previous version set `maxHeight` here instead of `height`, which
+  // does not give the browser a definite size to distribute — it only
+  // clamps the box's final size after content has already been
+  // measured, by which point the 1fr row has nothing bounded to shrink
+  // against. That's exactly why more cart items kept pushing the
+  // button below the screen on a real device even with this grid in
+  // place. `height` (not `maxHeight`) is the fix — same pattern
+  // already used correctly elsewhere in this app (see the AI chat
+  // panel's `height: 460` + `flex: 1` body in AiFloatingButton.tsx).
+  // On mobile this desktop-only sizing is overridden back to `auto`
+  // (see mobile.css's `.pos-cart-panel` rule) — the cart isn't a
+  // pinned side column there, it flows in the page with a
+  // sticky-bottom checkout button instead.
   cartPanel: {
     position: 'sticky', top: '1rem', display: 'grid',
     gridTemplateRows: 'minmax(0, 1fr) auto auto',
-    maxHeight: 'calc(100vh - 2rem)',
+    height: 'calc(100vh - 2rem)',
     overflow: 'hidden', // safety net: with the grid row properly shrinking above, this should never actually need to clip anything — but it guarantees nothing can silently render past the cap either way.
   },
   cartScroll: { overflowY: 'auto', minHeight: 0 },

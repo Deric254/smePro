@@ -468,6 +468,71 @@ jobs:
                   f.write(content)
           "
 
+      - name: Add foreground service to keep the local API server alive
+        # THE GAP THIS CLOSES: android_service.rs's own doc comment
+        # flags this explicitly — the local API server this app's
+        # frontend depends on runs on a plain background thread, which
+        # Android's background execution limits (API 26+) reclaim
+        # within minutes of the app leaving the foreground, with no
+        # foreground service or persistent notification protecting it.
+        # This copies in a real Kotlin foreground service (see
+        # src-tauri/android/com/smepro/app/) and wires it to start at
+        # process launch via a custom Application subclass, rather than
+        # patching Tauri's generated MainActivity.kt directly — that
+        # file's exact template content isn't something this repo
+        # controls, so a text patch against it would be fragile across
+        # Tauri versions. A single `android:name` attribute on
+        # `<application>` is not.
+        #
+        # NOT verified against a real device/emulator — this sandbox
+        # has neither. What IS confirmed: this is standard, documented
+        # Android platform API (Service + startForeground +
+        # NotificationChannel), and the manifest edits below are
+        # idempotent regex/string patches guarded by "already patched"
+        # checks, same pattern as the network-security-config and
+        # REQUEST_INSTALL_PACKAGES steps already proven working in this
+        # same job.
+        run: |
+          JAVA_DIR="src-tauri/gen/android/app/src/main/java/com/smepro/app"
+          mkdir -p "$JAVA_DIR"
+          cp src-tauri/android/com/smepro/app/SmeProForegroundService.kt "$JAVA_DIR/"
+          cp src-tauri/android/com/smepro/app/SmeProApplication.kt "$JAVA_DIR/"
+
+          MANIFEST="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
+          python3 -c "
+          import re
+          path = '$MANIFEST'
+          with open(path) as f:
+              content = f.read()
+
+          if 'FOREGROUND_SERVICE' not in content:
+              content = re.sub(
+                  r'(<manifest\b[^>]*>)',
+                  r'\1\n    <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />'
+                  r'\n    <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_DATA_SYNC\" />',
+                  content, count=1,
+              )
+
+          if 'android:name=\".SmeProApplication\"' not in content:
+              content = re.sub(
+                  r'(<application\b)',
+                  r'\1 android:name=\".SmeProApplication\"',
+                  content, count=1,
+              )
+
+          if 'SmeProForegroundService' not in content:
+              service_tag = (
+                  '    <service android:name=\".SmeProForegroundService\" '
+                  'android:enabled=\"true\" android:exported=\"false\" '
+                  'android:foregroundServiceType=\"dataSync\" />\n'
+                  '</application>'
+              )
+              content = content.replace('</application>', service_tag, 1)
+
+          with open(path, 'w') as f:
+              f.write(content)
+          "
+
       - name: Add REQUEST_INSTALL_PACKAGES permission (needed for in-app updates)
         # See the matching comment in mobile-android.sh — this permission
         # is confirmed-correct Android API; whether tauri-plugin-opener's

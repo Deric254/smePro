@@ -2,56 +2,47 @@
 //! used to promise more than the code actually does, and that gap is
 //! the single most important thing to understand about it.
 //!
-//! WHAT THIS ACTUALLY IS TODAY:
+//! WHAT THIS FILE ACTUALLY DOES TODAY:
 //! On every platform, including Android, `start_server_platform` just
 //! spawns the HTTP server on a plain `std::thread::spawn` (or a named
 //! thread, on the Android build target — the name is only for logcat
-//! debugging, it changes nothing about how Android schedules it).
-//! There is no JNI bridge here, no `tauri-plugin-notification`
-//! dependency (none exists anywhere in Cargo.toml), no Kotlin/Java
-//! service class, no `AndroidManifest.xml` service declaration, and
-//! no `startForeground()` call — none of that exists anywhere in this
-//! repository. A previous version of this comment described that
-//! entire architecture in detail and claimed it had been stress
-//! tested against 30-minute backgrounding, low-memory conditions, and
-//! kill/restart cycles. None of that was true; the code below was
-//! never anything more than what you're reading now.
+//! debugging, it changes nothing about how Android schedules it). This
+//! Rust code itself is unchanged and still has no JNI bridge and no
+//! direct awareness of the service described below.
 //!
-//! WHY THIS MATTERS: Android 8+ (API 26+) enforces background
-//! execution limits specifically to kill exactly this pattern — a
-//! plain background thread with no foreground service and no
-//! persistent notification is reclaimed by the OS, typically within
-//! minutes of the app leaving the foreground, sometimes sooner under
-//! memory pressure. That means the HTTP API this app's own frontend
-//! depends on WILL stop responding once the user switches away from
-//! the app on a real Android device, for exactly the reason this
-//! file's original comment described as the problem — it just never
-//! actually got solved.
+//! WHY THAT USED TO MATTER (and why it's addressed, separately, now):
+//! Android 8+ (API 26+) enforces background execution limits that
+//! reclaim exactly this pattern — a plain background thread with no
+//! foreground service and no persistent notification — typically
+//! within minutes of the app leaving the foreground. A real Kotlin
+//! `Service` now exists to close this gap: see
+//! `src-tauri/android/com/smepro/app/SmeProForegroundService.kt` and
+//! `SmeProApplication.kt`, wired into the generated Android project by
+//! a CI step in `.github/workflows/release.yml` (which runs after
+//! `tauri android init` scaffolds `gen/android`, since that directory
+//! doesn't exist in this repo and is regenerated fresh on every
+//! build). The service calls `startForeground()` with a persistent,
+//! low-priority notification, which is what raises the whole
+//! process's — including this file's plain background thread's —
+//! scheduling priority so Android's background limits stop applying
+//! to it. It does NOT talk to this Rust code directly (no JNI): it
+//! doesn't need to, since raising the process's priority is enough to
+//! protect a thread that's already running.
 //!
-//! WHAT A REAL FIX REQUIRES (not attempted here — this needs native
-//! Android platform work, verified against a real device or emulator,
-//! neither of which is available in the environment these fixes were
-//! written and tested in):
-//! 1. A Kotlin `Service` subclass (typically registered through
-//!    Tauri's Android plugin mechanism — see Tauri's mobile plugin
-//!    documentation) declared in `AndroidManifest.xml` with an
-//!    appropriate `foregroundServiceType`.
-//! 2. A call to `startForeground()` with a persistent, low-priority
-//!    notification — Android requires this for a service to be
-//!    exempted from background kill limits; there's no way to keep a
-//!    background HTTP server alive on modern Android without a
-//!    notification the user can see.
-//! 3. The Rust HTTP server thread's lifecycle bound to that service,
-//!    not just spawned once and left to whatever the OS decides.
-//! 4. Real device/emulator testing of the specific scenarios this
-//!    file's comment used to claim were already covered (extended
-//!    backgrounding, low memory, force-kill/restart) — claims about
-//!    that testing should not be written again until it has actually
-//!    been done.
-//!
-//! Until that work happens, this should be treated as a known,
-//! open gap in the app's core Android reliability story — not
-//! quietly-solved infrastructure.
+//! WHAT IS AND ISN'T VERIFIED: the manifest-patching logic that wires
+//! the service in was tested directly (run against a representative
+//! sample manifest, confirmed to produce well-formed XML with the
+//! right attributes, and confirmed idempotent on a second run) — that
+//! part has real proof behind it, not just review. The Kotlin itself
+//! was written against standard, documented Android platform APIs
+//! (`Service`, `startForeground`, `NotificationChannel`) but has NOT
+//! been compiled or run — no Kotlin compiler was available in the
+//! environment this was written in. Most importantly, NOTHING here has
+//! been confirmed against a real device or emulator actually
+//! surviving extended backgrounding — that requires installing a real
+//! built APK (this repo's GitHub Actions pipeline does build and sign
+//! one for real) and testing it by hand. Don't treat this as a closed
+//! issue until that device test has actually been done.
 
 /// Starts the HTTP server. Identical behavior on every platform right
 /// now — see the module doc comment above for why the Android branch
