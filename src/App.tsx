@@ -15,6 +15,7 @@ import UpdateChecker from './components/UpdateChecker';
 import AndroidUpdateChecker from './components/AndroidUpdateChecker';
 import { hasSession, listModules, clearSession, getSetupStatus, getBusinessInfo, getSettings, logout } from './api';
 import type { ModuleListItem } from './types';
+import { retryOnConnectionFailure } from './lib/retry';
 
 export default function App() {
   const [checkingSetup, setCheckingSetup] = useState(true);
@@ -40,7 +41,7 @@ export default function App() {
   // this check.
   useEffect(() => {
     if (loggedIn) { setCheckingSetup(false); return; }
-    getSetupStatus()
+    retryOnConnectionFailure(() => getSetupStatus())
       .then((res) => setNeedsSetup(!res.has_business))
       .catch(() => setNeedsSetup(false)) // if the check itself fails, fall back to the normal login screen rather than trapping the user
       .finally(() => setCheckingSetup(false));
@@ -48,7 +49,7 @@ export default function App() {
 
   const loadModules = useCallback(async () => {
     try {
-      const res = await listModules();
+      const res = await retryOnConnectionFailure(() => listModules());
       setModules(res.modules);
       // Deliberately NOT auto-selecting the first module anymore — a
       // brand new user landing straight in an arbitrary module's raw
@@ -64,10 +65,10 @@ export default function App() {
   useEffect(() => {
     if (loggedIn) {
       loadModules();
-      getBusinessInfo().then((info) => setBusinessName(info.name)).catch(() => {});
+      retryOnConnectionFailure(() => getBusinessInfo()).then((info) => setBusinessName(info.name)).catch(() => {});
       getSettings().then((s) => {
         document.documentElement.dataset.theme = s.theme && s.theme !== 'ledger' ? s.theme : '';
-      }).catch(() => {});
+      }).catch(() => {}); // purely cosmetic (custom theme vs the default) — not worth retrying against the startup race the other three calls above guard against
     }
   }, [loggedIn, loadModules]);
 
@@ -157,7 +158,7 @@ export default function App() {
         )}
 
         {selected === '__admin__' ? (
-          <AdminPanel tab={adminTab} />
+          <AdminPanel tab={adminTab} onModulesChanged={loadModules} />
         ) : selected === '__pos__' ? (
           // PointOfSale's checkout hard-requires every line to
           // reference a real inventory record (see pos.rs) — it
@@ -192,6 +193,40 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Fixed to the viewport, not scrolled with the page content —
+          a sibling of <main>, not a child of it, is what makes that
+          possible. Purely additive alongside the hamburger drawer
+          above: every one of these four is already reachable from
+          there too (Home, Sell, and Customers are the drawer's own
+          first three items; Ask AI is the same badge already sitting
+          in the topbar) — this doesn't replace or restructure any of
+          that navigation, it just puts the handful of things someone
+          reaches for constantly within one tap, without opening the
+          drawer at all, on the platform where that drawer is the
+          only other way to navigate at all. Hidden entirely on
+          desktop (see the plain, non-media-query `.app-bottom-tabbar
+          { display: none }` rule in index.css) — the sidebar there is
+          already permanently visible, so there's no gap for this to
+          fill. */}
+      <nav className="app-bottom-tabbar">
+        <button className={!selected ? 'active' : ''} onClick={() => setSelected('')} aria-label="Home">
+          <span className="tab-icon" aria-hidden>⌂</span>
+          Home
+        </button>
+        <button className={selected === '__pos__' ? 'active' : ''} onClick={() => setSelected('__pos__')} aria-label="Sell">
+          <span className="tab-icon" aria-hidden>$</span>
+          Sell
+        </button>
+        <button className={selected === '__customers__' ? 'active' : ''} onClick={() => setSelected('__customers__')} aria-label="Customers">
+          <span className="tab-icon" aria-hidden>♥</span>
+          Customers
+        </button>
+        <button className={aiOpen ? 'active' : ''} onClick={() => setAiOpen(true)} aria-label="Ask AI">
+          <span className="tab-icon" aria-hidden>AI</span>
+          Ask AI
+        </button>
+      </nav>
 
       <AiFloatingButton open={aiOpen} onClose={() => setAiOpen(false)} />
       <UpdateChecker />

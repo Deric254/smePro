@@ -100,3 +100,145 @@ fn test_excel_import_reports_invalid_money_cell_as_a_clear_row_error() {
     let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
     assert!(!list.iter().any(|r| r["sku"] == json!("BAD-001")), "an invalid row must not be partially imported");
 }
+
+/// Same helper as build_xlsx above, but for a sheet needing one real
+/// Excel DATE cell mixed in among ordinary text cells — build_xlsx
+/// itself always calls write_string for every cell, which cannot
+/// produce this. Deliberately using rust_xlsxwriter's own
+/// ExcelDateTime type here rather than enabling that crate's optional
+/// "chrono" feature: ExcelDateTime alone is already enough to write a
+/// real date cell, so there's no reason to widen this project's
+/// dependency feature set just for a test fixture.
+fn build_xlsx_with_date_cell(
+    headers: &[&str],
+    text_cells: &[(u32, u16, &str)],
+    date_cell: (u32, u16, i32, u8, u8),
+) -> Vec<u8> {
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let sheet = wb.add_worksheet();
+    for (col, h) in headers.iter().enumerate() {
+        sheet.write_string(0, col as u16, *h).unwrap();
+    }
+    for (row, col, val) in text_cells {
+        sheet.write_string(*row, *col, *val).unwrap();
+    }
+    let (row, col, year, month, day) = date_cell;
+    let date = rust_xlsxwriter::ExcelDateTime::from_ymd(year as u16, month, day).unwrap();
+    sheet.write_datetime(row, col, &date).unwrap();
+    wb.save_to_buffer().unwrap()
+}
+
+#[test]
+fn test_excel_import_reads_a_real_excel_date_cell() {
+    // THE ACTUAL BUG: cell_to_json previously handled ONLY
+    // Data::DateTimeIso (a rare ISO-text representation) for "date"
+    // fields — a normal, real Excel-formatted date cell (the ordinary
+    // way anyone actually enters a date — pick it from the date
+    // picker, or type it into a cell already formatted as a date)
+    // comes back from calamine as the entirely different
+    // Data::DateTime(ExcelDateTime) variant, which had no case at all
+    // and fell straight through to `_ => Value::Null`. This is
+    // "sometimes a date imports as null" from the user's own report —
+    // not always, because which of the two representations you get
+    // depends on exactly how the cell was entered, and only one of
+    // them was ever handled.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let module = crate::crud::load_module(&conn, &biz, "debt_credit").unwrap();
+
+    let xlsx = build_xlsx_with_date_cell(
+        &["party_name", "direction", "amount", "due_date"],
+        &[(1, 0, "Acme Ltd"), (1, 1, "owed_to_business"), (1, 2, "500.00")],
+        (1, 3, 2026, 3, 15),
+    );
+
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "party_name").unwrap();
+    assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
+    assert_eq!(result.created, 1);
+
+    let list = crate::crud::list(&conn, &biz, &uid, "debt_credit", None, 50, 0).unwrap();
+    let row = list.iter().find(|r| r["party_name"] == json!("Acme Ltd")).unwrap();
+    assert_eq!(row["due_date"], json!("2026-03-15"), "a real Excel date cell must import as this app's usual YYYY-MM-DD string, not null");
+}
+
+#[test]
+fn test_excel_import_rejects_a_wrongly_shaped_text_date_instead_of_accepting_it_silently() {
+    // The other half of the same fix: a date typed as plain text into
+    // a "General"/"Text"-formatted cell (no date formatting applied
+    // at all) comes through as an ordinary Data::String, indistin-
+    // guishable from any other text cell — calamine has no way to
+    // know it was meant as a date. Before this fix, module.validate()
+    // only checked that a "date" field IS a string, never that it's
+    // actually shaped like one, so "31/01/2026" would have sailed
+    // straight through as a "valid" date and silently corrupted every
+    // date-range filter/sort elsewhere in the app that assumes this
+    // app's own lexicographically-sortable YYYY-MM-DD shape.
+    //
+    // cell_to_json now rejects the malformed string to Value::Null —
+    // and since that Null is inserted into the record as an explicit
+    // value (not left absent), module.validate()'s "date" case
+    // (v.is_string()) correctly fails it, same as the existing
+    // invalid-money-cell test just above rejects a garbage price: the
+    // whole row is turned away with a clear, specific error rather
+    // than a partial import silently dropping the bad value.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let module = crate::crud::load_module(&conn, &biz, "debt_credit").unwrap();
+
+    let xlsx = build_xlsx(
+        &["party_name", "direction", "amount", "due_date"],
+        &[vec!["Beta Co", "owed_by_business", "300.00", "31/01/2026"]],
+    );
+
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "party_name").unwrap();
+    assert_eq!(result.created, 0);
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0]["row"], json!(2)); // header is row 1
+
+    let list = crate::crud::list(&conn, &biz, &uid, "debt_credit", None, 50, 0).unwrap();
+    assert!(!list.iter().any(|r| r["party_name"] == json!("Beta Co")), "a row with an invalid date must not be partially imported");
+}
+
+#[test]
+fn test_excel_import_cannot_settle_a_debt_by_reimporting_a_settled_column() {
+    // THE ACTUAL BUG THIS PROVES CLOSED: crud::update()'s `bulk_import`
+    // flag (true for every excel_import.rs call, including this
+    // "update an existing row by key" path) used to bypass its ENTIRE
+    // blocked-fields list as one blanket flag — not just
+    // inventory.quantity, the one field it was actually designed for.
+    // That meant re-uploading a spreadsheet with a "settled" column
+    // could mark an existing debt settled directly, completely
+    // bypassing debt_settlement::settle()'s RBAC "settle" check, its
+    // Bookkeeping post, and its sales-record payment_method backfill —
+    // reachable by anyone holding plain "update" on debt_credit, which
+    // both Manager and Staff have by default. This must still fail,
+    // as a normal single-record edit already correctly does.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let module = crate::crud::load_module(&conn, &biz, "debt_credit").unwrap();
+
+    let mut record = serde_json::Map::new();
+    record.insert("party_name".into(), json!("Gamma Traders"));
+    record.insert("direction".into(), json!("owed_to_business"));
+    record.insert("amount".into(), json!(50000));
+    crate::crud::create(&conn, &biz, &uid, "debt_credit", &record).unwrap();
+
+    let xlsx = build_xlsx(
+        &["party_name", "direction", "amount", "settled"],
+        &[vec!["Gamma Traders", "owed_to_business", "500.00", "true"]],
+    );
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "party_name").unwrap();
+    assert_eq!(result.updated, 0);
+    assert_eq!(result.errors.len(), 1, "an update touching a blocked field must be rejected, not silently applied");
+    assert!(
+        result.errors[0]["error"].as_str().unwrap().contains("cannot be edited directly"),
+        "got: {:?}", result.errors[0]
+    );
+
+    let list = crate::crud::list(&conn, &biz, &uid, "debt_credit", None, 50, 0).unwrap();
+    let row = list.iter().find(|r| r["party_name"] == json!("Gamma Traders")).unwrap();
+    assert_eq!(row["settled"], json!(false), "settled must remain unchanged — no side channel around debt_settlement::settle()");
+}

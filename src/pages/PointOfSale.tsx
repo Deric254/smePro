@@ -508,8 +508,8 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
           </div>
         </div>
 
-        <div className="card" style={styles.cartPanel}>
-        <div style={styles.cartScroll}>
+        <div className="card pos-cart-panel" style={styles.cartPanel}>
+        <div className="pos-cart-scroll" style={styles.cartScroll}>
           <h3 style={{ marginTop: 0 }}>Cart</h3>
           {cart.length === 0 ? (
             <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Tap a product to add it.</div>
@@ -586,7 +586,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
           {error && <div style={{ background: 'var(--stamp-wash)', color: 'var(--stamp)', padding: '0.5em 0.7em', borderRadius: 3, fontSize: '0.85rem', marginTop: '0.8rem' }}>{error}</div>}
 
           <button
-            className="btn btn-stamp"
+            className="btn btn-stamp pos-checkout-btn"
             style={{ width: '100%', justifyContent: 'center', marginTop: '1rem', flexShrink: 0 }}
             disabled={cart.length === 0 || loading || (onCredit && !customer)}
             onClick={handleCheckout}

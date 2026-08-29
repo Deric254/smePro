@@ -46,6 +46,20 @@
     font-size: 16px !important; /* Prevents iOS zoom */
   }
 
+  /* Same tab-bar height this rule and the checkout button offset
+     below both need to stay in sync with — see the shared
+     --mobile-tabbar-height variable's own comment in index.css for
+     why this isn't three separately-hardcoded copies of "60px".
+     !important because this same selector already carries !important
+     from its own base rule further down (padding: 1rem !important),
+     and mixing an !important declaration with a non-!important one
+     on the same property in the same rule block is what actually
+     causes silent, confusing specificity bugs — not the !important
+     itself. */
+  .app-main-content {
+    padding-bottom: calc(1rem + var(--mobile-tabbar-height) + env(safe-area-inset-bottom)) !important;
+  }
+
   /* POS checkout: two columns (products + cart) on desktop, one
      column on phone width — see .pos-layout's base definition in
      index.css (display: grid; grid-template-columns: 1fr 320px).
@@ -55,6 +69,60 @@
      was never actually collapsing on phones before this. */
   .pos-layout {
     grid-template-columns: 1fr;
+  }
+
+  /* The cart panel's sticky-top + height-cap + internal-scroll trick
+     (see PointOfSale.tsx's cartPanel styles) was built for the
+     DESKTOP two-column layout, where the cart sits in a side column
+     next to the product grid and needs to stay pinned near the top of
+     the viewport while that neighboring column scrolls past it.
+     Collapsed to this single stacked column just above, the cart
+     isn't a side column anymore — it's simply the second block in the
+     same scroll flow, below however long the product list is. Left
+     as-is, a sticky-top panel in that position doesn't reliably keep
+     the checkout button reachable the way it does on desktop; the
+     familiar, correct mobile pattern for "always-reachable checkout"
+     is a bar pinned to the BOTTOM of the screen instead, not the top.
+     `!important` because this overrides an inline style set directly
+     in PointOfSale.tsx via the `styles.cartPanel` / `styles.cartScroll`
+     objects — the usual, ordinary reason to reach for it (a media
+     query beating a same-specificity or lower rule loaded earlier
+     isn't otherwise possible against an inline style at all). Targets
+     dedicated classNames added alongside those inline styles
+     specifically for this — not a positional selector like
+     `:last-child`, which would silently break the moment that JSX's
+     structure changes even slightly. */
+  .pos-cart-panel {
+    position: static !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  /* The scrollable middle region (cart items + customer/payment
+     fields) no longer needs its own internal scrollbar either, now
+     that the whole card flows naturally in the page's own scroll —
+     a scrollbar-within-a-scrollbar is exactly the "double scroll"
+     feeling that reads as broken/janky on a touchscreen. */
+  .pos-cart-scroll {
+    overflow: visible !important;
+    min-height: auto !important;
+  }
+  /* The checkout button is the one thing that still needs to stay
+     reachable without hunting for it at the bottom of a long cart —
+     `sticky; bottom` is the standard mobile-commerce pattern for
+     exactly this: it scrolls normally with the page until its own
+     card's bottom edge approaches the screen's bottom edge, then
+     stays pinned there for the rest of that card's scroll range.
+     Offset by the bottom tab bar's own height (plus the safe-area
+     inset) — not just the safe-area inset alone — so the button
+     comes to rest just above that bar instead of underneath it; same
+     shared variable the tab bar and the content padding above both
+     use, for the same reason.
+  */
+  .pos-checkout-btn {
+    position: sticky !important;
+    bottom: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom, 0));
+    z-index: 5;
+    box-shadow: 0 -4px 10px rgba(0,0,0,0.08);
   }
 
   /* The AI assistant panel (AiFloatingButton.tsx) becomes a

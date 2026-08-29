@@ -24,6 +24,14 @@
   --radius-card: 3px;
   --radius-stamp: 999px;
 
+  /* Shared between the mobile bottom tab bar (below) and every rule
+     that needs to leave room for it / sit above it instead of behind
+     it — the POS checkout button's sticky offset, and the page
+     content's own bottom padding. One number, defined once, so those
+     three places can't silently drift out of sync with each other the
+     way three separately-hardcoded copies of "60px" eventually would. */
+  --mobile-tabbar-height: 60px;
+
   color-scheme: light;
 }
 
@@ -286,19 +294,38 @@ label {
 }
 
 @media (max-width: 860px) {
+  /* Same circular ink-stamp treatment as the AI button sitting right
+     next to it in this same topbar (and every icon in the sidebar
+     itself) — previously this was the one bordered SQUARE box in an
+     otherwise all-circular icon language, which is exactly what read
+     as "not integrated," a foreign element rather than a natural part
+     of the same toolbar. Reusing .stamp-badge's own rules (border,
+     radius, the ::after double-ring) rather than redeclaring them
+     here keeps this looking like the same design system, not a
+     close approximation of it. */
   .app-hamburger {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 2.3rem;
     height: 2.3rem;
-    border: 1px solid var(--paper-line);
-    border-radius: 3px;
+    border-radius: var(--radius-stamp);
+    border: 2px solid currentColor;
     background: var(--paper-card);
     color: var(--ink);
-    font-size: 1.1rem;
+    font-size: 1rem;
     cursor: pointer;
     flex-shrink: 0;
+    position: relative;
+    transform: rotate(-3deg);
+  }
+  .app-hamburger::after {
+    content: '';
+    position: absolute;
+    inset: 3px;
+    border: 1px solid currentColor;
+    border-radius: var(--radius-stamp);
+    opacity: 0.5;
   }
 
   .app-sidebar {
@@ -329,23 +356,116 @@ label {
     transform: translateX(0);
   }
 
-  .app-sidebar-backdrop.mobile-open {
+  /* opacity/visibility, not display, specifically because they CAN be
+     transitioned — display:block/none toggles instantly with no way
+     to animate between the two states, which is exactly why this
+     backdrop used to just flash to full black the moment the
+     hamburger was tapped, all at once, with nothing smoothing the
+     change. Same transform-based slide the drawer itself already
+     uses right above — this just gives its backdrop the same
+     "eases in" quality instead of being the one abrupt thing on an
+     otherwise smooth interaction. pointer-events follows visibility
+     rather than opacity alone, so the invisible-but-present backdrop
+     can't still swallow taps while faded out. */
+  .app-sidebar-backdrop {
     display: block;
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.4);
     z-index: 45;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.2s ease, visibility 0.2s ease;
+  }
+
+  .app-sidebar-backdrop.mobile-open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
   }
 
   .app-main-content {
     padding: 1rem !important;
-    padding-bottom: calc(1rem + env(safe-area-inset-bottom)) !important;
+    /* Room for the fixed bottom tab bar below, so the last bit of
+       every page's content doesn't render underneath it — same
+       variable that bar sizes itself from, and the same one the POS
+       checkout button below offsets itself by, so all three can't
+       quietly drift out of sync with each other. Superseded by
+       mobile.css's own copy of this rule below 768px (it loads after
+       this file and also uses !important, so it wins outright at that
+       narrower width) — kept here too for the 768–860px range that
+       mobile.css's rule doesn't reach at all. */
+    padding-bottom: calc(1rem + var(--mobile-tabbar-height) + env(safe-area-inset-bottom)) !important;
     max-width: 100% !important;
   }
 
   .app-mobile-topbar {
     display: flex !important;
   }
+
+  /* The actual "shortcut navigation" — the most-used destinations
+     reachable in one tap, without opening the drawer at all, which is
+     the specific modern-navigation gap being addressed here. This is
+     purely additive: the hamburger drawer above still reaches every
+     one of these plus everything else (Operations, Admin, Stock
+     Take) exactly as it already did — nothing about it changed or was
+     removed, this just gives the handful of things someone reaches
+     for constantly their own always-visible one-tap row instead of
+     making every single visit start with opening a drawer.
+     grid, not flex, so all 4 buttons get a perfectly even share of
+     the width regardless of label length. */
+  .app-bottom-tabbar {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: var(--mobile-tabbar-height);
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--paper-card);
+    border-top: 1px solid var(--paper-line);
+    /* Deliberately below .ai-panel's z-index of 40 (see
+       AiFloatingButton.tsx) — that panel becomes a full-screen
+       takeover on this exact breakpoint (see .ai-panel in
+       mobile.css) and needs to unambiguously sit above this bar
+       whenever both would otherwise occupy the same screen space,
+       not rely on DOM paint order between two same-numbered z-indexes
+       to happen to work out. */
+    z-index: 35;
+  }
+
+  .app-bottom-tabbar button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    background: none;
+    border: none;
+    color: var(--ink-soft);
+    font-family: var(--font-body);
+    font-size: 0.68rem;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .app-bottom-tabbar button.active {
+    color: var(--stamp);
+    font-weight: 600;
+  }
+
+  .app-bottom-tabbar .tab-icon {
+    font-size: 1.05rem;
+    line-height: 1;
+  }
+}
+
+/* Hidden by default (desktop) — only ever shown inside the ≤860px
+   block above, same breakpoint as the sidebar drawer it complements. */
+.app-bottom-tabbar {
+  display: none;
 }
 
 .app-mobile-topbar {

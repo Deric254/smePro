@@ -8,7 +8,7 @@
 //! all-or-nothing, and awkward for "just recount these 12 items
 //! today" — or (b) nothing at all, since a single ad-hoc field edit on
 //! inventory.quantity is deliberately blocked (see crud.rs's
-//! `is_single_record_edit_blocked_field`). This is the missing middle:
+//! `is_update_blocked_field`). This is the missing middle:
 //! a dedicated, walk-the-floor counting session with its own
 //! before/after variance report and audit trail.
 //!

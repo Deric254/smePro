@@ -48,7 +48,7 @@ export const ADMIN_TABS: { id: Tab; label: string }[] = [
 // — genuinely "no space left for navigation" on mobile, which is
 // exactly the problem this removes. `tab` is now fully controlled by
 // whatever the sidebar has selected.
-export default function AdminPanel({ tab }: { tab: Tab }) {
+export default function AdminPanel({ tab, onModulesChanged }: { tab: Tab; onModulesChanged?: () => void }) {
   return (
     <div>
       <h2 style={{ marginTop: 0 }}>{ADMIN_TABS.find((t) => t.id === tab)?.label ?? 'Admin'}</h2>
@@ -59,7 +59,7 @@ export default function AdminPanel({ tab }: { tab: Tab }) {
       {tab === 'currencies' && <CurrenciesTab />}
       {tab === 'tax' && <TaxRatesTab />}
       {tab === 'settings' && <SettingsTab />}
-      {tab === 'business' && <BusinessTab />}
+      {tab === 'business' && <BusinessTab onModulesChanged={onModulesChanged} />}
       {tab === 'security' && <TwoFactorSetup />}
       {tab === 'network' && <NetworkTab />}
       {tab === 'ai' && <AiSettingsTab />}
@@ -828,7 +828,7 @@ const THEMES = [
   { id: 'sea_glass', label: 'Sea Glass' },
 ];
 
-function BusinessTab() {
+function BusinessTab({ onModulesChanged }: { onModulesChanged?: () => void }) {
   const [modules, setModules] = useState<AvailableModule[]>([]);
   const [loading, setLoading] = useState(true);
   const [enablingId, setEnablingId] = useState<string | null>(null);
@@ -849,6 +849,17 @@ function BusinessTab() {
     try {
       await enableModule(moduleId);
       refresh();
+      // This screen's own `modules` list (above) is local to
+      // BusinessTab and refreshing it here only updates what THIS
+      // screen shows. The sidebar's "Operations" section (and the
+      // gate on whether POS itself is even reachable — see App.tsx's
+      // `modules.some(id === 'inventory' && enabled)` check) is driven
+      // by a completely separate `modules` state living in App.tsx,
+      // fetched exactly once at login and never again — so without
+      // this, enabling a module here updates the database correctly
+      // but the sidebar has no way of finding out, and looks like
+      // "add module" silently did nothing until a full reload.
+      onModulesChanged?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Could not enable ${moduleId}`);
     } finally {
@@ -862,6 +873,7 @@ function BusinessTab() {
     try {
       await disableModule(moduleId);
       refresh();
+      onModulesChanged?.(); // same reasoning as handleEnable above
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Could not disable ${moduleId}`);
     } finally {

@@ -61,36 +61,37 @@ pub fn load_module(conn: &Connection, business_id: &str, module_id: &str) -> Res
 /// this function to worry about exempting (see `create()`'s own doc
 /// comment on why).
 ///
-/// Also deliberately does NOT apply when `update()`'s own `bulk_import`
-/// flag is set — excel_import.rs's own doc comment explains why a
-/// spreadsheet re-upload is a real, sanctioned way to change quantity:
-/// it exists specifically to serve "a stock take (reconciling counted
-/// quantities against what the system thinks is on the shelf)". That's
-/// a deliberate, validated, whole-batch reconciliation workflow, not
-/// the same danger as a single ad-hoc field edit slipping through the
-/// generic one-record form — so it gets to bypass this specific block
-/// (and only this one; excel_import still goes through every other
-/// validation `update()` applies, same as any other caller).
-fn is_single_record_edit_blocked_field(module_id: &str, field_name: &str) -> bool {
-    (module_id == "inventory" && field_name == "quantity")
-        // The doc comment above has claimed parity with these two
-        // fields since it was written, but the check itself never
-        // actually included them — a real gap between what this
-        // function's own documentation promised and what the code
-        // did. Confirmed while auditing every module for this rollout:
-        // without this, anyone holding plain "update" on purchasing or
-        // debt_credit (Manager and Staff both have it — see those
-        // modules' default_roles) could PATCH `received: true` or
-        // `settled: true` directly, completely bypassing
-        // receiving.rs's atomic stock/cost update and
-        // debt_settlement.rs's atomic Bookkeeping post — the exact
-        // "silently skip all of that" failure receiving.rs's own doc
-        // comment already calls out as the one gap its guarantee
-        // doesn't cover, except this closes it instead of just naming
-        // it. Hiding these fields from the React edit form (see
-        // ModuleView.tsx) was never enough on its own, same reasoning
-        // as inventory's `quantity` above.
-        || (module_id == "purchasing" && field_name == "received")
+/// `bulk_import` narrows the block for exactly ONE field —
+/// inventory.quantity — not all of them. excel_import.rs's own doc
+/// comment explains why a spreadsheet re-upload is a real, sanctioned
+/// way to change quantity: it exists specifically to serve "a stock
+/// take (reconciling counted quantities against what the system
+/// thinks is on the shelf)". That's a deliberate, validated,
+/// whole-batch reconciliation workflow, not the same danger as a
+/// single ad-hoc field edit slipping through the generic one-record
+/// form.
+///
+/// THE BUG THIS FIXES: `bulk_import` used to bypass every field in
+/// this list as one blanket flag, not just quantity — added when
+/// purchasing.received and (later) debt_credit's fields joined this
+/// blocklist, without noticing the SAME flag would exempt them too.
+/// Neither has any legitimate "reconcile via spreadsheet" use case the
+/// way inventory counts do: there's no scenario where re-uploading a
+/// spreadsheet should be able to mark a purchase received (skipping
+/// receiving.rs's atomic stock/cost update) or a debt settled
+/// (skipping debt_settlement.rs's atomic Bookkeeping post) any more
+/// than a single hand-typed edit should — and since Manager AND Staff
+/// both hold plain "update" on these modules (see their
+/// default_roles), a crafted spreadsheet re-upload was a real,
+/// reachable way to fully bypass both of those guarantees, not a
+/// theoretical one.
+fn is_update_blocked_field(module_id: &str, field_name: &str, bulk_import: bool) -> bool {
+    if module_id == "inventory" && field_name == "quantity" {
+        return !bulk_import;
+    }
+    // Everything below is blocked unconditionally — bulk_import
+    // exempts none of it, for the reasoning above.
+    (module_id == "purchasing" && field_name == "received")
         || (module_id == "debt_credit" && field_name == "settled")
         // debt_credit's payment_method and source_order_id are
         // system-recorded facts about HOW and FROM WHICH sale a debt
@@ -312,10 +313,9 @@ pub fn list(
 /// create/edit form, or any direct API call hitting that same route)
 /// from excel_import.rs's own internal reconciliation-by-spreadsheet
 /// path. `false` for every normal caller — pass `true` only from
-/// excel_import.rs, and only because that call site's own doc comment
-/// already explains, in detail, exactly why it's a sanctioned way to
-/// change a field this function otherwise blocks (see
-/// `is_single_record_edit_blocked_field` above).
+/// excel_import.rs. It does NOT mean "skip every blocked-field check" —
+/// see `is_update_blocked_field` above for exactly which single field
+/// it actually narrows, and why the rest stay blocked either way.
 pub fn update(
     conn: &Connection,
     business_id: &str,
@@ -348,7 +348,7 @@ pub fn update(
         if !valid_fields.contains(k.as_str()) {
             return Err(anyhow!("'{k}' is not a field on module '{module_id}'"));
         }
-        if !bulk_import && is_single_record_edit_blocked_field(module_id, k) {
+        if is_update_blocked_field(module_id, k, bulk_import) {
             return Err(anyhow!(
                 "'{k}' cannot be edited directly on '{module_id}' — use the sell, receive, refund, or repack action instead"
             ));

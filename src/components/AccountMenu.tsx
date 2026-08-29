@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { getCurrentUser } from '../api';
 import type { CurrentUser } from '../api';
+import { retryOnConnectionFailure } from '../lib/retry';
 
 function initials(name: string) {
   const words = name.split(/[\s/]+/).filter(Boolean);
@@ -22,7 +23,7 @@ export default function AccountMenu({ onSignOut }: { onSignOut: () => void }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    getCurrentUser().then(setUser).catch(() => {}); // menu still works (badge just shows nothing) if this fails
+    retryOnConnectionFailure(() => getCurrentUser()).then(setUser).catch(() => {}); // menu still works (badge just shows nothing) if this fails
   }, []);
 
   useEffect(() => {

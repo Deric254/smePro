@@ -185,8 +185,12 @@ pub fn import(
                 // bulk_import=true — a spreadsheet reconciliation (e.g.
                 // a stock take) is a sanctioned way to change quantity,
                 // unlike a single ad-hoc field edit through the generic
-                // one-record form. See is_single_record_edit_blocked_field
-                // in crud.rs for the full reasoning.
+                // one-record form. This flag narrows the block for
+                // ONLY that one field, not a blanket bypass — see
+                // is_update_blocked_field in crud.rs for the full
+                // reasoning, including why purchasing.received and
+                // debt_credit's settlement fields stay blocked here
+                // too, same as any other update.
                 match crud::update(&tx, business_id, user_id, &module.id, &id, &body_map, true) {
                     Ok(_) => updated += 1,
                     Err(e) => errors.push(json!({"row": row_num, "error": e.to_string()})),
@@ -292,6 +296,48 @@ fn cell_to_json(cell: &Data, field_type: &str, currency: &str) -> Value {
         (Data::Bool(b), "boolean") => json!(b),
         (Data::String(s), "boolean") => json!(s.eq_ignore_ascii_case("true") || s == "1"),
         (Data::DateTimeIso(s), "date") => json!(s),
+        // The far more common case than the ISO-string variant just
+        // above: when a cell is actually formatted as a date in Excel
+        // or LibreOffice (the normal, expected way to enter a date —
+        // pick it from the date picker, or type it and let the cell's
+        // date format apply), calamine reads it back as this
+        // ExcelDateTime variant — an internal day-count-since-1900
+        // serial number, not a string at all. The code here previously
+        // had no case for it whatsoever, so any such cell fell straight
+        // through to the catch-all `_ => Value::Null` below — silently,
+        // with no error of its own, since the per-row validate() call
+        // right after this just reports "expected date, got Null"
+        // rather than anything pointing at the real cause. This is
+        // "sometimes a date imports as null" instead of always,
+        // because which of these two representations you get for a
+        // given cell depends on exactly how it was entered/formatted —
+        // both are entirely normal, valid ways to put a date in a
+        // spreadsheet, and only one of them was ever handled.
+        // `as_datetime()` needs calamine's "dates" feature enabled
+        // (see Cargo.toml) — it isn't part of the default feature set.
+        (Data::DateTime(dt), "date") => match dt.as_datetime() {
+            Some(naive) => json!(naive.date().to_string()), // "YYYY-MM-DD", same format every other "date" field in this app uses (see invoice.rs's own date_naive().to_string())
+            None => Value::Null,
+        },
+        // A third way a date can arrive: typed directly as plain text
+        // into a cell with no date formatting applied at all (a
+        // "General" or "Text"-formatted cell) — calamine has no way to
+        // tell that string was meant as a date, so it comes through as
+        // an ordinary Data::String, same as any other text cell.
+        // Restricted to exactly this app's own "YYYY-MM-DD" shape
+        // (the same one every date field elsewhere in the app produces
+        // — see the DateTime case just above) rather than accepted
+        // as-is: module.validate() only checks that a "date" field IS
+        // a string, not that it's actually a valid, correctly-shaped
+        // date (see module.rs) — so "31/01/2026", "1/31/26", or "Jan
+        // 31 2026" would otherwise sail straight through as a
+        // "valid" date and silently corrupt every date-range filter,
+        // sort, and comparison elsewhere in the app that assumes
+        // dates are lexicographically sortable in this exact format.
+        (Data::String(s), "date") => match chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d") {
+            Ok(_) => json!(s.trim()),
+            Err(_) => Value::Null,
+        },
         (Data::String(s), _) => json!(s),
         (Data::Int(i), _) => json!(i.to_string()),
         (Data::Float(f), _) => json!(f.to_string()),
