@@ -181,32 +181,81 @@ pub fn import(
 
         match existing_id {
             Some(id) => {
-                // THE BUG THIS FIXES: every field the module defines
-                // (including purchasing's `received` and debt_credit's
-                // `settled`/`payment_method`/`source_order_id`) is a
-                // column in the downloadable template, so any row that
-                // simply carries the same value already stored — which
-                // is the normal case for a re-uploaded spreadsheet that
-                // only actually changed one or two other columns — used
-                // to hard-fail the whole row the instant
-                // crud::update() saw one of those keys present at all,
-                // regardless of whether its value had even changed.
-                // That made re-importing an existing purchasing or
-                // debt_credit spreadsheet effectively impossible, even
-                // though the person never touched those columns and the
-                // record's own id is system-generated, never hand-typed.
-                // The actual security boundary these fields need — no
-                // spreadsheet re-upload may set them, ever — is
-                // preserved by simply never sending them as part of the
-                // update, not by rejecting the whole row for having them
-                // present. `inventory`'s `quantity` is deliberately NOT
-                // filtered here: that one field's whole reason for
-                // being in the template is the sanctioned stock-take
-                // reconciliation workflow (see the module doc comment
-                // above and crud.rs's is_update_blocked_field), so it's
-                // left in the payload and crud::update's own
-                // bulk_import=true narrows the block for exactly that
-                // field.
+                // THE BUG THIS FIXES (round 2): every field the module
+                // defines (including purchasing's `received` and
+                // debt_credit's `settled`/`payment_method`/
+                // `source_order_id`) is a column in the downloadable
+                // template, so any row that simply carries the same
+                // value already stored — the normal case for a
+                // re-uploaded spreadsheet that only actually changed
+                // one or two other columns — used to hard-fail the
+                // whole row the instant crud::update() saw one of
+                // those keys present at all, regardless of whether its
+                // value had even changed. That made re-importing an
+                // existing purchasing or debt_credit spreadsheet
+                // effectively impossible.
+                //
+                // The first fix for that made the mistake of simply
+                // never sending these fields as part of the update —
+                // unconditionally, without checking whether the
+                // incoming value actually differed from what's stored.
+                // That reopened the exact hole this module exists to
+                // close: a spreadsheet with `settled=true` on a row
+                // that already exists would silently have `settled`
+                // stripped from the payload and the rest of the row
+                // (party_name, direction, amount, ...) applied with a
+                // clean `Ok` and no error — indistinguishable, from the
+                // caller's side, from the debt actually having been
+                // settled through debt_settlement::settle(). Silently
+                // dropping a field a person deliberately typed a new
+                // value into is not "ignoring an unrelated column
+                // that happened to be in the template", it's silently
+                // discarding an edit — which is its own kind of
+                // surprising, audit-defeating behavior for exactly the
+                // fields this list exists to protect.
+                //
+                // So: compare each blocked field's incoming value
+                // against what's actually stored first. Unchanged →
+                // drop it from the payload same as before (a genuine
+                // re-upload of an untouched column is not an edit at
+                // all). Changed → reject the whole row with the same
+                // error crud::update() would have given a single-record
+                // caller, rather than quietly applying every other
+                // field and hiding the one that mattered.
+                let table = module.table_name();
+                let mut blocked_change: Option<String> = None;
+                for k in record.keys() {
+                    if !crud::is_update_blocked_field(&module.id, k, true) {
+                        continue;
+                    }
+                    let is_boolean = module.fields.iter().any(|f| &f.name == k && f.field_type == "boolean");
+                    let stored = stored_field_value(&tx, &table, business_id, &id, k, is_boolean)
+                        .unwrap_or(Value::Null);
+                    if record.get(k) != Some(&stored) {
+                        blocked_change = Some(k.clone());
+                        break;
+                    }
+                }
+
+                if let Some(field) = blocked_change {
+                    errors.push(json!({
+                        "row": row_num,
+                        "error": format!(
+                            "'{field}' cannot be edited directly on '{}' — use the sell, receive, refund, or repack action instead",
+                            module.id
+                        )
+                    }));
+                    continue;
+                }
+
+                // `inventory`'s `quantity` is deliberately NOT filtered
+                // here even when changed: that field's whole reason
+                // for being in the template is the sanctioned
+                // stock-take reconciliation workflow (see the module
+                // doc comment above and crud.rs's
+                // is_update_blocked_field), so it's left in the
+                // payload and crud::update's own bulk_import=true
+                // narrows the block for exactly that field.
                 let body_map: serde_json::Map<String, Value> = record
                     .clone()
                     .into_iter()
@@ -297,6 +346,36 @@ fn find_existing_by_key(
         .query_row(&sql, rusqlite::params![business_id, key_value], |r| r.get(0))
         .ok();
     Ok(id)
+}
+
+// Reads a single column's currently-stored value for one record, using
+// the same boolean-awareness as crud::list's row-to-JSON conversion
+// (SQLite has no native boolean type, so a "boolean"-typed field must
+// be read back as INTEGER 0/1 and converted to a JSON bool, or a
+// stored `false`/0 would never compare equal to the JSON `false` the
+// spreadsheet cell parses into above it). Used only to decide whether
+// an incoming blocked-field value actually differs from what's on
+// file — never to build the update payload itself.
+fn stored_field_value(
+    conn: &Connection,
+    table: &str,
+    business_id: &str,
+    id: &str,
+    field_name: &str,
+    is_boolean: bool,
+) -> Result<Value> {
+    let sql = format!("SELECT {field_name} FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL");
+    conn.query_row(&sql, rusqlite::params![id, business_id], |row| {
+        Ok(match row.get_ref(0)? {
+            rusqlite::types::ValueRef::Null => Value::Null,
+            rusqlite::types::ValueRef::Integer(n) if is_boolean => json!(n != 0),
+            rusqlite::types::ValueRef::Integer(n) => json!(n),
+            rusqlite::types::ValueRef::Real(f) => json!(f),
+            rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+            rusqlite::types::ValueRef::Blob(_) => Value::Null,
+        })
+    })
+    .map_err(Into::into)
 }
 
 fn cell_to_string(cell: &Data) -> String {
