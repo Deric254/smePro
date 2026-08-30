@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 12;
+const CURRENT_VERSION: i32 = 13;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -32,7 +32,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 10 { v10_customers_name_only(conn)?; }
     if current < 11 { v11_stock_takes(conn)?; }
     if current < 12 { v12_debt_settlement_payment_method(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 12, "bump this alongside the last `if current < N` check above");
+    if current < 13 { v13_scope_unique_fields_to_business(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 13, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -199,6 +200,11 @@ fn v8_money_to_cents(conn: &mut Connection) -> Result<()> {
             cols.push("created_at TEXT NOT NULL".to_string());
             cols.push("updated_at TEXT NOT NULL".to_string());
             cols.push("deleted_at TEXT".to_string());
+            // Same business-scoped (not global) unique constraints
+            // create_table() emits for a fresh table — this rebuild
+            // must not regenerate the bug v13 exists to fix for a
+            // table that happens to go through this v8 path instead.
+            cols.extend(on_disk_def.business_scoped_unique_constraints());
             tx.execute(&format!("CREATE TABLE {table} ({})", cols.join(", ")), [])?;
 
             // Every currency actually present among businesses that
@@ -669,6 +675,161 @@ fn v12_debt_settlement_payment_method(conn: &mut Connection) -> Result<()> {
     }
 
     tx.execute("INSERT INTO _schema_version (version) VALUES (12)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Fixes a real correctness bug in the generic module engine — see
+/// module.rs's `business_scoped_unique_constraints` doc comment for
+/// the full explanation. A field marked `unique: true` in a module's
+/// JSON definition (currently only inventory's `sku`) used to get a
+/// bare, GLOBAL column-level `UNIQUE` constraint on a table that is
+/// actually shared across every business in this install — so two
+/// completely unrelated businesses could never both use the same SKU.
+/// This rebuilds any table still carrying that old constraint shape
+/// with it correctly scoped to `UNIQUE(business_id, field)` instead —
+/// exactly what `create_table()` emits for a table built fresh after
+/// this fix, and reproduced here for one already sitting on disk.
+///
+/// Detection, not blind rebuild: only a table that actually still
+/// carries the old single-column UNIQUE autoindex gets touched — a
+/// table already created on or after this fix (correctly
+/// business-scoped from the start) is left alone. Safe by
+/// construction either way: the replacement constraint is strictly
+/// weaker than what it replaces (it can only permit combinations the
+/// old one wrongly forbade, never the reverse), so copying existing
+/// rows into it can never itself produce a new violation.
+fn v13_scope_unique_fields_to_business(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let module_ids: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT DISTINCT id FROM modules WHERE table_created = 1")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    for module_id in &module_ids {
+        // Same reasoning as v8: the on-disk definition (what create_table
+        // would build today), not any one business's possibly-stale
+        // schema_json snapshot, is what actually says which fields are
+        // declared unique.
+        let Some(on_disk_raw) = crate::module_json(module_id) else { continue };
+        let Ok(on_disk_def) = crate::module::ModuleDef::from_json_str(on_disk_raw) else { continue };
+        let unique_fields: Vec<&str> = on_disk_def.fields.iter().filter(|f| f.unique).map(|f| f.name.as_str()).collect();
+        if unique_fields.is_empty() {
+            continue; // nothing on this module was ever declared unique — nothing to fix
+        }
+        let table = on_disk_def.table_name();
+
+        let table_exists: i64 = tx.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![table],
+            |r| r.get(0),
+        )?;
+        if table_exists == 0 {
+            continue; // registry claims a table exists but it doesn't — nothing to rebuild
+        }
+
+        // Find every UNIQUE index SQLite auto-created for a bare
+        // column-level UNIQUE constraint (origin = 'u') and check
+        // whether it covers exactly one of this module's unique
+        // fields, alone — that shape is only ever produced by the old,
+        // global-per-column constraint. A table already built correctly
+        // by the fixed code instead carries a compound (business_id,
+        // field) unique index, which this check deliberately does not
+        // match, so it's correctly left untouched.
+        let needs_rebuild = {
+            let mut idx_stmt = tx.prepare(&format!("PRAGMA index_list({table})"))?;
+            let indexes: Vec<(String, i64, String)> = idx_stmt
+                .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            let mut found = false;
+            for (index_name, is_unique, origin) in &indexes {
+                if *is_unique != 1 || origin != "u" {
+                    continue;
+                }
+                let mut info_stmt = tx.prepare(&format!("PRAGMA index_info({index_name})"))?;
+                let cols: Vec<String> = info_stmt
+                    .query_map([], |r| r.get::<_, String>(2))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                if cols.len() == 1 && unique_fields.contains(&cols[0].as_str()) {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !needs_rebuild {
+            continue;
+        }
+
+        // Ground truth for which columns the OLD table actually has —
+        // same defensive approach as v8, since a field can have been
+        // added to modules/*.json at some point after this specific
+        // table was first created, unrelated to this fix.
+        let existing_cols: std::collections::HashSet<String> = {
+            let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let old_table = format!("{table}__pre_unique_scope_v13");
+        tx.execute(&format!("ALTER TABLE {table} RENAME TO {old_table}"), [])?;
+
+        let mut cols = vec![
+            "id TEXT PRIMARY KEY".to_string(),
+            "business_id TEXT NOT NULL".to_string(),
+        ];
+        cols.extend(on_disk_def.field_column_defs()?);
+        cols.push("created_at TEXT NOT NULL".to_string());
+        cols.push("updated_at TEXT NOT NULL".to_string());
+        cols.push("deleted_at TEXT".to_string());
+        cols.extend(on_disk_def.business_scoped_unique_constraints());
+        tx.execute(&format!("CREATE TABLE {table} ({})", cols.join(", ")), [])?;
+
+        // Column-for-column copy — no data transformation needed here,
+        // unlike v8's money conversion, since only the constraint shape
+        // is changing. A declared field the old table doesn't actually
+        // have yet falls back to its own default (or NULL), same
+        // reasoning and same fallback v8 already uses, rather than
+        // referencing a column that doesn't exist and failing the whole
+        // rebuild over unrelated schema drift.
+        let mut select_cols = vec!["t.id".to_string(), "t.business_id".to_string()];
+        for f in &on_disk_def.fields {
+            if existing_cols.contains(&f.name) {
+                select_cols.push(format!("t.{}", f.name));
+            } else {
+                let default_sql = match &f.default {
+                    Some(serde_json::Value::String(s)) => format!("'{}'", s.replace('\'', "''")),
+                    Some(serde_json::Value::Number(n)) => n.to_string(),
+                    Some(serde_json::Value::Bool(b)) => if *b { "1".into() } else { "0".into() },
+                    _ => "NULL".into(),
+                };
+                select_cols.push(default_sql);
+            }
+        }
+        select_cols.push("t.created_at".to_string());
+        select_cols.push("t.updated_at".to_string());
+        select_cols.push("t.deleted_at".to_string());
+
+        tx.execute(
+            &format!(
+                "INSERT INTO {table} SELECT {} FROM {old_table} t",
+                select_cols.join(", ")
+            ),
+            [],
+        )?;
+
+        tx.execute(&format!("DROP TABLE {old_table}"), [])?;
+        tx.execute(
+            &format!("CREATE INDEX IF NOT EXISTS idx_{table}_business ON {table}(business_id, deleted_at)"),
+            [],
+        )?;
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (13)", [])?;
     tx.commit()?;
     Ok(())
 }

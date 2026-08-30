@@ -144,15 +144,20 @@ impl ModuleDef {
         }
     }
 
-    /// Builds the `"name TYPE [NOT NULL] [UNIQUE]"` column definitions
-    /// for this module's own fields (not the fixed system columns —
+    /// Builds the `"name TYPE [NOT NULL]"` column definitions for this
+    /// module's own fields (not the fixed system columns —
     /// id/business_id/created_at/updated_at/deleted_at are added by
     /// each caller, since a table rebuild needs to place them at
     /// specific positions matching the existing table). Shared by
-    /// `create_table` (fresh tables) and the v8 migration's table
-    /// rebuild (existing tables whose column affinity needs to
-    /// change) so both are derived from exactly the same logic —
-    /// nothing for the two to drift apart on.
+    /// `create_table` (fresh tables) and the v8/v13 migrations' table
+    /// rebuilds (existing tables whose column affinity or constraints
+    /// need to change) so all three are derived from exactly the same
+    /// logic — nothing for them to drift apart on.
+    ///
+    /// Deliberately does NOT emit a bare `UNIQUE` for a field marked
+    /// `unique: true` — see `business_scoped_unique_constraints` below
+    /// for why a plain column-level UNIQUE is wrong for this table
+    /// shape and what's emitted instead.
     pub(crate) fn field_column_defs(&self) -> Result<Vec<String>> {
         self.fields
             .iter()
@@ -162,11 +167,37 @@ impl ModuleDef {
                 if f.required {
                     col.push_str(" NOT NULL");
                 }
-                if f.unique {
-                    col.push_str(" UNIQUE");
-                }
                 Ok(col)
             })
+            .collect()
+    }
+
+    /// Table-level `UNIQUE(business_id, field)` constraints for every
+    /// field marked `unique: true` — e.g. inventory's `sku`.
+    ///
+    /// THE BUG THIS FIXES: every module table is one single physical
+    /// table shared across every business in this install (rows
+    /// distinguished by the `business_id` column — see `table_name`
+    /// and every query in crud.rs/pos.rs/etc, all of which filter on
+    /// it), the same as every hand-written table in db_migrations.rs
+    /// already does correctly (tax_rates: UNIQUE(business_id,
+    /// category), customers: UNIQUE(business_id, phone)). A bare
+    /// column-level `UNIQUE` on `sku` alone — what this code used to
+    /// emit — enforces uniqueness across ALL businesses at once, not
+    /// within one: two completely unrelated businesses on the same
+    /// install could never both have a product called "SKU-001",
+    /// which is exactly the kind of collision a real multi-business
+    /// install would hit immediately and have no way to explain to
+    /// either owner. Scoping the constraint by business_id is strictly
+    /// weaker than what it replaces, never stronger — it can only
+    /// permit combinations the old constraint wrongly forbade, never
+    /// the reverse, so migrating existing data into it (see v13) can
+    /// never itself create a new constraint violation.
+    pub(crate) fn business_scoped_unique_constraints(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .filter(|f| f.unique)
+            .map(|f| format!("UNIQUE(business_id, {})", f.name))
             .collect()
     }
 
@@ -184,6 +215,9 @@ impl ModuleDef {
         cols.push("created_at TEXT NOT NULL".to_string());
         cols.push("updated_at TEXT NOT NULL".to_string());
         cols.push("deleted_at TEXT".to_string()); // soft delete, keeps audit trail meaningful
+        // Business-scoped, not global — see that method's own doc
+        // comment for the bug this avoids.
+        cols.extend(self.business_scoped_unique_constraints());
 
         // Everything below is one atomic unit: if index creation or the
         // registry insert fails for any reason, the table creation rolls

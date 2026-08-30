@@ -46,3 +46,5 @@ mod receipt_branding_tests;
 mod report_tests;
 #[cfg(test)]
 mod stock_take_tests;
+#[cfg(test)]
+mod unique_constraint_migration_tests;

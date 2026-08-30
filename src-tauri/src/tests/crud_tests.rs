@@ -23,6 +23,50 @@ fn test_crud_create_and_list() {
     assert_eq!(list[0].get("sku").unwrap().as_str().unwrap(), "TEST-001");
 }
 
+/// Regression test for the bug fixed in module.rs
+/// (business_scoped_unique_constraints) / db_migrations.rs (v13): a
+/// field marked `unique: true` (inventory's `sku`) must only be
+/// unique WITHIN one business, not globally across every business
+/// sharing the same module_inventory table. Before the fix, the
+/// second create() call below failed with a UNIQUE constraint
+/// violation even though the two SKUs belong to two completely
+/// unrelated businesses.
+#[test]
+fn test_unique_field_is_scoped_per_business_not_global() {
+    let mut conn = test_db();
+    let biz_a = test_business(&mut conn);
+    let (uid_a, _) = test_owner(&mut conn, &biz_a);
+    let biz_b = test_business(&mut conn);
+    let (uid_b, _) = test_owner(&mut conn, &biz_b);
+
+    let mut record_a = serde_json::Map::new();
+    record_a.insert("sku".into(), json!("SHARED-SKU"));
+    record_a.insert("name".into(), json!("Business A's item"));
+    record_a.insert("unit_cost".into(), json!(100));
+    record_a.insert("unit_price".into(), json!(200));
+    crate::crud::create(&conn, &biz_a, &uid_a, "inventory", &record_a)
+        .expect("business A can create its own SKU");
+
+    let mut record_b = serde_json::Map::new();
+    record_b.insert("sku".into(), json!("SHARED-SKU"));
+    record_b.insert("name".into(), json!("Business B's item"));
+    record_b.insert("unit_cost".into(), json!(300));
+    record_b.insert("unit_price".into(), json!(400));
+    crate::crud::create(&conn, &biz_b, &uid_b, "inventory", &record_b)
+        .expect("a completely different business must be able to use the same SKU");
+
+    // The constraint must still hold WITHIN a single business — this
+    // is what actually makes it a real "unique" field rather than
+    // simply removing enforcement altogether.
+    let mut record_a_dup = serde_json::Map::new();
+    record_a_dup.insert("sku".into(), json!("SHARED-SKU"));
+    record_a_dup.insert("name".into(), json!("Business A's duplicate"));
+    record_a_dup.insert("unit_cost".into(), json!(100));
+    record_a_dup.insert("unit_price".into(), json!(200));
+    let result = crate::crud::create(&conn, &biz_a, &uid_a, "inventory", &record_a_dup);
+    assert!(result.is_err(), "the SAME business must still be blocked from reusing a SKU");
+}
+
 #[test]
 fn test_crud_update_applies_partial_patch() {
     let mut conn = test_db();
