@@ -83,6 +83,54 @@ pub fn modules_dir() -> std::path::PathBuf {
         .cloned()
         .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("modules"))
 }
+
+/// Compile-time embedded module definitions — the actual fix for the bug
+/// `modules_dir()` above was written to solve, which turned out not to be
+/// solved at all on Android.
+///
+/// CONFIRMED, not guessed: hitting `GET /setup/diagnostics` (see
+/// http_api.rs) on a real Android device returned
+/// `"modules_dir": "asset://localhost/modules", "modules_dir_exists": false`.
+/// `resource_dir()` on Android resolves to a virtual WebView asset URI,
+/// not a real filesystem path — `std::fs::read`/`Path::exists()` can
+/// never read through it, on any Android device, for any business. Every
+/// caller that checked `modules_dir().join(...).exists()` before doing
+/// anything (onboarding's module-enabling, the "available modules" list,
+/// the enable-module route, and — seriously — the v8 money-to-cents
+/// migration in db_migrations.rs) was silently no-op-ing on every single
+/// module, for every Android install, with no error surfaced anywhere.
+///
+/// These JSON files are small, fixed, and shipped identically with every
+/// build regardless of platform — there was never a real reason to read
+/// them from a resolved runtime directory instead of baking them into the
+/// compiled binary directly. `include_str!` does that: the file's
+/// contents become part of the binary at compile time, so there is no
+/// runtime, platform-specific "does this path resolve to something
+/// std::fs can read" question left to get wrong, on Android, desktop, or
+/// anywhere else this ever runs.
+///
+/// `modules_dir()` above is left in place, unused by real functionality
+/// now, only because `/setup/diagnostics` still reports it as the
+/// evidence trail for this bug — not because anything still depends on
+/// it working.
+pub const MODULE_DEFS: &[(&str, &str)] = &[
+    ("accounting", include_str!("../modules/accounting.json")),
+    ("debt_credit", include_str!("../modules/debt_credit.json")),
+    ("hr", include_str!("../modules/hr.json")),
+    ("inventory", include_str!("../modules/inventory.json")),
+    ("invoice", include_str!("../modules/invoice.json")),
+    ("purchasing", include_str!("../modules/purchasing.json")),
+    ("refunds", include_str!("../modules/refunds.json")),
+    ("sales", include_str!("../modules/sales.json")),
+];
+
+/// Looks up a module's embedded JSON definition by id. Returns `None`
+/// for an unrecognized id — every real call site below treats that the
+/// same way the old `path.exists()` check did: "this module doesn't
+/// exist", not an error.
+pub fn module_json(module_id: &str) -> Option<&'static str> {
+    MODULE_DEFS.iter().find(|(id, _)| *id == module_id).map(|(_, json)| *json)
+}
 pub mod report;
 pub mod roles;
 pub mod settings;
@@ -231,11 +279,18 @@ pub fn run() {
 
             let db_path = app_data_dir.join("erp.db").to_string_lossy().to_string();
 
-            // See the MODULES_DIR doc comment above — this is the fix
-            // for module JSON files never resolving correctly on a real
-            // installed app. resource_dir() correctly points at wherever
-            // the OS actually placed this app's bundled resources
-            // (declared in tauri.conf.json's bundle.resources).
+            // See lib.rs's MODULES_DIR doc comment: this was originally
+            // written as "the fix" for module JSON files never
+            // resolving on a real installed app, on the assumption that
+            // resource_dir() always points at a real, std::fs-readable
+            // filesystem location. That's true on desktop. It is NOT
+            // true on Android, where this resolves to a virtual
+            // `asset://localhost/...` WebView URI instead — confirmed
+            // directly against a real device, not assumed. Real module
+            // loading no longer depends on this at all (see
+            // `MODULE_DEFS`); this call is kept only so
+            // `/setup/diagnostics` can keep reporting what this used to
+            // resolve to, as the evidence trail for that bug.
             let resource_dir = app
                 .path()
                 .resource_dir()

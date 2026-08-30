@@ -39,8 +39,8 @@ fn test_disable_module_flips_enabled_flag_but_keeps_data() {
 
     // Re-enabling brings the SAME record right back — proves the
     // table and its row were never touched, only the flag.
-    let path = crate::modules_dir().join("inventory.json");
-    crate::business_panel::enable_module(&mut conn, &biz, &path.to_string_lossy()).unwrap();
+    let json = crate::module_json("inventory").expect("inventory module definition must be embedded");
+    crate::business_panel::enable_module(&mut conn, &biz, json).unwrap();
     let records = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].get("id").unwrap().as_str().unwrap(), record_id);

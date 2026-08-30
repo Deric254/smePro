@@ -1,5 +1,5 @@
 use anyhow::Result;
-use core_engine::{auth, business_panel, db, http_api};
+use core_engine::{auth, business_panel, db, http_api, module_json};
 
 /// Standalone backend runner for development and testing — no Tauri,
 /// no webview, just the HTTP API with a demo business seeded. This is
@@ -11,14 +11,17 @@ fn main() -> Result<()> {
     let mut conn = db::open("erp.db")?;
 
     let business_id = business_panel::create_business(&conn, "Mama Nia General Store", "KES", "Africa/Nairobi")?;
-    business_panel::enable_module(&mut conn, &business_id, "modules/inventory.json")?;
-    business_panel::enable_module(&mut conn, &business_id, "modules/sales.json")?;
-    business_panel::enable_module(&mut conn, &business_id, "modules/hr.json")?;
-    business_panel::enable_module(&mut conn, &business_id, "modules/accounting.json")?;
-    business_panel::enable_module(&mut conn, &business_id, "modules/purchasing.json")?;
-    business_panel::enable_module(&mut conn, &business_id, "modules/debt_credit.json")?;
-    business_panel::enable_module(&mut conn, &business_id, "modules/refunds.json")?;
-    business_panel::enable_module(&mut conn, &business_id, "modules/invoice.json")?;
+    // Was a literal relative path string ("modules/inventory.json") —
+    // only ever worked because this binary happens to run with the
+    // source tree as its working directory. `module_json` (the same
+    // compile-time embedded lookup the real app now uses — see
+    // lib.rs's `MODULE_DEFS` doc comment) works the same way regardless
+    // of working directory, matching what every other caller of
+    // `enable_module` was already switched to.
+    for id in ["inventory", "sales", "hr", "accounting", "purchasing", "debt_credit", "refunds", "invoice"] {
+        let json = module_json(id).unwrap_or_else(|| panic!("missing embedded module definition: {id}"));
+        business_panel::enable_module(&mut conn, &business_id, json)?;
+    }
 
     let owner_password_hash = auth::hash_secret("correct horse battery staple")?;
     let owner_id = business_panel::add_user(&conn, &business_id, "nia", &owner_password_hash, "Owner")?;

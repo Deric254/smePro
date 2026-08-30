@@ -1634,22 +1634,20 @@ fn route(
     // or the frontend, so it can never drift out of sync with what
     // module definitions actually ship with the app.
     if parts.as_slice() == ["modules", "available"] && *method == Method::Get {
-        let dir = match std::fs::read_dir(crate::modules_dir()) {
-            Ok(d) => d,
-            Err(e) => return json_err(500, &format!("could not read modules directory: {e}")),
-        };
+        // Was `std::fs::read_dir(crate::modules_dir())` — silently
+        // returned nothing on Android for the same reason documented on
+        // `crate::MODULE_DEFS`. Iterating the embedded registry directly
+        // means this list is correct on every platform, and can never
+        // drift out of sync with what module definitions actually ship
+        // with the app, which was the whole point of reading from a
+        // registry instead of a hardcoded list in the first place.
         let enabled_ids: std::collections::HashSet<String> = match crate::business_panel::list_modules(conn, &business_id) {
             Ok(list) => list.into_iter().filter(|m| m.enabled).map(|m| m.id).collect(),
             Err(e) => return json_err(500, &e.to_string()),
         };
         let mut available = Vec::new();
-        for entry in dir.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-            let Ok(module) = crate::module::ModuleDef::from_json_str(&raw) else { continue };
+        for (_module_id, raw) in crate::MODULE_DEFS {
+            let Ok(module) = crate::module::ModuleDef::from_json_str(raw) else { continue };
             available.push(json!({
                 "id": module.id,
                 "display_name": module.display_name,
@@ -1665,11 +1663,12 @@ fn route(
     if parts.len() == 3 && parts[0] == "modules" && parts[2] == "enable" && *method == Method::Post {
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
         let module_id = parts[1];
-        let path = crate::modules_dir().join(format!("{module_id}.json"));
-        if !path.exists() {
+        // Was `modules_dir().join(...).exists()` — see crate::MODULE_DEFS
+        // for why that silently failed on Android for every module.
+        let Some(json) = crate::module_json(module_id) else {
             return json_err(404, &format!("unknown module '{module_id}'"));
-        }
-        return match crate::business_panel::enable_module(conn, &business_id, &path.to_string_lossy()) {
+        };
+        return match crate::business_panel::enable_module(conn, &business_id, json) {
             Ok(()) => {
                 let _ = audit::log(conn, &business_id, Some(&user_id), "_modules", "enable", None, Some(&json!({"module_id": module_id})));
                 ApiResponse::Json(200, json!({"enabled": module_id}))

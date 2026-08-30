@@ -118,9 +118,17 @@ pub fn update_branding(
 /// and marks it enabled in the registry. Calling this again on an already-
 /// enabled module is safe (idempotent) — the panel can call it freely on
 /// every toggle-on without needing to track prior state itself.
-pub fn enable_module(conn: &mut Connection, business_id: &str, module_json_path: &str) -> Result<()> {
-    let raw = std::fs::read_to_string(module_json_path)?;
-    let module = ModuleDef::from_json_str(&raw)?;
+/// Enables a module for a business. Takes the module's JSON definition
+/// directly, not a filesystem path — this used to read the file itself
+/// (`std::fs::read_to_string(module_json_path)`), which depended on
+/// every caller correctly resolving a path via `modules_dir()` first.
+/// That's the exact mechanism that silently broke on Android (see
+/// lib.rs's `MODULE_DEFS` doc comment for the confirmed root cause) —
+/// taking the content directly means this function no longer cares
+/// where, or whether, that content came from a real filesystem path at
+/// all.
+pub fn enable_module(conn: &mut Connection, business_id: &str, module_json: &str) -> Result<()> {
+    let module = ModuleDef::from_json_str(module_json)?;
     module.create_table(conn, business_id)?;
     rbac::seed_default_roles(conn, business_id, &module)?;
     conn.execute(

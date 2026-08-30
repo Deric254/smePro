@@ -152,9 +152,14 @@ fn v8_money_to_cents(conn: &mut Connection) -> Result<()> {
     };
 
     for module_id in &module_ids {
-        let on_disk_path = crate::modules_dir().join(format!("{module_id}.json"));
-        let Ok(on_disk_raw) = std::fs::read_to_string(&on_disk_path) else { continue };
-        let Ok(on_disk_def) = crate::module::ModuleDef::from_json_str(&on_disk_raw) else { continue };
+        // Was `modules_dir().join(...)` + `std::fs::read_to_string` —
+        // see crate::MODULE_DEFS for why that silently failed on
+        // Android for every module. For THIS migration specifically,
+        // that silent failure meant every affected money column simply
+        // never got converted from REAL to INTEGER cents on any Android
+        // install — a correctness bug, not just a missing-feature one.
+        let Some(on_disk_raw) = crate::module_json(module_id) else { continue };
+        let Ok(on_disk_def) = crate::module::ModuleDef::from_json_str(on_disk_raw) else { continue };
         let table = on_disk_def.table_name();
 
         // Ground truth: what the table's OWN column type says right

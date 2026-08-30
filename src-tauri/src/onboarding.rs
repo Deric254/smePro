@@ -40,14 +40,19 @@ pub fn apply_business_type(
     let modules = preset_modules(business_type)?;
     let mut enabled = Vec::new();
     for module_id in modules {
-        let path = crate::modules_dir().join(format!("{module_id}.json"));
-        if path.exists() {
-            business_panel::enable_module(conn, business_id, &path.to_string_lossy())?;
+        // Was `modules_dir().join(...).exists()` — a filesystem check
+        // that silently failed for EVERY module on Android (see
+        // lib.rs's `MODULE_DEFS` doc comment). `module_json` looks up
+        // the compile-time embedded definition instead, which exists
+        // identically on every platform.
+        if let Some(json) = crate::module_json(module_id) {
+            business_panel::enable_module(conn, business_id, json)?;
             enabled.push(module_id.to_string());
         }
-        // Silently skips a module whose JSON file isn't present on disk —
-        // keeps this forward-compatible with presets that reference
-        // modules not yet shipped, without breaking the wizard.
+        // Silently skips a module id with no matching embedded
+        // definition — keeps this forward-compatible with presets that
+        // reference modules not yet shipped, without breaking the
+        // wizard.
     }
     Ok(enabled)
 }
