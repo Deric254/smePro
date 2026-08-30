@@ -121,7 +121,7 @@ fn test_two_checkouts_get_distinct_invoice_numbers() {
     let inv_id = seed_inventory_item(&conn, &biz, "EGGS-001", "Eggs", 50, 1000, 1500);
     for _ in 0..2 {
         let req = crate::pos::CheckoutRequest {
-            items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
+            items: vec![crate::pos::CartItem { inventory_record_id: inv_id.clone(), quantity: 1 }],
             payment_method: Some("Cash".into()), customer: None, customer_phone: None,
             allow_oversell: false, on_credit: false, due_date: None,
         };
