@@ -9,6 +9,7 @@ import type { NewInvoiceItem, ImportExcelResult } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
 import InvoiceView from '../components/InvoiceView';
+import ReceiptView from '../components/ReceiptView';
 import DebtSummaryWidget from '../components/DebtSummary';
 
 // Some fields must only ever change through a specific, purpose-built
@@ -188,6 +189,12 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
   const [searching, setSearching] = useState(false);
   const [viewingInvoiceId, setViewingInvoiceId] = useState<string | null>(null);
+  // Invoices auto-generated from a POS/service sale carry the sale's
+  // own order_id in source_sale_id (see invoice::create_invoice_for_order)
+  // — this lets the Invoices tab open the exact same original receipt
+  // the till printed, so the two views can never show inconsistent
+  // figures for the same sale.
+  const [viewingReceiptOrderId, setViewingReceiptOrderId] = useState<string | null>(null);
   const [showInvoiceForm, setShowInvoiceForm] = useState(false);
   const skipNextSearch = useRef(true);
 
@@ -592,9 +599,16 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                     ))}
                     {moduleId === 'invoice' && (
                       <td style={styles.td}>
-                        <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => setViewingInvoiceId(r.id)}>
-                          View
-                        </button>
+                        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                          <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => setViewingInvoiceId(r.id)}>
+                            View
+                          </button>
+                          {typeof r.source_sale_id === 'string' && r.source_sale_id && (
+                            <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => setViewingReceiptOrderId(r.source_sale_id as string)}>
+                              Receipt
+                            </button>
+                          )}
+                        </div>
                       </td>
                     )}
                     {moduleId !== 'invoice' && (canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || (moduleId === 'inventory' && inventoryCanRepack) || canSettle) && (
@@ -636,6 +650,10 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
       {viewingInvoiceId && (
         <InvoiceView invoiceId={viewingInvoiceId} onClose={() => setViewingInvoiceId(null)} onStatusChanged={refreshRecords} />
+      )}
+
+      {viewingReceiptOrderId && (
+        <ReceiptView orderId={viewingReceiptOrderId} onClose={() => setViewingReceiptOrderId(null)} />
       )}
 
       {actionResult && (

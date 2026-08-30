@@ -181,22 +181,78 @@ pub fn import(
 
         match existing_id {
             Some(id) => {
-                let body_map: serde_json::Map<String, Value> = record.clone().into_iter().collect();
-                // bulk_import=true — a spreadsheet reconciliation (e.g.
-                // a stock take) is a sanctioned way to change quantity,
-                // unlike a single ad-hoc field edit through the generic
-                // one-record form. This flag narrows the block for
-                // ONLY that one field, not a blanket bypass — see
-                // is_update_blocked_field in crud.rs for the full
-                // reasoning, including why purchasing.received and
-                // debt_credit's settlement fields stay blocked here
-                // too, same as any other update.
+                // THE BUG THIS FIXES: every field the module defines
+                // (including purchasing's `received` and debt_credit's
+                // `settled`/`payment_method`/`source_order_id`) is a
+                // column in the downloadable template, so any row that
+                // simply carries the same value already stored — which
+                // is the normal case for a re-uploaded spreadsheet that
+                // only actually changed one or two other columns — used
+                // to hard-fail the whole row the instant
+                // crud::update() saw one of those keys present at all,
+                // regardless of whether its value had even changed.
+                // That made re-importing an existing purchasing or
+                // debt_credit spreadsheet effectively impossible, even
+                // though the person never touched those columns and the
+                // record's own id is system-generated, never hand-typed.
+                // The actual security boundary these fields need — no
+                // spreadsheet re-upload may set them, ever — is
+                // preserved by simply never sending them as part of the
+                // update, not by rejecting the whole row for having them
+                // present. `inventory`'s `quantity` is deliberately NOT
+                // filtered here: that one field's whole reason for
+                // being in the template is the sanctioned stock-take
+                // reconciliation workflow (see the module doc comment
+                // above and crud.rs's is_update_blocked_field), so it's
+                // left in the payload and crud::update's own
+                // bulk_import=true narrows the block for exactly that
+                // field.
+                let body_map: serde_json::Map<String, Value> = record
+                    .clone()
+                    .into_iter()
+                    .filter(|(k, _)| !crud::is_update_blocked_field(&module.id, k, true))
+                    .collect();
                 match crud::update(&tx, business_id, user_id, &module.id, &id, &body_map, true) {
                     Ok(_) => updated += 1,
                     Err(e) => errors.push(json!({"row": row_num, "error": e.to_string()})),
                 }
             }
             None => {
+                // THE BUG THIS FIXES: this insert path calls
+                // insert_validated_record() directly, not
+                // crud::create() — so it never got create()'s own
+                // "every inventory item starts at zero stock, full
+                // stop" rule (see crud.rs) applied to it. A spreadsheet
+                // adding a batch of brand-new products could carry
+                // whatever quantity was typed into that column straight
+                // into stock, silently bypassing the one invariant this
+                // whole app is built around: stock only ever enters
+                // through Purchasing receiving an order
+                // (receiving.rs::receive()). The sanctioned exception —
+                // a spreadsheet reconciling counts for items that
+                // already EXIST (a real stock take) — is exactly the
+                // `Some(id)` branch above, which correctly keeps
+                // `quantity` in its update payload; this `None` branch
+                // is "create a new item", which is never allowed to
+                // seed its own opening count, on this path or any
+                // other.
+                if module.id == "inventory" {
+                    record.insert("quantity".to_string(), json!(0));
+                }
+                // Same "starts at a forced, correct baseline, no
+                // exceptions" rule crud::create() applies to a brand-new
+                // debt/credit record — see crud.rs's own comment on why.
+                // This insert path skips crud::create() entirely, so
+                // without this a spreadsheet adding new debt_credit rows
+                // could hand-create one already marked settled (with a
+                // payment_method/source_order_id attached), the exact
+                // gap crud::create() already closes for the single-record
+                // form.
+                if module.id == "debt_credit" {
+                    record.insert("settled".to_string(), json!(false));
+                    record.remove("payment_method");
+                    record.remove("source_order_id");
+                }
                 // Same "never sell at a loss" rule crud::create()/update()
                 // enforce for the single-record form — a new inventory
                 // item created via spreadsheet import is just as capable

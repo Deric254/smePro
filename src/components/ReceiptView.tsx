@@ -4,13 +4,16 @@ import { formatMoney } from '../lib/money';
 import { formatBackendDateTime } from '../lib/date';
 import '../styles/receipt-print.css';
 
-// unit_price, line_total, subtotal, tax_amount, total below are all
-// integer minor units (cents) — see src/lib/money.ts.
+// unit_price, line_total, subtotal, tax_amount, total, refunded_amount,
+// net_total below are all integer minor units (cents) — see
+// src/lib/money.ts.
 interface ReceiptLine {
   item_name: string;
   quantity: number;
   unit_price: number;
   line_total: number;
+  quantity_refunded: number;
+  refunded_amount: number;
 }
 
 interface ReceiptData {
@@ -26,6 +29,9 @@ interface ReceiptData {
   tax_rate: number;
   tax_amount: number;
   total: number;
+  refunded_amount: number;
+  net_total: number;
+  is_refunded: boolean;
   payment_method?: string;
   cashier_name: string;
 }
@@ -53,9 +59,12 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
 
   function receiptText(): string {
     if (!receipt) return '';
-    const lines = receipt.items.map(
-      (i) => `${i.item_name} x${i.quantity} — ${receipt.business_currency} ${formatMoney(i.line_total, receipt.business_currency)}`
-    );
+    const lines = receipt.items.map((i) => {
+      const base = `${i.item_name} x${i.quantity} — ${receipt.business_currency} ${formatMoney(i.line_total, receipt.business_currency)}`;
+      return i.quantity_refunded > 0
+        ? `${base} (refunded ${i.quantity_refunded} — ${receipt.business_currency} ${formatMoney(i.refunded_amount, receipt.business_currency)})`
+        : base;
+    });
     return [
       receipt.business_name,
       receipt.business_slogan || '',
@@ -66,6 +75,8 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
       ...lines,
       '',
       `Total: ${receipt.business_currency} ${formatMoney(receipt.total, receipt.business_currency)}`,
+      receipt.is_refunded ? `Refunded: ${receipt.business_currency} ${formatMoney(receipt.refunded_amount, receipt.business_currency)}` : '',
+      receipt.is_refunded ? `Net total: ${receipt.business_currency} ${formatMoney(receipt.net_total, receipt.business_currency)}` : '',
       receipt.payment_method ? `Paid via ${receipt.payment_method}` : '',
       '',
       'Thank you for your business!',
@@ -140,7 +151,14 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
           <tbody>
             {receipt.items.map((item, i) => (
               <tr key={i} style={tr}>
-                <td style={{...td, textAlign:'left'}}>{item.item_name}</td>
+                <td style={{...td, textAlign:'left'}}>
+                  {item.item_name}
+                  {item.quantity_refunded > 0 && (
+                    <div style={refundBadge}>
+                      Refunded {item.quantity_refunded}/{item.quantity} — {receipt.business_currency} {formatMoney(item.refunded_amount, receipt.business_currency)}
+                    </div>
+                  )}
+                </td>
                 <td style={td}>{item.quantity}</td>
                 <td style={td}>{receipt.business_currency} {formatMoney(item.unit_price, receipt.business_currency)}</td>
                 <td style={td}>{receipt.business_currency} {formatMoney(item.line_total, receipt.business_currency)}</td>
@@ -161,6 +179,18 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
             <span>Total:</span>
             <span>{receipt.business_currency} {formatMoney(receipt.total, receipt.business_currency)}</span>
           </div>
+          {receipt.is_refunded && (
+            <>
+              <div style={{...row, color: '#c0392b'}}>
+                <span>Refunded:</span>
+                <span>− {receipt.business_currency} {formatMoney(receipt.refunded_amount, receipt.business_currency)}</span>
+              </div>
+              <div style={{...row, ...totalRow}}>
+                <span>Net total:</span>
+                <span>{receipt.business_currency} {formatMoney(receipt.net_total, receipt.business_currency)}</span>
+              </div>
+            </>
+          )}
           {receipt.payment_method && (
             <div style={row}><span>Paid via:</span><span>{receipt.payment_method}</span></div>
           )}
@@ -201,6 +231,7 @@ const thRow: React.CSSProperties = { borderBottom: '2px solid #333' };
 const th: React.CSSProperties = { padding: '6px 4px', fontWeight: 600, textAlign: 'right', fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.5 };
 const tr: React.CSSProperties = { borderBottom: '1px solid #eee' };
 const td: React.CSSProperties = { padding: '6px 4px', textAlign: 'right' };
+const refundBadge: React.CSSProperties = { fontSize: 11, color: '#c0392b', marginTop: 2, fontWeight: 600 };
 const totals: React.CSSProperties = { borderTop: '2px solid #333', paddingTop: 10, fontSize: 13 };
 const row: React.CSSProperties = { display: 'flex', justifyContent: 'space-between', padding: '3px 0' };
 const totalRow: React.CSSProperties = { fontWeight: 700, fontSize: 15, borderTop: '1px solid #ddd', marginTop: 6, paddingTop: 6 };

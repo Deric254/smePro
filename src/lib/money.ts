@@ -44,9 +44,26 @@ export function formatMoney(cents: number | null | undefined, currencyCode: stri
  * precision than the currency supports (e.g. "12.505" for a 2dp
  * currency) rather than silently rounding it away. Returns null for
  * anything invalid — callers decide how to surface that.
+ *
+ * THE BUG THIS FIXES: formatMoney() above renders amounts >= 1000
+ * with thousands separators via toLocaleString ("50,000.00") — which
+ * is exactly what startEdit() in ModuleView.tsx seeds a money field
+ * with when editing an existing record, and exactly what this same
+ * function's own onBlur handler re-formats a field into as soon as a
+ * person tabs away from it. Every one of those comma-formatted
+ * strings then had nowhere to go: this parser rejected any non-digit
+ * character, including the very commas formatMoney had just inserted,
+ * so simply opening an HR salary (almost always >= 1,000) for edit
+ * and saving it straight back — without changing a thing — failed
+ * with "'50,000.00' is not a valid amount". Thousands separators are
+ * also just how people normally type larger figures by hand. Commas
+ * are stripped before every other check runs, so "50,000.00",
+ * "50,000", and "50000" all parse identically — this never loosens
+ * what counts as a valid decimal point or digit, it only ignores the
+ * grouping punctuation a human (or this same file) would put in.
  */
 export function parseMoneyInput(input: string, currencyCode: string = 'USD'): number | null {
-  const trimmed = (input ?? '').trim();
+  const trimmed = (input ?? '').trim().replace(/,/g, '');
   if (!trimmed) return null;
 
   const negative = trimmed.startsWith('-');

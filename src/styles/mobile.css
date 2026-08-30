@@ -96,6 +96,13 @@
     position: static !important;
     height: auto !important;
     overflow: visible !important;
+    /* Reserves room at the bottom of the page for the checkout button
+       below, which is `position: fixed` (see .pos-checkout-btn) —
+       floating above everything rather than sitting in normal flow.
+       Without this, the last field in the cart card (the "allow
+       oversell" checkbox, or an error banner) would render underneath
+       that floating button instead of scrolling clear of it. */
+    padding-bottom: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom, 0) + 4.5rem) !important;
   }
   /* The scrollable middle region (cart items + customer/payment
      fields) no longer needs its own internal scrollbar either, now
@@ -106,22 +113,33 @@
     overflow: visible !important;
     min-height: auto !important;
   }
-  /* The checkout button is the one thing that still needs to stay
-     reachable without hunting for it at the bottom of a long cart —
-     `sticky; bottom` is the standard mobile-commerce pattern for
-     exactly this: it scrolls normally with the page until its own
-     card's bottom edge approaches the screen's bottom edge, then
-     stays pinned there for the rest of that card's scroll range.
+  /* THE BUG THIS FIXES: `position: sticky` only starts pinning once
+     the button's OWN normal position in the page's scroll flow
+     approaches the offset — which, in this single-column mobile
+     layout, sits below the entire product grid AND the entire cart
+     card (customer picker, credit/payment fields, etc). That's what
+     "even with an empty cart I have to scroll" was: the button's
+     natural position was simply far down the page, sticky or not, so
+     nothing kept it on screen until you scrolled past everything
+     above it. `position: fixed` removes the button from that flow
+     entirely and pins it to the viewport itself, so it is visible
+     immediately on load, regardless of cart size, product-list
+     length, or scroll position — the standard mobile-commerce
+     "floating checkout bar" pattern.
      Offset by the bottom tab bar's own height (plus the safe-area
-     inset) — not just the safe-area inset alone — so the button
-     comes to rest just above that bar instead of underneath it; same
-     shared variable the tab bar and the content padding above both
-     use, for the same reason.
+     inset) plus a small gap — not just the safe-area inset alone —
+     so the button comes to rest just above that bar instead of
+     underneath it; same shared variable the tab bar and the content
+     padding above both use, for the same reason.
   */
   .pos-checkout-btn {
-    position: sticky !important;
-    bottom: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom, 0));
-    z-index: 5;
+    position: fixed !important;
+    left: 1rem;
+    right: 1rem;
+    width: auto !important;
+    margin-top: 0 !important;
+    bottom: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom, 0) + 0.75rem);
+    z-index: 36; /* above .app-bottom-tabbar's 35, below the drawer/backdrop/AI panel */
     box-shadow: 0 -4px 10px rgba(0,0,0,0.08);
   }
 

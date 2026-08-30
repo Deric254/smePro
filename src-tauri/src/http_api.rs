@@ -1459,6 +1459,12 @@ fn route(
             Err(e) => json_err(400, &e.to_string()),
         };
     }
+    if parts.len() == 3 && parts[0] == "invoices" && parts[2] == "refund-status" && *method == Method::Get {
+        return match crate::invoice::get_refund_status(conn, &business_id, &user_id, parts[1]) {
+            Ok(v) => ApiResponse::Json(200, v),
+            Err(e) => json_err(404, &e.to_string()),
+        };
+    }
 
     // ---- Business branding (logo + slogan) ----
     if parts.as_slice() == ["business", "branding"] && *method == Method::Get {

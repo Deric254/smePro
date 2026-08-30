@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getToken, getLogoUrl, markInvoiceSent, markInvoicePaid, cancelInvoice, ApiError, API_BASE as API } from '../api';
+import { getToken, getLogoUrl, markInvoiceSent, markInvoicePaid, cancelInvoice, getInvoiceRefundStatus, ApiError, API_BASE as API } from '../api';
 import { formatMoney } from '../lib/money';
 import '../styles/invoice-print.css';
 
@@ -26,6 +26,10 @@ interface InvoiceRecord {
   tax_amount: number;
   total: number;
   notes?: string;
+  // Present only on an invoice auto-generated from a POS/service sale
+  // (see invoice::create_invoice_for_order) — absent on one created
+  // by hand through the "+ New invoice" form.
+  source_sale_id?: string;
 }
 
 
@@ -33,19 +37,30 @@ interface InvoiceRecord {
 export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { invoiceId: string; onClose: () => void; onStatusChanged?: () => void }) {
   const [invoice, setInvoice] = useState<InvoiceRecord | null>(null);
   const [business, setBusiness] = useState<{name:string; slogan?:string; logo_path?:string; currency:string} | null>(null);
+  // Kept separate from `invoice` itself — the invoice document stays
+  // frozen exactly as issued (see invoice.rs's own doc comment); this
+  // is purely additional, always-current disclosure fetched
+  // alongside it, same split ReceiptView already uses between the
+  // as-sold total and the refund figures.
+  const [refundedAmount, setRefundedAmount] = useState(0);
+  const [isRefunded, setIsRefunded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState('');
 
   function reload() {
-    return fetch(`${API}/modules/invoice/records`, {
-      cache: 'no-store', headers: { Authorization: `Bearer ${getToken()}` } })
-      .then(r => r.json())
-      .then((recordsData) => {
-        const rec = recordsData.records?.find((r: any) => r.id === invoiceId);
-        if (rec) setInvoice(rec);
-      });
+    return Promise.all([
+      fetch(`${API}/modules/invoice/records`, {
+        cache: 'no-store', headers: { Authorization: `Bearer ${getToken()}` } })
+        .then(r => r.json()),
+      getInvoiceRefundStatus(invoiceId).catch(() => ({ refunded_amount: 0, is_refunded: false })),
+    ]).then(([recordsData, refundStatus]) => {
+      const rec = recordsData.records?.find((r: any) => r.id === invoiceId);
+      if (rec) setInvoice(rec);
+      setRefundedAmount(refundStatus.refunded_amount);
+      setIsRefunded(refundStatus.is_refunded);
+    });
   }
 
   async function handleAction(action: () => Promise<unknown>) {
@@ -69,18 +84,64 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
         .then(r => r.json()),
       fetch(`${API}/business`, {
       cache: 'no-store', headers: { Authorization: `Bearer ${getToken()}` } })
-        .then(r => r.json())
-    ]).then(([recordsData, bizData]) => {
+        .then(r => r.json()),
+      getInvoiceRefundStatus(invoiceId).catch(() => ({ refunded_amount: 0, is_refunded: false })),
+    ]).then(([recordsData, bizData, refundStatus]) => {
       const rec = recordsData.records?.find((r: any) => r.id === invoiceId);
       if (!rec) throw new Error('Invoice not found');
       setInvoice(rec);
       setBusiness(bizData);
+      setRefundedAmount(refundStatus.refunded_amount);
+      setIsRefunded(refundStatus.is_refunded);
     }).catch(e => setError(e.message)).finally(() => setLoading(false));
   }, [invoiceId]);
 
   const items: InvoiceItem[] = invoice ? JSON.parse(invoice.items_json || '[]') : [];
 
   const handlePrint = () => window.print();
+
+  function invoiceText(): string {
+    if (!invoice || !business) return '';
+    const lines = items.map(
+      (i) => `${i.description} x${i.quantity} — ${business.currency} ${formatMoney(i.quantity * i.unit_price, business.currency)}`
+    );
+    const netTotal = Math.max(0, invoice.total - refundedAmount);
+    return [
+      business.name,
+      business.slogan || '',
+      '',
+      `Invoice #${invoice.invoice_number}`,
+      `Issued: ${new Date(invoice.issue_date).toLocaleDateString()}`,
+      `Due: ${new Date(invoice.due_date).toLocaleDateString()}`,
+      '',
+      `Bill to: ${invoice.customer}`,
+      '',
+      ...lines,
+      '',
+      `Total: ${business.currency} ${formatMoney(invoice.total, business.currency)}`,
+      isRefunded ? `Refunded: ${business.currency} ${formatMoney(refundedAmount, business.currency)}` : '',
+      isRefunded ? `Net total: ${business.currency} ${formatMoney(netTotal, business.currency)}` : '',
+      `Status: ${invoice.status.toUpperCase()}`,
+      '',
+      'Thank you for your business!',
+    ].filter(Boolean).join('\n');
+  }
+
+  function shareWhatsApp() {
+    const text = encodeURIComponent(invoiceText());
+    // wa.me works identically whether WhatsApp is installed (opens the
+    // app directly) or not (falls back to WhatsApp Web) — no phone
+    // number needed here since the person sharing picks the recipient
+    // themselves in WhatsApp's own share sheet, same approach
+    // ReceiptView already uses.
+    window.open(`https://wa.me/?text=${text}`, '_blank');
+  }
+
+  function shareEmail() {
+    const subject = encodeURIComponent(`Invoice ${invoice?.invoice_number || ''} from ${business?.name || 'your business'}`);
+    const body = encodeURIComponent(invoiceText());
+    window.location.href = `mailto:${invoice?.customer_email || ''}?subject=${subject}&body=${body}`;
+  }
 
   const statusColor = (s: string) => {
     switch(s) {
@@ -111,6 +172,11 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
           <div>
             <div><strong>Invoice #:</strong> {invoice.invoice_number}</div>
             <div><strong>Status:</strong> <span style={{color:statusColor(invoice.status), fontWeight:600, textTransform:'uppercase'}}>{invoice.status}</span></div>
+            {isRefunded && (
+              <div style={{color:'#c0392b', fontSize:12, fontWeight:600, marginTop:2}}>
+                Refunded: {business.currency} {formatMoney(refundedAmount, business.currency)}
+              </div>
+            )}
           </div>
           <div style={{textAlign:'right'}}>
             <div><strong>Issue Date:</strong> {new Date(invoice.issue_date).toLocaleDateString()}</div>
@@ -155,6 +221,18 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
             <span>Total:</span>
             <span>{business.currency} {formatMoney(invoice.total, business.currency)}</span>
           </div>
+          {isRefunded && (
+            <>
+              <div style={{...row, color: '#c0392b'}}>
+                <span>Refunded:</span>
+                <span>− {business.currency} {formatMoney(refundedAmount, business.currency)}</span>
+              </div>
+              <div style={{...row, ...totalRow}}>
+                <span>Net total:</span>
+                <span>{business.currency} {formatMoney(Math.max(0, invoice.total - refundedAmount), business.currency)}</span>
+              </div>
+            </>
+          )}
         </div>
 
         {invoice.notes && (
@@ -190,6 +268,8 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
             </button>
           )}
           <button onClick={handlePrint} style={primaryBtn}>🖨️ Print Invoice</button>
+          <button onClick={shareWhatsApp} style={secondaryBtn}>💬 WhatsApp</button>
+          <button onClick={shareEmail} style={secondaryBtn}>✉️ Email</button>
           <button onClick={onClose} style={secondaryBtn}>Close</button>
         </div>
       </div>

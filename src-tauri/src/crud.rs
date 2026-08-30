@@ -85,7 +85,7 @@ pub fn load_module(conn: &Connection, business_id: &str, module_id: &str) -> Res
 /// default_roles), a crafted spreadsheet re-upload was a real,
 /// reachable way to fully bypass both of those guarantees, not a
 /// theoretical one.
-fn is_update_blocked_field(module_id: &str, field_name: &str, bulk_import: bool) -> bool {
+pub(crate) fn is_update_blocked_field(module_id: &str, field_name: &str, bulk_import: bool) -> bool {
     if module_id == "inventory" && field_name == "quantity" {
         return !bulk_import;
     }
@@ -141,12 +141,16 @@ pub fn create(
     // an error condition — the frontend doesn't even show the field on
     // this form (see ModuleView.tsx).
     //
-    // Deliberately does NOT apply to insert_validated_record() below,
-    // which is what excel_import.rs's bulk upload calls directly instead
-    // of this function — see that module's own doc comment for why a
-    // spreadsheet-driven initial catalog load (or a stock take) is a
-    // real, sanctioned way to set a starting quantity, unlike a single
-    // ad-hoc item creation through this generic form.
+    // excel_import.rs's bulk upload calls insert_validated_record()
+    // below directly instead of this function, but applies this exact
+    // same forced-zero rule itself for brand-new items (see that
+    // module's own "THE BUG THIS FIXES" comment) — so a spreadsheet
+    // import can't seed a starting quantity any more than this
+    // single-record form can. The one legitimate exception on either
+    // path is re-uploading a spreadsheet to reconcile an item that
+    // ALREADY EXISTS (a real stock take) — see
+    // is_update_blocked_field's bulk_import exemption below, which is
+    // scoped to updates of existing records only, never creates.
     if module_id == "inventory" {
         record.insert("quantity".to_string(), json!(0));
     }

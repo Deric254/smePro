@@ -100,6 +100,12 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
 
     let order_id = Uuid::new_v4().to_string();
     let mut lines = Vec::with_capacity(req.items.len());
+    // Parallel to `lines` above but in the exact shape
+    // invoice::create_invoice_for_order needs — built alongside it so
+    // the auto-generated invoice reflects precisely what was actually
+    // sold, never a second, independently-reconstructed list that
+    // could drift from it.
+    let mut invoice_items: Vec<crate::invoice::InvoiceItem> = Vec::with_capacity(req.items.len());
     // Integer cents throughout — see money.rs. This sum is exact by
     // construction; there is no fractional cent that could ever need
     // rounding here, unlike the f64 subtotal this replaced.
@@ -207,6 +213,11 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             "remaining_stock": new_qty,
             "sale_id": sale_id,
         }));
+        invoice_items.push(crate::invoice::InvoiceItem {
+            description: name,
+            quantity: item.quantity,
+            unit_price,
+        });
     }
 
     // If this is a credit sale, the debt is created here — still
@@ -285,6 +296,26 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         }
     }
 
+    // Every completed order gets a real, numbered invoice automatically
+    // — see invoice::create_invoice_for_order's own doc comment for why
+    // this exists and what it replaces (a person having to remember to
+    // create one by hand afterward). Best-effort, same pattern as the
+    // Bookkeeping post just above: a business that hasn't enabled the
+    // Invoice module can still ring up a sale.
+    if crud::load_module(&tx, business_id, "invoice").is_ok() {
+        crate::invoice::create_invoice_for_order(
+            &tx,
+            business_id,
+            &order_id,
+            req.customer.as_deref(),
+            req.customer_phone.as_deref(),
+            &invoice_items,
+            subtotal,
+            req.on_credit,
+            req.due_date.as_deref(),
+        )?;
+    }
+
     // Everything above happened inside `tx` and nothing is durable yet.
     // This is the one moment it all becomes real, together — if the
     // process died at any point before this line, every UPDATE and
@@ -361,6 +392,7 @@ pub fn create_service_sale(conn: &mut Connection, business_id: &str, user_id: &s
 
     let order_id = Uuid::new_v4().to_string();
     let mut lines_out = Vec::with_capacity(req.lines.len());
+    let mut invoice_items: Vec<crate::invoice::InvoiceItem> = Vec::with_capacity(req.lines.len());
     let mut subtotal: i64 = 0;
 
     let tx = conn.transaction()?;
@@ -423,6 +455,11 @@ pub fn create_service_sale(conn: &mut Connection, business_id: &str, user_id: &s
             "line_total": line_total,
             "sale_id": sale_id,
         }));
+        invoice_items.push(crate::invoice::InvoiceItem {
+            description: line.description.trim().to_string(),
+            quantity: line.quantity,
+            unit_price: line.unit_price,
+        });
     }
 
     // Same reasoning and same shape as checkout()'s own Bookkeeping
@@ -460,6 +497,25 @@ pub fn create_service_sale(conn: &mut Connection, business_id: &str, user_id: &s
         accounting_module.validate(&entry)?;
         crate::reference_data::validate_field_references(&tx, business_id, &accounting_module, &entry)?;
         crud::insert_validated_record(&tx, business_id, &accounting_module, &entry)?;
+    }
+
+    // Every completed service sale gets a real, numbered invoice
+    // automatically too — same reasoning and same best-effort pattern
+    // as checkout()'s own call to this just above. A service sale has
+    // no on_credit concept (see ServiceSaleRequest's own doc comment),
+    // so it's always invoiced as immediately paid.
+    if crud::load_module(&tx, business_id, "invoice").is_ok() {
+        crate::invoice::create_invoice_for_order(
+            &tx,
+            business_id,
+            &order_id,
+            req.customer.as_deref(),
+            req.customer_phone.as_deref(),
+            &invoice_items,
+            subtotal,
+            false,
+            None,
+        )?;
     }
 
     tx.commit()?;

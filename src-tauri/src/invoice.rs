@@ -126,6 +126,150 @@ pub fn create_invoice(
     Ok(json!({"id": id, "invoice_number": invoice_number, "total": total}))
 }
 
+/// Auto-generates a real, numbered invoice for a completed POS
+/// order — goods sale (`pos::checkout`) or service sale
+/// (`pos::create_service_sale`) — inside the SAME transaction as the
+/// sale itself. Before this, an invoice only ever existed if someone
+/// went to the Invoices tab and filled in the "+ New invoice" form by
+/// hand afterward; every sale rung up at the till or the service
+/// counter had no invoice at all unless a person remembered to create
+/// one separately. Every sale now gets one automatically — printable,
+/// shareable, and searchable through the exact same Invoices module
+/// and InvoiceView UI a manually-created invoice already uses.
+///
+/// Deliberately bypasses `create_invoice()`'s own RBAC check and its
+/// full `CreateInvoiceRequest` shape: the caller (`checkout`/
+/// `create_service_sale`) already authorized the whole operation via
+/// its own purpose-built permission, the same reasoning those
+/// functions already apply to their own direct
+/// accounting/debt_credit inserts. Every amount here is computed
+/// fresh from what the sale itself actually recorded — never
+/// re-derived from a second, independently-typed request that could
+/// drift out of sync with it.
+///
+/// Best-effort by design, exactly like the accounting/debt_credit
+/// inserts it sits alongside in `pos.rs`: a business that hasn't
+/// enabled the Invoice module can still ring up a sale, and the
+/// caller only invokes this at all once it's confirmed the module
+/// exists.
+pub fn create_invoice_for_order(
+    conn: &Connection,
+    business_id: &str,
+    order_id: &str,
+    customer: Option<&str>,
+    customer_phone: Option<&str>,
+    items: &[InvoiceItem],
+    subtotal: i64,
+    on_credit: bool,
+    due_date: Option<&str>,
+) -> Result<String> {
+    let invoice_number = generate_number(conn, business_id)?;
+
+    let tax_rate: f64 = conn.query_row(
+        "SELECT tax_rate FROM businesses WHERE id = ?1",
+        params![business_id],
+        |r| r.get(0),
+    ).unwrap_or(0.0);
+    let tax_amount = crate::money::apply_rate(subtotal, tax_rate / 100.0);
+    let total = subtotal + tax_amount;
+    let items_json = serde_json::to_string(items)?;
+    let today = chrono::Utc::now().date_naive().to_string();
+
+    let mut record = serde_json::Map::from_iter([
+        ("invoice_number".into(), json!(invoice_number)),
+        // A walk-in POS sale often has no customer name at all —
+        // `customer` is a required field on the Invoice module, so a
+        // clear placeholder stands in rather than leaving this
+        // invoice unable to be created (and the sale silently
+        // invoice-less) just because nobody was asked for a name at
+        // the till.
+        ("customer".into(), json!(customer.map(str::trim).filter(|c| !c.is_empty()).unwrap_or("Walk-in customer"))),
+        ("issue_date".into(), json!(today)),
+        // A credit sale is genuinely owed later — its due date is
+        // whatever Debt & Credit was given (or, absent that, today,
+        // same "no invisible default" floor used elsewhere). A normal
+        // paid-now sale has nothing left to be "due" — its due date is
+        // simply the day it was issued.
+        ("due_date".into(), json!(if on_credit { due_date.filter(|d| !d.trim().is_empty()).unwrap_or(&today) } else { today.as_str() })),
+        // Reflects reality immediately, not a workflow status that
+        // then has to be manually advanced: a credit sale is genuinely
+        // "sent" (awaiting payment) the moment it's rung up, and a
+        // paid-now sale is genuinely "paid" the moment it's rung up —
+        // there's no real "draft" in between for either one.
+        ("status".into(), json!(if on_credit { "sent" } else { "paid" })),
+        ("items_json".into(), json!(items_json)),
+        ("subtotal".into(), json!(subtotal)),
+        ("tax_rate".into(), json!(tax_rate)),
+        ("tax_amount".into(), json!(tax_amount)),
+        ("total".into(), json!(total)),
+        ("source_sale_id".into(), json!(order_id)),
+    ]);
+    if !on_credit {
+        record.insert("paid_at".into(), json!(today));
+    }
+    if let Some(phone) = customer_phone {
+        if !phone.trim().is_empty() {
+            record.insert("customer_phone".into(), json!(phone));
+        }
+    }
+
+    let invoice_module = crud::load_module(conn, business_id, "invoice")?;
+    let record_map: std::collections::HashMap<String, Value> = record.into_iter().collect();
+    invoice_module.validate(&record_map)?;
+    crate::reference_data::validate_field_references(conn, business_id, &invoice_module, &record_map)?;
+    crud::insert_validated_record(conn, business_id, &invoice_module, &record_map)
+}
+
+/// Looks up how much (if anything) has been refunded against the
+/// sale this invoice was auto-generated from, WITHOUT touching the
+/// invoice's own frozen subtotal/tax/total — those stay exactly as
+/// originally issued, same "as it was" principle receipt.rs already
+/// applies. This is purely additional disclosure, read fresh each
+/// time the invoice is viewed, so it always reflects the current
+/// refund state even though the invoice document itself never
+/// changes.
+///
+/// Returns `refunded_amount: 0, is_refunded: false` — not an error —
+/// for a manually-created invoice with no `source_sale_id` at all,
+/// or a refunds module that isn't enabled: "nothing refunded" is the
+/// correct, honest answer in both cases, not a failure to report.
+pub fn get_refund_status(conn: &Connection, business_id: &str, user_id: &str, invoice_id: &str) -> Result<Value> {
+    rbac::require(conn, user_id, "invoice", "read")?;
+
+    let invoice_module = crud::load_module(conn, business_id, "invoice")?;
+    let invoice_table = invoice_module.table_name();
+    let source_sale_id: Option<String> = conn
+        .query_row(
+            &format!("SELECT source_sale_id FROM {invoice_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+            params![invoice_id, business_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| anyhow!("invoice not found"))?;
+
+    let Some(order_id) = source_sale_id else {
+        return Ok(json!({"refunded_amount": 0, "is_refunded": false}));
+    };
+
+    // Best-effort, same reasoning as receipt.rs's own refund lookup:
+    // a business that's never enabled Refunds simply has nothing to
+    // find, not an error.
+    let refunded_amount: i64 = if let Ok(refunds_module) = crud::load_module(conn, business_id, "refunds") {
+        let refunds_table = refunds_module.table_name();
+        conn.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(refund_amount), 0) FROM {refunds_table} \
+                 WHERE business_id = ?1 AND order_id = ?2 AND deleted_at IS NULL"
+            ),
+            params![business_id, order_id],
+            |r| r.get(0),
+        ).unwrap_or(0)
+    } else {
+        0
+    };
+
+    Ok(json!({"refunded_amount": refunded_amount, "is_refunded": refunded_amount > 0}))
+}
+
 /// Atomically marks an invoice as sent (sets sent_at).
 pub fn mark_sent(conn: &mut Connection, business_id: &str, user_id: &str, invoice_id: &str) -> Result<()> {
     rbac::require(conn, user_id, "invoice", "update")?;

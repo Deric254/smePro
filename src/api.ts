@@ -593,6 +593,15 @@ export const markInvoiceSent = (invoiceId: string) => request(`/invoices/${invoi
 export const markInvoicePaid = (invoiceId: string) => request(`/invoices/${invoiceId}/pay`, { method: 'POST' });
 export const cancelInvoice = (invoiceId: string) => request(`/invoices/${invoiceId}/cancel`, { method: 'POST' });
 
+// The invoice document itself is frozen at issue time (see
+// invoice.rs's own doc comment on why) — this is a separate,
+// always-fresh lookup of whatever's been refunded against the sale
+// an invoice was auto-generated from, so InvoiceView can disclose it
+// without ever rewriting the invoice's own original figures.
+export interface InvoiceRefundStatus { refunded_amount: number; is_refunded: boolean }
+export const getInvoiceRefundStatus = (invoiceId: string): Promise<InvoiceRefundStatus> =>
+  request(`/invoices/${invoiceId}/refund-status`);
+
 // ---- Change business type after setup — re-applies that type's
 // sensible default module set. ----
 export const changeBusinessType = (businessType: string): Promise<{ enabled_modules: string[] }> =>

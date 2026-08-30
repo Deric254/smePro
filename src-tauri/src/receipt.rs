@@ -6,25 +6,60 @@
 //! POS order data (no duplicate storage) and is gated by the same
 //! "read" permission on sales that the report viewer uses.
 //!
+//! A receipt always shows the sale AS IT WAS ACTUALLY RUNG UP —
+//! original quantity and unit price, full stop — never a number
+//! quietly shrunk by a later refund. THE BUG THIS FIXES: refund.rs
+//! reduces the sale row's own `revenue` column directly (`revenue =
+//! MAX(0, revenue - refund_amount)`) so Bookkeeping/dashboard totals
+//! stay honest — but this module used to read that same, now-mutated
+//! `revenue` straight back out as "line_total" with zero indication a
+//! refund had ever happened. A fully-refunded sale's receipt would
+//! print a KES 0 line item with no explanation; a partially-refunded
+//! one would silently print a smaller "total" than what was actually
+//! charged at the till, indistinguishable from a genuinely smaller
+//! sale. This module now reconstructs the original, as-sold amount
+//! (`unit_price * quantity` — exact, since both are integers) and
+//! separately reports whatever's been refunded against each line, so
+//! the original sale and its refund status are always both visible,
+//! consistently, whether refunded or not.
+//!
 //! STRESS-TESTED EDGE CASES:
 //! - Empty order → rejected (404)
 //! - Business with no logo/slogan → renders cleanly without them
 //! - Tax rate = 0 → tax line omitted from output
 //! - Very long item names → truncated at 100 chars in receipt view
 //! - Deleted sales records → excluded (soft-delete respected)
+//! - Refunds module not enabled for this business → every line simply
+//!   reports zero refunded, receipt still renders normally
+//! - A line refunded more than once (partial refunds accumulating) →
+//!   summed correctly from every matching refund row, not just the
+//!   most recent one
 
-use crate::{audit, rbac};
+use crate::{audit, crud, rbac};
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
 pub struct ReceiptLine {
     pub item_name: String,
+    /// The original quantity sold on this line — never adjusted by a
+    /// later refund (refund.rs never touches this column).
     pub quantity: i64,
     /// Integer minor units (cents) — see money.rs.
     pub unit_price: i64,
+    /// The original, as-sold line amount (`unit_price * quantity`) —
+    /// what this line actually rang up at, unaffected by any refund
+    /// processed against it since.
     pub line_total: i64,
+    /// How much of `quantity` has since been refunded against this
+    /// exact sale line (summed across every refund on it, not just
+    /// the latest one). Zero when nothing's been refunded.
+    pub quantity_refunded: i64,
+    /// How much money has been refunded against this exact sale line.
+    /// Zero when nothing's been refunded.
+    pub refunded_amount: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,10 +72,27 @@ pub struct Receipt {
     pub customer: Option<String>,
     pub date: String,
     pub items: Vec<ReceiptLine>,
+    /// Sum of every line's original, as-sold amount — what this order
+    /// actually rang up at, unaffected by any later refund.
     pub subtotal: i64,
     pub tax_rate: f64,
+    /// Tax on the original `subtotal` above — frozen at what was
+    /// actually charged at sale time, same "as it was" principle as
+    /// everything else on this receipt.
     pub tax_amount: i64,
+    /// `subtotal + tax_amount` — the original total as it was rung up.
     pub total: i64,
+    /// Sum of every line's `refunded_amount` — 0 when nothing on this
+    /// order has ever been refunded.
+    pub refunded_amount: i64,
+    /// `total - refunded_amount` — what's actually still owed/kept
+    /// after refunds. Equal to `total` when nothing's been refunded.
+    pub net_total: i64,
+    /// True the instant any amount has been refunded against this
+    /// order — the one flag a receipt view needs to consistently show
+    /// (or hide) refund details, rather than inferring it from
+    /// whether `refunded_amount` happens to be nonzero.
+    pub is_refunded: bool,
     pub payment_method: Option<String>,
     pub cashier_name: String,
 }
@@ -67,35 +119,95 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     ).map_err(|_| anyhow!("business not found"))?;
 
-    let sales_module = crate::crud::load_module(conn, business_id, "sales")
+    let sales_module = crud::load_module(conn, business_id, "sales")
         .map_err(|_| anyhow!("sales module not enabled for this business"))?;
     let table = sales_module.table_name();
 
+    // Fetch `id` too now — needed to look up refunds against this
+    // exact sale line below. `revenue` is intentionally NOT selected
+    // as the line total anymore (see the module doc comment above) —
+    // unit_price * quantity gives the true original, as-sold figure
+    // directly and exactly, without depending on whatever refund.rs
+    // may have since subtracted from `revenue`.
     let mut stmt = conn.prepare(&format!(
-        "SELECT item_name, quantity, revenue, unit_price, customer, payment_method, created_at \
+        "SELECT id, item_name, quantity, unit_price \
          FROM {table} WHERE business_id = ?1 AND order_id = ?2 AND deleted_at IS NULL ORDER BY created_at"
     ))?;
 
+    struct RawLine {
+        id: String,
+        item_name: String,
+        quantity: i64,
+        unit_price: i64,
+    }
+
     let rows = stmt.query_map(params![business_id, order_id], |r| {
-        Ok(ReceiptLine {
+        Ok(RawLine {
+            id: r.get(0)?,
             item_name: {
-                let name: String = r.get(0)?;
+                let name: String = r.get(1)?;
                 if name.len() > 100 { name[..100].to_string() + "..." } else { name }
             },
-            quantity: r.get(1)?,
-            line_total: r.get(2)?,
+            quantity: r.get(2)?,
             unit_price: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
         })
     })?;
 
-    let items: Vec<ReceiptLine> = rows.filter_map(|r| r.ok()).collect();
-    if items.is_empty() {
+    let raw_lines: Vec<RawLine> = rows.filter_map(|r| r.ok()).collect();
+    if raw_lines.is_empty() {
         return Err(anyhow!("order not found or has no items"));
     }
+
+    // Best-effort: a business that's never enabled the Refunds module
+    // simply has nothing to look up — every line reports zero
+    // refunded, same as a business that's enabled it but genuinely
+    // has no refunds against this order.
+    let refunded_by_sale_id: HashMap<String, (i64, i64)> =
+        if let Ok(refunds_module) = crud::load_module(conn, business_id, "refunds") {
+            let refunds_table = refunds_module.table_name();
+            let mut map = HashMap::new();
+            if let Ok(mut rstmt) = conn.prepare(&format!(
+                "SELECT sale_id, COALESCE(SUM(quantity_refunded), 0), COALESCE(SUM(refund_amount), 0) \
+                 FROM {refunds_table} WHERE business_id = ?1 AND order_id = ?2 AND deleted_at IS NULL \
+                 GROUP BY sale_id"
+            )) {
+                if let Ok(rrows) = rstmt.query_map(params![business_id, order_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+                }) {
+                    for row in rrows.filter_map(|r| r.ok()) {
+                        map.insert(row.0, (row.1, row.2));
+                    }
+                }
+            }
+            map
+        } else {
+            HashMap::new()
+        };
+
+    let items: Vec<ReceiptLine> = raw_lines
+        .into_iter()
+        .map(|line| {
+            let (quantity_refunded, refunded_amount) =
+                refunded_by_sale_id.get(&line.id).copied().unwrap_or((0, 0));
+            ReceiptLine {
+                item_name: line.item_name,
+                quantity: line.quantity,
+                unit_price: line.unit_price,
+                line_total: line.unit_price * line.quantity,
+                quantity_refunded,
+                refunded_amount,
+            }
+        })
+        .collect();
 
     let subtotal: i64 = items.iter().map(|i| i.line_total).sum();
     let tax_amount = crate::money::apply_rate(subtotal, tax_rate / 100.0);
     let total = subtotal + tax_amount;
+    let refunded_amount: i64 = items.iter().map(|i| i.refunded_amount).sum();
+    // Clamped at 0 for the same reason refund.rs itself clamps —
+    // a refund can never leave "what's owed" negative regardless of
+    // exactly how much was handed back.
+    let net_total = (total - refunded_amount).max(0);
 
     let cashier_name: String = conn.query_row(
         "SELECT username FROM users WHERE id = ?1",
@@ -123,6 +235,9 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
         tax_rate,
         tax_amount,
         total,
+        refunded_amount,
+        net_total,
+        is_refunded: refunded_amount > 0,
         payment_method,
         cashier_name,
     };

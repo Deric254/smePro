@@ -42,7 +42,15 @@ pub fn decimal_places_for(currency_code: &str) -> u32 {
 /// like "12.505" for a 2dp currency is a data-entry mistake, not
 /// something to silently round away.
 pub fn parse_money_input(input: &str, currency_code: &str) -> Result<i64> {
-    let trimmed = input.trim();
+    // Strip thousands separators before anything else — mirrors
+    // src/lib/money.ts's parseMoneyInput exactly (see that file's own
+    // doc comment for THE BUG THIS FIXES: formatMoney's own comma
+    // grouping used to round-trip straight into a rejection here).
+    // A spreadsheet cell can carry the same comma-grouped text a
+    // human would type, so this needs the identical fix, not just the
+    // frontend.
+    let no_separators = input.replace(',', "");
+    let trimmed = no_separators.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("amount is required"));
     }
@@ -135,6 +143,13 @@ mod tests {
     #[test]
     fn respects_three_decimal_currencies() {
         assert_eq!(parse_money_input("1.500", "KWD").unwrap(), 1500);
+    }
+
+    #[test]
+    fn strips_thousands_separators() {
+        assert_eq!(parse_money_input("50,000", "KES").unwrap(), 5_000_000);
+        assert_eq!(parse_money_input("50,000.00", "KES").unwrap(), 5_000_000);
+        assert_eq!(parse_money_input("1,234,567.89", "USD").unwrap(), 123_456_789);
     }
 
     #[test]
