@@ -202,6 +202,44 @@ fn route(
         };
     }
 
+    // GET /setup/diagnostics — NOT used by the frontend at all. Exists
+    // purely so a real device's actual runtime state can be inspected
+    // directly (e.g. by opening this URL in the phone's browser, or via
+    // Ask AI) instead of guessing at it remotely. Specifically added to
+    // chase down a real bug: onboarding's apply_business_type() silently
+    // no-ops for any module whose JSON file isn't found at
+    // `crate::modules_dir()` on this device — no error, no log, nothing
+    // gets enabled. This surfaces the exact resolved path and whether it
+    // actually contains the expected files, which is the one piece of
+    // this bug that can't be determined by reading source code alone —
+    // it depends on how Tauri's resource_dir() resolves and what
+    // actually got bundled into THIS specific build, on THIS specific
+    // platform. Public/no-auth on purpose, matching the other /setup/*
+    // routes above — nothing here is business data, just this
+    // installation's own filesystem paths.
+    if parts.as_slice() == ["setup", "diagnostics"] && *method == Method::Get {
+        let dir = crate::modules_dir();
+        let dir_exists = dir.is_dir();
+        let entries: Vec<String> = if dir_exists {
+            std::fs::read_dir(&dir)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        return ApiResponse::Json(
+            200,
+            json!({
+                "modules_dir": dir.to_string_lossy(),
+                "modules_dir_exists": dir_exists,
+                "modules_dir_entries": entries,
+            }),
+        );
+    }
+
     // GET /setup/business-id — resolves the business ID automatically
     // for the normal case (one install, one business), so the login
     // screen never has to ask someone to know or paste a raw UUID just
