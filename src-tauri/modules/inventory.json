@@ -93,7 +93,8 @@
       "stocktake"
     ],
     "Staff": [
-      "read"
+      "read",
+      "sell"
     ]
   },
   "dashboard_metric": {

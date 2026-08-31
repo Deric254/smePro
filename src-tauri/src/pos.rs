@@ -96,7 +96,6 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         return Err(anyhow!("a customer name is required for a credit sale — Debt & Credit needs to know who owes it"));
     }
     let inventory_table = inventory_module.table_name();
-    let sales_table = sales_module.table_name();
 
     let order_id = Uuid::new_v4().to_string();
     let mut lines = Vec::with_capacity(req.items.len());
@@ -340,7 +339,6 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     // itself failed) would be worse than not logging at all.
     let _ = crate::audit::log(conn, business_id, Some(user_id), "_pos", "checkout", Some(&order_id), Some(&summary));
 
-    let _ = sales_table; // kept for symmetry/clarity even though only inventory_table is queried directly above
     Ok(summary)
 }
 

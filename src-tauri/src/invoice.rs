@@ -39,17 +39,38 @@ pub struct CreateInvoiceRequest {
 }
 
 /// Generates the next invoice number for a business.
-/// Format: INV-0001, INV-0002, etc. Scoped per business.
-/// Uses a COUNT query + 1 — safe because invoice creation is
-/// transactional; two simultaneous creations on the same business
-/// will block each other at the transaction level.
+/// Format: INV-1, INV-2, etc. Scoped per business.
+///
+/// THE BUG THIS FIXES: this used to be `COUNT(*) WHERE deleted_at IS
+/// NULL` + 1 — a live-row count, not a real sequence. That's exactly
+/// wrong the moment any invoice is ever deleted: delete the 2nd of 3
+/// invoices and the live count drops to 2, so the very next invoice
+/// created becomes "INV-3" again — silently colliding with the 3rd
+/// invoice, which is still active. There's no unique constraint on
+/// invoice_number to catch this either (see invoice.json), so the
+/// duplicate would sail straight into two real, active invoices
+/// sharing one number — exactly the kind of thing an audit or a
+/// customer dispute surfaces months later, not something that fails
+/// loudly at the time.
+///
+/// The fix: take the MAX of every invoice_number ever assigned to this
+/// business — deleted or not — and go one past it. A deleted number is
+/// retired, never reused, the same way a real paper invoice book
+/// doesn't un-print a page once it's torn out. `CAST(... AS INTEGER)`
+/// on a non-numeric/malformed invoice_number (e.g. one a user hand-
+/// edited into some other shape through the generic update endpoint —
+/// invoice_number isn't on crud.rs's blocked-field list) safely
+/// evaluates to 0 in SQLite rather than erroring, so this can only
+/// ever undercount such a row, never crash or skip numbers because of
+/// it.
 pub fn generate_number(conn: &Connection, business_id: &str) -> Result<String> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM module_invoice WHERE business_id = ?1 AND deleted_at IS NULL",
+    let max_existing: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(CAST(SUBSTR(invoice_number, 5) AS INTEGER)), 0)
+         FROM module_invoice WHERE business_id = ?1 AND invoice_number LIKE 'INV-%'",
         params![business_id],
         |r| r.get(0),
     )?;
-    Ok(format!("INV-{}", count + 1))
+    Ok(format!("INV-{}", max_existing + 1))
 }
 
 /// Creates a new invoice. Computes subtotal, tax, and total from items.

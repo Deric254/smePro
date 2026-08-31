@@ -10,7 +10,7 @@ use core_engine::{auth, business_panel, db, http_api, module_json};
 fn main() -> Result<()> {
     let mut conn = db::open("erp.db")?;
 
-    let business_id = business_panel::create_business(&conn, "Mama Nia General Store", "KES", "Africa/Nairobi")?;
+    let business_id = business_panel::create_business(&mut conn, "Mama Nia General Store", "KES", "Africa/Nairobi")?;
     // Was a literal relative path string ("modules/inventory.json") —
     // only ever worked because this binary happens to run with the
     // source tree as its working directory. `module_json` (the same

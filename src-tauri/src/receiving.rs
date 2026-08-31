@@ -8,17 +8,17 @@
 //! inventory item's quantity AND marks the purchase order received, in
 //! one transaction. Either both happen or neither does.
 //!
-//! KNOWN LIMITATION, stated plainly rather than hidden: this closes the
-//! gap for the intended path (calling this function). It does NOT
-//! prevent someone with "update" permission on Purchasing from manually
-//! flipping the `received` checkbox through the generic record-update
-//! endpoint without ever calling this — the generic module engine has
-//! no concept of "this specific field can only change through this one
-//! code path." Closing that fully would need field-level write
-//! restrictions the engine doesn't have yet. What this DOES guarantee:
-//! every purchase received through the intended flow is atomically
-//! correct — the risk that's left is a workaround, not a hole in the
-//! main path.
+//! CORRECTION to an earlier version of this comment: it used to claim
+//! the generic module engine has no way to stop someone with plain
+//! "update" on Purchasing from flipping `received` through the generic
+//! record-update endpoint instead of calling this function. That's no
+//! longer true (and, per crud.rs's own doc comment on
+//! `is_update_blocked_field`, was the actual bug that comment names and
+//! fixes): the engine now DOES have a concept of "this field can only
+//! change through its dedicated action" — `crud::update()` unconditionally
+//! rejects any attempt to set `purchasing.received` directly, regardless
+//! of the caller's role or permissions, for every single-record update.
+//! The only way `received` becomes true is through this function.
 //!
 //! SECOND FIX, same file: `receive()` used to update Inventory's
 //! `quantity` but never touch `unit_cost` at all — the recorded cost
@@ -27,12 +27,27 @@
 //! real weighted average across the stock already on hand and what
 //! just arrived, the same correctness this crate already applies to
 //! stock and money everywhere else.
+//!
+//! THIRD FIX, same file, same shape as repack.rs's own rounding fix:
+//! blending two costs into one rounded-to-the-cent `new_unit_cost` and
+//! multiplying it back out by `new_qty` doesn't always land on the
+//! exact value that was actually on hand plus actually paid for — a
+//! few cents can appear or vanish from the stock valuation on every
+//! receipt, purely from rounding. The exact remainder is now computed
+//! and, when nonzero, posted to Bookkeeping as its own "Stock
+//! Revaluation" entry (a rounding gain as income, a loss as an
+//! expense) — never silently absorbed. Note this is separate from the
+//! Purchasing expense entry below, which was already exact (it's
+//! quantity received × the PO's own unit cost, not the blended
+//! average) — this fix is specifically for the inventory *valuation*
+//! side, not the cash side.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct ReceiveRequest {
@@ -137,7 +152,7 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
     // outlay, not the recalculated stock valuation). Best-effort: a
     // business without Bookkeeping enabled can still receive stock.
     if let Ok(accounting_module) = crud::load_module(&tx, business_id, "accounting") {
-        let mut entry: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        let mut entry: HashMap<String, Value> = HashMap::new();
         entry.insert("description".into(), json!(format!("Purchase received — {item_name} from {supplier}")));
         entry.insert("entry_type".into(), json!("expense"));
         entry.insert("category".into(), json!("Purchasing"));
@@ -152,6 +167,48 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
         accounting_module.validate(&entry)?;
         crate::reference_data::validate_field_references(&tx, business_id, &accounting_module, &entry)?;
         crud::insert_validated_record(&tx, business_id, &accounting_module, &entry)?;
+    }
+
+    // Same reconciliation discipline as repack.rs: `new_qty *
+    // new_unit_cost` (what actually gets stored) doesn't always equal
+    // `numerator` (what was actually on hand plus actually paid for) —
+    // rounding the blended cost to the nearest cent can land a few
+    // cents above or below the exact value. Positive means the stored
+    // valuation came in LOWER than the true value (an unrecorded
+    // loss); negative means it came in HIGHER (value from nowhere).
+    // Posted as its own labeled Bookkeeping entry whenever nonzero, so
+    // the stock ledger and the books always reconcile to the cent.
+    let stored_inventory_value = new_qty * new_unit_cost;
+    let rounding_adjustment_cents = numerator - stored_inventory_value;
+    if rounding_adjustment_cents != 0 {
+        if let Ok(accounting_module) = crud::load_module(&tx, business_id, "accounting") {
+            let (entry_type, amount) = if rounding_adjustment_cents > 0 {
+                ("expense", rounding_adjustment_cents)
+            } else {
+                ("income", -rounding_adjustment_cents)
+            };
+            let mut entry: HashMap<String, Value> = HashMap::new();
+            entry.insert(
+                "description".into(),
+                json!(format!(
+                    "Receiving rounding {} — {inventory_name}",
+                    if rounding_adjustment_cents > 0 { "loss" } else { "gain" }
+                )),
+            );
+            entry.insert("entry_type".into(), json!(entry_type));
+            entry.insert("category".into(), json!("Stock Revaluation"));
+            entry.insert("amount".into(), json!(amount));
+            for f in &accounting_module.fields {
+                if !entry.contains_key(&f.name) {
+                    if let Some(d) = &f.default {
+                        entry.insert(f.name.clone(), d.clone());
+                    }
+                }
+            }
+            accounting_module.validate(&entry)?;
+            crate::reference_data::validate_field_references(&tx, business_id, &accounting_module, &entry)?;
+            crud::insert_validated_record(&tx, business_id, &accounting_module, &entry)?;
+        }
     }
 
     // Same "commit is the one moment this becomes real" discipline as
@@ -170,6 +227,10 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
         "partial_delivery": quantity_received != ordered_qty,
         "received_at_unit_cost": po_unit_cost,
         "new_weighted_average_cost": new_unit_cost,
+        "exact_value_on_hand": numerator,
+        "stored_inventory_value": stored_inventory_value,
+        "rounding_adjustment_cents": rounding_adjustment_cents,
+        "rounding_adjustment_posted_to_bookkeeping": rounding_adjustment_cents != 0,
     });
 
     let _ = crate::audit::log(conn, business_id, Some(user_id), "_receiving", "receive", Some(&req.purchase_record_id), Some(&summary));

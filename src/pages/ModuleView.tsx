@@ -291,8 +291,24 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         target_quantity_produced: targetQty,
         notes: repackNotes || undefined,
       });
+      // The profit case for repacking, at today's prices — this is the
+      // actual reason a business breaks bulk, so it's surfaced right
+      // in the confirmation, not left for someone to work out by hand
+      // from the two unit prices. Only shown when it's computable
+      // (bulk_equivalent_value > 0, i.e. the source item actually has
+      // a selling price set).
+      const profitLine = typeof summary.repack_profit_uplift === 'number' && summary.repack_margin_uplift_pct != null
+        ? ` ${summary.repack_profit_uplift >= 0 ? 'Profit uplift' : 'Profit reduction'}: ${formatMoney(Math.abs(summary.repack_profit_uplift), businessCurrency)} (${summary.repack_margin_uplift_pct >= 0 ? '+' : ''}${summary.repack_margin_uplift_pct.toFixed(1)}% vs. selling in bulk).`
+        : '';
+      // Rounding is never silently absorbed — if the weighted-average
+      // cost calculation couldn't land on the exact cent, that's
+      // spelled out here too, matching the labeled Bookkeeping entry
+      // repack.rs posts for it.
+      const roundingLine = summary.rounding_adjustment_cents
+        ? ` (A ${formatMoney(Math.abs(summary.rounding_adjustment_cents), businessCurrency)} rounding ${summary.rounding_adjustment_cents > 0 ? 'loss' : 'gain'} was posted to Bookkeeping under Stock Revaluation.)`
+        : '';
       setActionResult(
-        `Repacked ${sourceQty} of "${summary.source_name}" into ${targetQty} of "${summary.target_name}". New cost: ${formatMoney(summary.target_unit_cost_after, businessCurrency)} each.`
+        `Repacked ${sourceQty} of "${summary.source_name}" into ${targetQty} of "${summary.target_name}". New cost: ${formatMoney(summary.target_unit_cost_after, businessCurrency)} each.${profitLine}${roundingLine}`
       );
       setRepackSourceId(null);
       setRepackTargetId('');

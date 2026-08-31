@@ -19,18 +19,18 @@
 //! three already do — posted only when Bookkeeping happens to be
 //! enabled for this business, never required for settling to work.
 //!
-//! KNOWN LIMITATION, stated as plainly as receiving.rs states its own:
-//! this closes the gap for the intended path. It does NOT prevent
-//! someone with "update" on Debt & Credit from manually flipping
-//! `settled` through the generic record-update endpoint without ever
-//! calling this — the module engine has no field-level write
-//! restriction that could enforce that. What this DOES guarantee:
-//! every settlement made through the intended flow is atomically
-//! correct and posts the real cash movement to Bookkeeping; a manual
-//! edit bypassing it is a workaround, not a hole in the main path —
-//! and the frontend (ModuleView.tsx) hides `settled` from the generic
-//! edit form for the same reason it already hides purchasing's
-//! `received`.
+//! CORRECTION to an earlier version of this comment, same correction
+//! receiving.rs's own doc comment now states: this used to claim the
+//! module engine has no field-level write restriction that could stop
+//! someone with plain "update" on Debt & Credit from flipping `settled`
+//! through the generic record-update endpoint instead of calling this
+//! function. It does now — see crud.rs's `is_update_blocked_field`,
+//! which unconditionally blocks `settled`, `payment_method`, and
+//! `source_order_id` on every single-record update regardless of the
+//! caller's role. The frontend (ModuleView.tsx) also hides `settled`
+//! from the generic edit form, for the same reason it already hides
+//! purchasing's `received` — belt AND suspenders, not just one or the
+//! other.
 //!
 //! DIRECTION, not a fixed enum: `direction` is a free-text field (see
 //! debt_credit.json) — the module engine has no enum/choice field type

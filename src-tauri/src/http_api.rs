@@ -1024,18 +1024,42 @@ fn route(
     // able to look at it. Owner-only — this is oversight data about
     // what every user in the business has done, not something a Staff
     // account should be able to read about themselves or others.
+    //
+    // `record_id` filter added alongside the existing `module_id` one —
+    // without it there was no way to ask "show me everything that ever
+    // happened to THIS item" (e.g. a repack's full history from either
+    // the source or the target side, see repack.rs), only "show me
+    // everything of this type," which someone would have to scroll
+    // through by eye to find one record's history in. Both filters can
+    // combine (e.g. module_id=_repack&record_id=<id>).
     if parts.as_slice() == ["audit-log"] && *method == Method::Get {
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
         let q = query_params(url);
         let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).min(1000);
         let module_filter = q.get("module_id").cloned();
+        let record_filter = q.get("record_id").cloned();
 
-        let (sql, use_filter) = if module_filter.is_some() {
-            ("SELECT id, user_id, module_id, action, record_id, details_json, timestamp
-              FROM audit_log WHERE business_id = ?1 AND module_id = ?2 ORDER BY timestamp DESC LIMIT ?3", true)
-        } else {
-            ("SELECT id, user_id, module_id, action, record_id, details_json, timestamp
-              FROM audit_log WHERE business_id = ?1 ORDER BY timestamp DESC LIMIT ?2", false)
+        let (sql, mode) = match (&module_filter, &record_filter) {
+            (Some(_), Some(_)) => (
+                "SELECT id, user_id, module_id, action, record_id, details_json, timestamp
+                 FROM audit_log WHERE business_id = ?1 AND module_id = ?2 AND record_id = ?3 ORDER BY timestamp DESC LIMIT ?4",
+                2,
+            ),
+            (Some(_), None) => (
+                "SELECT id, user_id, module_id, action, record_id, details_json, timestamp
+                 FROM audit_log WHERE business_id = ?1 AND module_id = ?2 ORDER BY timestamp DESC LIMIT ?3",
+                1,
+            ),
+            (None, Some(_)) => (
+                "SELECT id, user_id, module_id, action, record_id, details_json, timestamp
+                 FROM audit_log WHERE business_id = ?1 AND record_id = ?2 ORDER BY timestamp DESC LIMIT ?3",
+                3,
+            ),
+            (None, None) => (
+                "SELECT id, user_id, module_id, action, record_id, details_json, timestamp
+                 FROM audit_log WHERE business_id = ?1 ORDER BY timestamp DESC LIMIT ?2",
+                0,
+            ),
         };
 
         let mut stmt = match conn.prepare(sql) { Ok(s) => s, Err(e) => return json_err(500, &e.to_string()) };
@@ -1050,8 +1074,12 @@ fn route(
                 "timestamp": r.get::<_, String>(6)?,
             }))
         };
-        let rows = if use_filter {
+        let rows = if mode == 2 {
+            stmt.query_map(rusqlite::params![business_id, module_filter.unwrap(), record_filter.unwrap(), limit], map_row)
+        } else if mode == 1 {
             stmt.query_map(rusqlite::params![business_id, module_filter.unwrap(), limit], map_row)
+        } else if mode == 3 {
+            stmt.query_map(rusqlite::params![business_id, record_filter.unwrap(), limit], map_row)
         } else {
             stmt.query_map(rusqlite::params![business_id, limit], map_row)
         };

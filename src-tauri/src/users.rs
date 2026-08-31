@@ -94,7 +94,17 @@ pub fn create_user(
 /// (nobody left who can manage roles, activate licenses, or add more
 /// users), so this is checked directly rather than trusted to the
 /// caller's judgment.
-pub fn set_role(conn: &Connection, business_id: &str, user_id: &str, new_role_id: &str) -> Result<()> {
+/// THE BUG THIS FIXES: the role change and the session revocation used
+/// to be two separate auto-committed statements. If the process died,
+/// panicked, or the DB errored between them, the role changed but the
+/// user's existing session token was NEVER revoked — silently
+/// contradicting the exact guarantee this function's own comment
+/// states ("force re-login everywhere so stale permission assumptions
+/// ... can't linger"). Wrapped in one transaction now: either the role
+/// change and the session wipe both land together, or neither does —
+/// there's no window where a demoted user keeps acting on their old
+/// permissions through a token that was supposed to have been killed.
+pub fn set_role(conn: &mut Connection, business_id: &str, user_id: &str, new_role_id: &str) -> Result<()> {
     let current_role_id: String = conn
         .query_row(
             "SELECT role_id FROM users WHERE id = ?1 AND business_id = ?2",
@@ -128,10 +138,12 @@ pub fn set_role(conn: &Connection, business_id: &str, user_id: &str, new_role_id
         }
     }
 
-    conn.execute("UPDATE users SET role_id = ?1 WHERE id = ?2 AND business_id = ?3", params![new_role_id, user_id, business_id])?;
+    let tx = conn.transaction()?;
+    tx.execute("UPDATE users SET role_id = ?1 WHERE id = ?2 AND business_id = ?3", params![new_role_id, user_id, business_id])?;
     // Role changed — force re-login everywhere so stale permission
     // assumptions in an already-open session can't linger.
-    conn.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
+    tx.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -141,7 +153,13 @@ pub fn set_role(conn: &Connection, business_id: &str, user_id: &str, new_role_id
 /// immediately revokes every session, so a deactivated account can't
 /// keep acting through a token issued before the deactivation.
 /// Same last-Owner protection as `set_role`.
-pub fn deactivate_user(conn: &Connection, business_id: &str, user_id: &str) -> Result<()> {
+///
+/// Same fix as `set_role`, same reason: the deactivation and the
+/// session wipe are wrapped in one transaction so they can't land
+/// separately — a crash between them used to leave a "deactivated"
+/// user whose existing session token still worked, exactly what this
+/// function's own comment says can't happen.
+pub fn deactivate_user(conn: &mut Connection, business_id: &str, user_id: &str) -> Result<()> {
     let role_id: String = conn
         .query_row(
             "SELECT role_id FROM users WHERE id = ?1 AND business_id = ?2 AND active = 1",
@@ -161,7 +179,9 @@ pub fn deactivate_user(conn: &Connection, business_id: &str, user_id: &str) -> R
             return Err(anyhow!("cannot deactivate the last active Owner — a business must always have at least one"));
         }
     }
-    conn.execute("UPDATE users SET active = 0 WHERE id = ?1 AND business_id = ?2", params![user_id, business_id])?;
-    conn.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
+    let tx = conn.transaction()?;
+    tx.execute("UPDATE users SET active = 0 WHERE id = ?1 AND business_id = ?2", params![user_id, business_id])?;
+    tx.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
+    tx.commit()?;
     Ok(())
 }

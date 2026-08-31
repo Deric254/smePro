@@ -80,11 +80,18 @@ pub fn load_module(conn: &Connection, business_id: &str, module_id: &str) -> Res
 /// spreadsheet should be able to mark a purchase received (skipping
 /// receiving.rs's atomic stock/cost update) or a debt settled
 /// (skipping debt_settlement.rs's atomic Bookkeeping post) any more
-/// than a single hand-typed edit should — and since Manager AND Staff
-/// both hold plain "update" on these modules (see their
-/// default_roles), a crafted spreadsheet re-upload was a real,
-/// reachable way to fully bypass both of those guarantees, not a
-/// theoretical one.
+/// than a single hand-typed edit should — and since roles are fully
+/// user-manageable (any Owner can grant a custom role plain "update" on
+/// Purchasing or Debt & Credit without also granting "receive"/
+/// "settle" — see rbac.rs), a crafted spreadsheet re-upload was a real,
+/// reachable way to fully bypass both of those guarantees for such a
+/// role, not a theoretical one. (Correction to an earlier version of
+/// this comment: it claimed Manager AND Staff both hold plain "update"
+/// on these modules by default. Checking purchasing.json/
+/// debt_credit.json's actual default_roles shows that's not true today
+/// — Staff's default grant on both is read/create only, no "update" —
+/// so the out-of-the-box roles were never the reachable path; a
+/// custom role is.)
 pub(crate) fn is_update_blocked_field(module_id: &str, field_name: &str, bulk_import: bool) -> bool {
     if module_id == "inventory" && field_name == "quantity" {
         return !bulk_import;

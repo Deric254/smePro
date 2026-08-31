@@ -53,14 +53,31 @@ pub fn generate_admin_code() -> String {
 
 /// Creates a new business tenant. This is step one of onboarding —
 /// everything else (modules, users, roles) hangs off this business_id.
+///
+/// THE BUG THIS FIXES: this used to run three separate auto-committed
+/// statements (insert the business, insert its Owner role, seed
+/// reference data) with no transaction tying them together. If the
+/// process died, hit a disk error, or `seed_defaults` simply failed
+/// partway through ANY point after the first INSERT, the result was a
+/// `businesses` row that `any_business_exists` now sees as "setup already
+/// completed" — permanently blocking this public setup endpoint from
+/// ever running again (see its own doc comment: it refuses to run a
+/// second time) — but with no Owner role for it, meaning no one could
+/// ever create the first user, let alone log in. A business that exists
+/// but can never be logged into is a bricked install, not a partial
+/// success to shrug off. Wrapped in one transaction now: either all
+/// three writes land together, or (if anything fails) none of them do
+/// and the setup endpoint is still genuinely retryable.
 pub fn create_business(
-    conn: &Connection,
+    conn: &mut Connection,
     name: &str,
     currency: &str,
     timezone: &str,
 ) -> Result<String> {
+    let tx = conn.transaction()?;
+
     let id = Uuid::new_v4().to_string();
-    conn.execute(
+    tx.execute(
         "INSERT INTO businesses (id, name, currency, timezone, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, datetime('now'), datetime('now'))",
         params![id, name, currency, timezone],
@@ -69,7 +86,7 @@ pub fn create_business(
     // Every business gets a built-in, undeletable Owner role. Without this,
     // the very first user created would have no role to attach to.
     let owner_role_id = Uuid::new_v4().to_string();
-    conn.execute(
+    tx.execute(
         "INSERT INTO roles (id, business_id, name, is_system) VALUES (?1, ?2, 'Owner', 1)",
         params![owner_role_id, id],
     )?;
@@ -77,39 +94,51 @@ pub fn create_business(
     // Seed a sensible starting set of units/currencies — plain, fully
     // editable/deletable rows (see reference_data.rs), not a hardcoded
     // list baked into the engine.
-    crate::reference_data::seed_defaults(conn, &id)?;
+    crate::reference_data::seed_defaults(&tx, &id)?;
 
+    tx.commit()?;
     Ok(id)
 }
 
 /// Updates branding/config fields shown in the Business Panel UI.
 /// Only non-null fields are changed — this is a partial update, not a
 /// full overwrite, so the panel can save one field at a time.
+///
+/// Wrapped in one transaction even though today's only caller
+/// (`POST /business/settings`) ever sets a single field at a time: the
+/// three UPDATEs used to be separate auto-committed statements, so a
+/// future caller passing more than one of logo/currency/tax_rate
+/// together could land some of them and not others if anything failed
+/// partway — a partial branding update with no error to explain why
+/// only some of what was submitted actually stuck. Cheap to close now,
+/// before a second caller ever depends on the multi-field case working.
 pub fn update_branding(
-    conn: &Connection,
+    conn: &mut Connection,
     business_id: &str,
     logo_path: Option<&str>,
     currency: Option<&str>,
     tax_rate: Option<f64>,
 ) -> Result<()> {
+    let tx = conn.transaction()?;
     if let Some(logo) = logo_path {
-        conn.execute(
+        tx.execute(
             "UPDATE businesses SET logo_path = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![logo, business_id],
         )?;
     }
     if let Some(cur) = currency {
-        conn.execute(
+        tx.execute(
             "UPDATE businesses SET currency = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![cur, business_id],
         )?;
     }
     if let Some(rate) = tax_rate {
-        conn.execute(
+        tx.execute(
             "UPDATE businesses SET tax_rate = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![rate, business_id],
         )?;
     }
+    tx.commit()?;
     Ok(())
 }
 

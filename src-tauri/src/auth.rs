@@ -147,8 +147,17 @@ pub fn get_security_questions(conn: &Connection, business_id: &str, username: &s
     .map_err(|_| anyhow!("account not found"))
 }
 
+/// THE BUG THIS FIXES: the password update and the session wipe used
+/// to be two separate auto-committed statements. If anything failed
+/// or the process died between them, the password changed but the
+/// OLD session token kept working — precisely backward for the one
+/// scenario this recovery flow most needs to protect against: someone
+/// resetting their password because they suspect their account is
+/// compromised, where an attacker's already-open session is exactly
+/// what "invalidate any existing sessions" below is supposed to kill.
+/// Wrapped in one transaction now: either both happen, or neither does.
 pub fn recover_via_security_questions(
-    conn: &Connection,
+    conn: &mut Connection,
     business_id: &str,
     username: &str,
     answer1: &str,
@@ -181,13 +190,15 @@ pub fn recover_via_security_questions(
     // whole point of having the policy.
     crate::security::validate_password(new_password)?;
 
-    conn.execute(
+    let tx = conn.transaction()?;
+    tx.execute(
         "UPDATE users SET password_hash = ?1 WHERE id = ?2",
         params![hash_secret(new_password)?, user_id],
     )?;
     // Invalidate any existing sessions — a password reset should force
     // re-login everywhere, including on a device an attacker was using.
-    conn.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
+    tx.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -195,8 +206,12 @@ pub fn recover_via_security_questions(
 /// fallback when security questions are forgotten too — e.g. the owner
 /// lost the phone with the answers. The code itself is generated once
 /// per install and only its hash is ever stored.
+///
+/// Same fix as `recover_via_security_questions` above, same reason:
+/// password update and session wipe now land in one transaction, not
+/// two separate statements a crash could split apart.
 pub fn recover_via_admin_code(
-    conn: &Connection,
+    conn: &mut Connection,
     business_id: &str,
     admin_code: &str,
     username: &str,
@@ -227,10 +242,12 @@ pub fn recover_via_admin_code(
     // an excuse to skip the password policy.
     crate::security::validate_password(new_password)?;
 
-    conn.execute(
+    let tx = conn.transaction()?;
+    tx.execute(
         "UPDATE users SET password_hash = ?1 WHERE id = ?2",
         params![hash_secret(new_password)?, user_id],
     )?;
-    conn.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
+    tx.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
+    tx.commit()?;
     Ok(())
 }
