@@ -50,6 +50,16 @@
 //! outright if no Inventory item by that name exists — never creating
 //! or leaving behind a purchasing record that isn't actually linked to
 //! anything `receiving.rs` could ever receive against.
+//!
+//! `debt_credit`'s `settled`, `payment_method`, and `source_order_id`
+//! get the identical treatment for the identical reason — all three
+//! are set only by `debt_settlement.rs::settle()`, never by hand. All
+//! of the above (this module's `quantity`/`received`/`inventory_record_id`/
+//! `settled`/`payment_method`/`source_order_id`) are collected in one
+//! place, `is_action_managed_field` below, rather than as separate
+//! ad hoc filters — that's deliberate: this exact class of module drifting
+//! out of sync with another is what left `debt_credit` without this
+//! protection for as long as it did after `purchasing` got it.
 
 use crate::{crud, module::ModuleDef, reference_data};
 use anyhow::{anyhow, Result};
@@ -76,6 +86,41 @@ use std::io::Cursor;
 /// different — reconciling counts on items that already exist, the
 /// sanctioned stock-take path — and this function has no part in
 /// producing it.
+/// Fields that must never appear as a column on the blank, download-
+/// fill-in-upload creation template for a given module — because a
+/// value typed into that column could never actually take effect
+/// there. Each is forced to a fixed value on `create()` (see
+/// crud.rs's own per-module blocks) and reachable only afterward
+/// through a dedicated action (`receiving.rs::receive()`,
+/// `debt_settlement.rs::settle()`).
+///
+/// This is the single Rust-side source of truth for that list — kept
+/// deliberately in one function, rather than filtering these back out
+/// ad hoc wherever a template gets built, because that's exactly how
+/// the bug this comment is attached to happened: `purchasing.received`
+/// got excluded when the confusion it caused was reported, but
+/// `debt_credit`'s three equivalent fields (`settled`, `payment_method`,
+/// `source_order_id`) — already hidden from the manual form by
+/// ModuleView.tsx's own `isActionManagedField`, and already
+/// unconditionally blocked from import by `crud::is_update_blocked_field`
+/// — were never given the same treatment here, just because nobody had
+/// filed a bug about that specific module yet. Same list, same
+/// reasoning, one place: if a field is action-managed for one purpose
+/// (blocked from update) it belongs here too (excluded from the
+/// creation template), and adding a new one only needs a single line
+/// here instead of a search across every template-building call site.
+///
+/// NOTE: `ModuleView.tsx`'s `isActionManagedField` is the same list,
+/// independently maintained on the frontend for the manual-entry form.
+/// The two must be kept in sync by hand — there's no shared schema
+/// between the Rust and TypeScript sides that enforces this today.
+fn is_action_managed_field(module_id: &str, field_name: &str) -> bool {
+    (module_id == "inventory" && field_name == "quantity")
+        || (module_id == "purchasing" && (field_name == "received" || field_name == "inventory_record_id"))
+        || (module_id == "debt_credit"
+            && (field_name == "settled" || field_name == "payment_method" || field_name == "source_order_id"))
+}
+
 pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
     let mut wb = rust_xlsxwriter::Workbook::new();
     let sheet = wb.add_worksheet().set_name("Import")?;
@@ -87,26 +132,7 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
     let template_fields: Vec<_> = module
         .fields
         .iter()
-        .filter(|f| !(module.id == "inventory" && f.name == "quantity"))
-        // Same reasoning as inventory's `quantity` just above, for two
-        // different purchasing fields:
-        // - `received` is set only by receiving.rs::receive(), never by
-        //   hand or by import (see is_update_blocked_field and this
-        //   file's own forced-false default on the create path below).
-        //   The generic create/edit form already hides it for the same
-        //   reason (ModuleView.tsx's isActionManagedField) — printing it
-        //   on a sheet whose values are never honored is the exact
-        //   "invites someone to type a real value there, reasonably
-        //   expecting it to land" trap the quantity fix above closes.
-        // - `inventory_record_id` is an internal database ID, not
-        //   something a business owner filling in a spreadsheet could
-        //   know or type. The manual form never asks for it either —
-        //   ModuleView.tsx's PurchaseItemSelector has the person pick
-        //   the item by NAME from existing Inventory records and fills
-        //   the ID in for them. `import` below does the same lookup
-        //   itself, from the `item_name` column that's already on the
-        //   template and already required.
-        .filter(|f| !(module.id == "purchasing" && (f.name == "received" || f.name == "inventory_record_id")))
+        .filter(|f| !is_action_managed_field(&module.id, &f.name))
         .collect();
 
     for (col, field) in template_fields.iter().enumerate() {

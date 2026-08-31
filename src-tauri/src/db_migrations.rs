@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 13;
+const CURRENT_VERSION: i32 = 14;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -33,7 +33,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 11 { v11_stock_takes(conn)?; }
     if current < 12 { v12_debt_settlement_payment_method(conn)?; }
     if current < 13 { v13_scope_unique_fields_to_business(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 13, "bump this alongside the last `if current < N` check above");
+    if current < 14 { v14_index_inventory_name_lookup(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 14, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -830,6 +831,50 @@ fn v13_scope_unique_fields_to_business(conn: &mut Connection) -> Result<()> {
     }
 
     tx.execute("INSERT INTO _schema_version (version) VALUES (13)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Backs `excel_import.rs`'s purchasing-import name lookup
+/// (`find_inventory_id_by_name`), which resolves a purchasing row's
+/// `item_name` to an existing Inventory record's id. The generic
+/// `idx_{table}_business` index every module table already gets (see
+/// v13 and `create_table`) only covers `(business_id, deleted_at)` —
+/// it narrows to one business's rows but still leaves every one of
+/// them to be scanned to find a name match. For a business with a
+/// large Inventory, that means one full scan of its Inventory table
+/// per row of every purchasing spreadsheet imported — fine at the
+/// scale a demo or a small shop's catalog runs at, but quadratic
+/// (rows imported × Inventory size) as either grows.
+///
+/// This is a plain expression index — `LOWER(TRIM(name))` — matching
+/// the exact expression the lookup's WHERE clause already computes,
+/// so SQLite's query planner can use it directly instead of falling
+/// back to a full scan for the comparison. Table-existence is checked
+/// first: a business created before the Inventory module was ever
+/// enabled for it may not have a `module_inventory` table at all yet
+/// (module tables are created lazily on first use), and this index
+/// has nothing to attach to until one exists — `crud`'s own
+/// `create_table` path is what actually creates it later, and does
+/// not know to also create this index, so it stays purely a
+/// best-effort optimization rather than one applied unconditionally.
+fn v14_index_inventory_name_lookup(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_inventory'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists > 0 {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_module_inventory_business_name
+             ON module_inventory(business_id, LOWER(TRIM(name)))",
+            [],
+        )?;
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (14)", [])?;
     tx.commit()?;
     Ok(())
 }

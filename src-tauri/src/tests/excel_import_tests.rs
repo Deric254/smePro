@@ -291,6 +291,36 @@ fn test_purchasing_import_template_excludes_system_managed_columns() {
 }
 
 #[test]
+fn test_debt_credit_import_template_excludes_settlement_managed_columns() {
+    // THE BUG THIS PROVES CLOSED: `debt_credit`'s `settled`,
+    // `payment_method`, and `source_order_id` are already hidden from
+    // the manual form (ModuleView.tsx's isActionManagedField) and
+    // already unconditionally blocked from import
+    // (is_update_blocked_field) — but generate_template had never been
+    // given the matching exclusion, so its Excel template alone still
+    // printed all three as fillable columns whose typed values could
+    // never actually apply. Same class of bug as purchasing's
+    // `received`/`inventory_record_id`, just not yet reported for this
+    // module.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let module = crate::crud::load_module(&conn, &biz, "debt_credit").unwrap();
+
+    use calamine::Reader;
+    let bytes = crate::excel_import::generate_template(&module).unwrap();
+    let cursor = std::io::Cursor::new(bytes);
+    let mut wb: calamine::Xlsx<_> = calamine::open_workbook_from_rs(cursor).unwrap();
+    let range = wb.worksheet_range_at(0).unwrap().unwrap();
+    let header_row = range.rows().next().unwrap();
+    let headers: Vec<String> = header_row.iter().map(crate::excel_import::cell_to_string).collect();
+
+    assert!(headers.iter().any(|h| h.starts_with("party_name")), "party_name must still be on the template: {headers:?}");
+    assert!(!headers.iter().any(|h| h.starts_with("settled")), "settled must not be a template column: {headers:?}");
+    assert!(!headers.iter().any(|h| h.starts_with("payment_method")), "payment_method must not be a template column: {headers:?}");
+    assert!(!headers.iter().any(|h| h.starts_with("source_order_id")), "source_order_id must not be a template column: {headers:?}");
+}
+
+#[test]
 fn test_purchasing_import_resolves_inventory_record_id_from_item_name() {
     // A person filling in the template only ever types the item's NAME
     // (the one column the template actually has) — this proves import
