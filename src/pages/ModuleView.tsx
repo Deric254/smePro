@@ -786,12 +786,20 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         <div style={styles.overlay} onClick={() => setShowExcelImport(false)}>
           <div className="card" style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>Import from Excel</h3>
-            <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-              Download the template below, fill it in (or export your existing records and edit them),
-              then upload it back here. Matching rows update the existing record instead of creating a
-              duplicate — this is also how to do a stock take: export, correct the counted quantities in
-              the spreadsheet, then reimport.
-            </p>
+            {moduleId === 'inventory' ? (
+              <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+                Download the template below to add new items — it has no quantity column, since a new
+                item always starts at zero stock. To do a stock take instead, use "Export to Excel" on
+                existing records, correct the counted quantities in that file, then reimport it; a row
+                whose SKU already exists will be rejected if it comes from the blank template.
+              </p>
+            ) : (
+              <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+                Download the template below, fill it in (or export your existing records and edit them),
+                then upload it back here. Matching rows update the existing record instead of creating a
+                duplicate.
+              </p>
+            )}
             <button className="btn btn-outline" onClick={handleDownloadTemplate} disabled={templateDownloading} style={{ marginBottom: '0.4rem' }}>
               {templateDownloading ? 'Downloading…' : 'Download template'}
             </button>

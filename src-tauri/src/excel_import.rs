@@ -13,6 +13,19 @@
 //! template with a typo fixed needs too (correct the row, not create
 //! a second copy of it).
 //!
+//! For `inventory` specifically, the two source files are no longer
+//! header-identical: the blank "download template" (built by
+//! `generate_template` below) omits `quantity` entirely, because a
+//! new item is never allowed to seed its own opening count — the
+//! `None` branch below forces it to 0 regardless of what's typed. The
+//! "Export to Excel" file (built separately in ModuleView.tsx) still
+//! carries real `quantity` values, because re-importing IT is the
+//! sanctioned stock-take path. `import` tells the two apart by
+//! whether the uploaded header row has a `quantity` column at all,
+//! and rejects (rather than silently reconciling) any row from a
+//! quantity-less upload that matches an existing item — see the
+//! `Some(id)` branch's first check below.
+//!
 //! Every row goes through the EXACT SAME validation as a record typed
 //! in by hand — `module.validate()` and
 //! `reference_data::validate_field_references()`, the same functions
@@ -32,6 +45,21 @@ use std::io::Cursor;
 /// Builds a downloadable .xlsx template for a module: one header row
 /// with the module's own field names, in order, so it's unambiguous
 /// which column is which when it comes back.
+///
+/// `inventory`'s `quantity` is deliberately left out of this blank
+/// template. This template exists for one job — adding brand-new
+/// items — and a new item is never allowed to seed its own opening
+/// stock count (see crud.rs::create and this file's `import`, `None`
+/// branch). Printing a quantity column on a sheet whose values are
+/// never actually honored invites exactly the confusion the two
+/// screenshots this fix was written against showed: someone typing a
+/// real count into that column, reasonably expecting it to land, and
+/// it silently not doing so. The *export* of real records (built
+/// separately by `exportModule` in ModuleView.tsx, not this
+/// function) still carries `quantity`, because that file's job is
+/// different — reconciling counts on items that already exist, the
+/// sanctioned stock-take path — and this function has no part in
+/// producing it.
 pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
     let mut wb = rust_xlsxwriter::Workbook::new();
     let sheet = wb.add_worksheet().set_name("Import")?;
@@ -40,7 +68,13 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
         .set_bold()
         .set_background_color("#EAE3CE");
 
-    for (col, field) in module.fields.iter().enumerate() {
+    let template_fields: Vec<_> = module
+        .fields
+        .iter()
+        .filter(|f| !(module.id == "inventory" && f.name == "quantity"))
+        .collect();
+
+    for (col, field) in template_fields.iter().enumerate() {
         let label = if field.required {
             format!("{} *", field.name)
         } else {
@@ -53,7 +87,7 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
     // the expected shape without the user having to guess — deleted
     // by them before their real data, same convention as most
     // downloadable import templates.
-    for (col, field) in module.fields.iter().enumerate() {
+    for (col, field) in template_fields.iter().enumerate() {
         let example = match field.field_type.as_str() {
             "integer" => "0".to_string(),
             "real" => "0.00".to_string(),
@@ -133,6 +167,18 @@ pub fn import(
         ));
     }
 
+    // Distinguishes the two files this one importer accepts for
+    // `inventory` (see the module doc comment above, and
+    // generate_template's comment on why the blank template no
+    // longer has this column at all): a real "Export to Excel" of
+    // existing records always carries `quantity`; the blank
+    // new-item template deliberately never does. That single
+    // difference is what tells this function, per upload, which of
+    // the two jobs it's doing — it's checked once here rather than
+    // per-row because it's a property of the *file*, not of any one
+    // row in it.
+    let inventory_sheet_has_quantity_column = headers.iter().any(|h| h == "quantity");
+
     let tx = conn.transaction()?;
     let mut created = 0usize;
     let mut updated = 0usize;
@@ -181,6 +227,32 @@ pub fn import(
 
         match existing_id {
             Some(id) => {
+                // The blank new-item template no longer has a
+                // `quantity` column (see generate_template), so a row
+                // on this file that matches an existing item isn't a
+                // legitimate stock-take edit — there's no real counted
+                // value behind it, just this loop's own required-field
+                // default of 0 (see the default-fill loop above). The
+                // two screenshots this fix was written against are
+                // exactly this: purchase orders hand-created as
+                // already `received`, inventory left at the
+                // create()-forced 0, and re-running a same-SKU import
+                // would otherwise have silently reconciled that 0
+                // right back into a record that actually needs a real
+                // Receive or a real stock-take count. Reject the row
+                // instead of guessing — loud and specific, same
+                // standard the blocked-field check just below holds
+                // every other protected field to.
+                if module.id == "inventory" && !inventory_sheet_has_quantity_column {
+                    errors.push(json!({
+                        "row": row_num,
+                        "error": format!(
+                            "an item with this '{key_field}' already exists — this template is for adding new items only and has no quantity column; to correct an existing item's stock count, use \"Export to Excel\", edit the counted quantities, and reimport that file instead"
+                        )
+                    }));
+                    continue;
+                }
+
                 // THE BUG THIS FIXES (round 2): every field the module
                 // defines (including purchasing's `received` and
                 // debt_credit's `settled`/`payment_method`/
@@ -301,6 +373,17 @@ pub fn import(
                     record.insert("settled".to_string(), json!(false));
                     record.remove("payment_method");
                     record.remove("source_order_id");
+                }
+                // Same fix, same reason, as crud.rs::create()'s new
+                // `if module_id == "purchasing"` block — this insert
+                // path skips create() entirely (it calls
+                // insert_validated_record() directly), so without this
+                // a spreadsheet adding new purchasing rows could carry
+                // `received: true` straight into a brand-new order,
+                // same unguarded hole a raw API call had, just reached
+                // through Excel instead.
+                if module.id == "purchasing" {
+                    record.insert("received".to_string(), json!(false));
                 }
                 // Same "never sell at a loss" rule crud::create()/update()
                 // enforce for the single-record form — a new inventory

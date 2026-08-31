@@ -179,6 +179,25 @@ pub fn create(
         record.remove("payment_method");
         record.remove("source_order_id");
     }
+    // Same forced-baseline treatment, same reason, for purchasing's
+    // `received` — this was the one field in this "post-action state"
+    // family that create() had never actually closed. Without this, a
+    // raw POST here (or a spreadsheet import — see excel_import.rs's
+    // own matching fix) could hand-create a purchase order already
+    // marked `received: true`, without ever going through
+    // receiving.rs::receive() — the only place a delivered quantity
+    // and a weighted-average cost update actually get applied to
+    // Inventory together. The result is exactly what showed up in
+    // practice: Purchasing rows reading `received: true` while their
+    // linked Inventory items sat at quantity 0, because nothing ever
+    // called receive() for them. The frontend already hides this
+    // field on the create form (see ModuleView.tsx's
+    // isActionManagedField) — but that's UI-only, the same "hiding a
+    // field is not the same as closing the hole" point this function's
+    // own quantity/settled comments already make.
+    if module_id == "purchasing" {
+        record.insert("received".to_string(), json!(false));
+    }
     // Hard business rule, not just a UI nicety: an inventory item can
     // never be saved with a selling price below its cost price. Both
     // fields are "money" (required, default 0), so by the time we get
