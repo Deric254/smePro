@@ -921,7 +921,7 @@ function SettingsTab() {
   const [theme, setTheme] = useState('ledger');
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'none' | 'error'>('idle');
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'none' | 'error' | 'preview'>('idle');
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [businessType, setBusinessType] = useState('retail');
   const [changingType, setChangingType] = useState(false);
@@ -962,6 +962,15 @@ function SettingsTab() {
   async function checkForUpdates() {
     setUpdateStatus('checking');
     try {
+      const { isTauri } = await import('@tauri-apps/api/core');
+      if (!isTauri()) {
+        // Not a real failure — the updater plugin only exists inside
+        // the packaged desktop app. Browser and dev-preview sessions
+        // never have it, every single time, so this isn't "couldn't
+        // reach the server right now" and shouldn't share that message.
+        setUpdateStatus('preview');
+        return;
+      }
       const { check } = await import('@tauri-apps/plugin-updater');
       const update = await check();
       if (update) {
@@ -971,9 +980,8 @@ function SettingsTab() {
         setUpdateStatus('none');
       }
     } catch {
-      // Either not running inside the desktop app, or genuinely
-      // couldn't reach the update server — same message either way,
-      // since a customer doesn't need to know which.
+      // Genuinely running in the desktop app but the check itself
+      // failed (e.g. no network, update server unreachable).
       setUpdateStatus('error');
     }
   }
@@ -1045,7 +1053,12 @@ function SettingsTab() {
         )}
         {updateStatus === 'error' && (
           <div style={{ marginTop: '0.7rem', color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
-            Couldn't check right now — this also happens normally in a browser/dev preview, not just on a real connection issue.
+            Couldn't check right now — no connection to the update server. Try again shortly.
+          </div>
+        )}
+        {updateStatus === 'preview' && (
+          <div style={{ marginTop: '0.7rem', color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
+            Update checks only work in the packaged desktop app, not in a browser or dev preview.
           </div>
         )}
       </div>
