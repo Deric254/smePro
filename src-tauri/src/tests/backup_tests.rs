@@ -24,8 +24,8 @@ fn cleanup(path: &PathBuf) {
 
 #[test]
 fn test_backup_and_restore_round_trip_recovers_real_data() {
-    let (conn, path) = open_real_test_db();
-    let business_id = crate::business_panel::create_business(&conn, "Backup Test Biz", "USD", "UTC").unwrap();
+    let (mut conn, path) = open_real_test_db();
+    let business_id = crate::business_panel::create_business(&mut conn, "Backup Test Biz", "USD", "UTC").unwrap();
 
     let backup = crate::backup::create_backup(&conn, "a-real-passphrase-123").unwrap();
     drop(conn);
@@ -57,8 +57,8 @@ fn test_backup_and_restore_round_trip_recovers_real_data() {
 
 #[test]
 fn test_wrong_passphrase_is_rejected_cleanly() {
-    let (conn, path) = open_real_test_db();
-    crate::business_panel::create_business(&conn, "Wrong Pass Biz", "USD", "UTC").unwrap();
+    let (mut conn, path) = open_real_test_db();
+    crate::business_panel::create_business(&mut conn, "Wrong Pass Biz", "USD", "UTC").unwrap();
     let backup = crate::backup::create_backup(&conn, "the-real-passphrase").unwrap();
 
     let (restore_conn, restore_path) = open_real_test_db();
@@ -76,8 +76,8 @@ fn test_wrong_passphrase_is_rejected_cleanly() {
 
 #[test]
 fn test_weak_passphrase_refused_at_backup_time() {
-    let (conn, path) = open_real_test_db();
-    crate::business_panel::create_business(&conn, "Weak Pass Biz", "USD", "UTC").unwrap();
+    let (mut conn, path) = open_real_test_db();
+    crate::business_panel::create_business(&mut conn, "Weak Pass Biz", "USD", "UTC").unwrap();
 
     let result = crate::backup::create_backup(&conn, "short");
     assert!(result.is_err(), "a passphrase under 8 characters must be refused, not silently accepted");
@@ -92,8 +92,8 @@ fn test_backup_file_alone_does_not_reveal_the_real_key() {
     // file -- is genuinely not enough without the passphrase. This
     // tries every plausible "guess" a naive attacker with just the
     // file might try, and confirms all of them fail.
-    let (conn, path) = open_real_test_db();
-    crate::business_panel::create_business(&conn, "Security Test Biz", "USD", "UTC").unwrap();
+    let (mut conn, path) = open_real_test_db();
+    crate::business_panel::create_business(&mut conn, "Security Test Biz", "USD", "UTC").unwrap();
     let backup = crate::backup::create_backup(&conn, "the-actual-real-passphrase").unwrap();
 
     for guess in ["", "password", "the-actual-real-passphras", "THE-ACTUAL-REAL-PASSPHRASE"] {

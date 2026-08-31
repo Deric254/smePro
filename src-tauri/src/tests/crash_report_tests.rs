@@ -101,7 +101,7 @@ fn test_lib_rs_startup_pattern_compiles_and_runs_on_a_background_thread() {
     {
         let mut real_conn = crate::db::open(&db_path).unwrap();
         crate::db_migrations::run(&mut real_conn).unwrap();
-        let real_biz = crate::business_panel::create_business(&real_conn, "Thread Test Biz", "USD", "UTC").unwrap();
+        let real_biz = crate::business_panel::create_business(&mut real_conn, "Thread Test Biz", "USD", "UTC").unwrap();
         crate::settings::set(&real_conn, &real_biz, "crash_reporting_enabled", "false").unwrap();
     }
 

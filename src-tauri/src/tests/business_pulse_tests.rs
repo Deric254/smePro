@@ -101,8 +101,8 @@ fn test_never_panics_on_a_business_with_no_sales_module_enabled() {
     // A business type that never enabled "sales" at all (e.g. one
     // still mid-onboarding) must degrade gracefully, not panic the
     // whole chat response over an optional performance summary.
-    let conn = test_db();
-    let business_id = crate::business_panel::create_business(&conn, "No Sales Yet", "USD", "UTC").unwrap();
+    let mut conn = test_db();
+    let business_id = crate::business_panel::create_business(&mut conn, "No Sales Yet", "USD", "UTC").unwrap();
     let hash = crate::auth::hash_secret("password123").unwrap();
     let user_id = crate::business_panel::add_user(&conn, &business_id, "owner", &hash, "Owner").unwrap();
 

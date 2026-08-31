@@ -116,7 +116,7 @@ fn test_cannot_read_or_write_another_businesss_session() {
     let mut conn = test_db();
     let biz_a = test_business(&mut conn);
     let (uid_a, _) = test_owner(&mut conn, &biz_a);
-    let biz_b = crate::business_panel::create_business(&conn, "Other Biz", "USD", "UTC").unwrap();
+    let biz_b = crate::business_panel::create_business(&mut conn, "Other Biz", "USD", "UTC").unwrap();
     crate::onboarding::apply_business_type(&mut conn, &biz_b, "retail").unwrap();
     let hash = crate::auth::hash_secret("password123").unwrap();
     let uid_b = crate::business_panel::add_user(&conn, &biz_b, "owner_b", &hash, "Owner").unwrap();
