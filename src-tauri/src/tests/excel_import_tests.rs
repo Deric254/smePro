@@ -261,3 +261,129 @@ fn test_excel_import_cannot_settle_a_debt_by_reimporting_a_settled_column() {
     let row = list.iter().find(|r| r["party_name"] == json!("Gamma Traders")).unwrap();
     assert_eq!(row["settled"], json!(false), "settled must remain unchanged — no side channel around debt_settlement::settle()");
 }
+
+#[test]
+fn test_purchasing_import_template_excludes_system_managed_columns() {
+    // THE ACTUAL BUG: `received` and `inventory_record_id` used to be
+    // ordinary template columns even though neither is something a
+    // business owner filling in a spreadsheet can meaningfully supply —
+    // `received` is set only by receiving.rs::receive(), and
+    // `inventory_record_id` is an internal id the manual form never
+    // asks for either (it resolves it from a name picked out of a
+    // dropdown). Printing them invited exactly the "typed a real value,
+    // reasonably expecting it to land" confusion this test guards
+    // against.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
+
+    use calamine::Reader;
+    let bytes = crate::excel_import::generate_template(&module).unwrap();
+    let cursor = std::io::Cursor::new(bytes);
+    let mut wb: calamine::Xlsx<_> = calamine::open_workbook_from_rs(cursor).unwrap();
+    let range = wb.worksheet_range_at(0).unwrap().unwrap();
+    let header_row = range.rows().next().unwrap();
+    let headers: Vec<String> = header_row.iter().map(crate::excel_import::cell_to_string).collect();
+
+    assert!(headers.iter().any(|h| h.starts_with("item_name")), "item_name must still be on the template: {headers:?}");
+    assert!(!headers.iter().any(|h| h.starts_with("received")), "received must not be a template column: {headers:?}");
+    assert!(!headers.iter().any(|h| h.starts_with("inventory_record_id")), "inventory_record_id must not be a template column: {headers:?}");
+}
+
+#[test]
+fn test_purchasing_import_resolves_inventory_record_id_from_item_name() {
+    // A person filling in the template only ever types the item's NAME
+    // (the one column the template actually has) — this proves import
+    // resolves that to the real Inventory id itself, the same lookup
+    // the manual form's PurchaseItemSelector performs, rather than
+    // requiring the id as a column at all.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut inv_record = serde_json::Map::new();
+    inv_record.insert("sku".into(), json!("RICE-001"));
+    inv_record.insert("name".into(), json!("Rice"));
+    inv_record.insert("quantity".into(), json!(0));
+    inv_record.insert("unit_cost".into(), json!(1000));
+    inv_record.insert("unit_price".into(), json!(1500));
+    let inv_id = crate::crud::create(&conn, &biz, &uid, "inventory", &inv_record).unwrap();
+
+    let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
+    let xlsx = build_xlsx(
+        &["supplier", "item_name", "quantity", "unit_cost"],
+        &[vec!["Acme Distributors", "Rice", "50", "9.50"]],
+    );
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "supplier").unwrap();
+    assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
+    assert_eq!(result.created, 1);
+
+    let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let row = list.iter().find(|r| r["supplier"] == json!("Acme Distributors")).unwrap();
+    assert_eq!(row["inventory_record_id"], json!(inv_id), "must resolve to the real Inventory item's id, not require it as a column");
+    assert_eq!(row["received"], json!(false), "received must default false — never settable via import");
+}
+
+#[test]
+fn test_purchasing_import_rejects_item_name_with_no_matching_inventory_item() {
+    // The manual form's dropdown can only ever pick an item that
+    // already exists in Inventory ("Create the item in Inventory
+    // first" is its own guidance for the empty-list case) — import
+    // must hold a spreadsheet row to that same standard rather than
+    // creating (or silently leaving unlinked) a purchase order nothing
+    // in Inventory backs, which receiving.rs could never actually
+    // receive against.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
+
+    let xlsx = build_xlsx(
+        &["supplier", "item_name", "quantity", "unit_cost"],
+        &[vec!["Acme Distributors", "Nonexistent Widget", "10", "5.00"]],
+    );
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "supplier").unwrap();
+    assert_eq!(result.created, 0);
+    assert_eq!(result.errors.len(), 1);
+    assert!(
+        result.errors[0]["error"].as_str().unwrap().contains("no Inventory item named"),
+        "got: {:?}", result.errors[0]
+    );
+
+    let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    assert!(!list.iter().any(|r| r["supplier"] == json!("Acme Distributors")), "an unlinkable row must not be partially imported");
+}
+
+#[test]
+fn test_purchasing_import_cannot_mark_a_new_order_received_via_a_hand_added_column() {
+    // Defense in depth: even if someone hand-adds a "received" column
+    // to a re-uploaded spreadsheet (the template itself no longer has
+    // one, but nothing stops a determined edit), a brand-new purchasing
+    // row must still never be created already `received: true` —
+    // that's the exact hole this app is built around closing (see
+    // crud.rs::create's own matching purchasing block).
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut inv_record = serde_json::Map::new();
+    inv_record.insert("sku".into(), json!("OIL-001"));
+    inv_record.insert("name".into(), json!("Cooking Oil"));
+    inv_record.insert("quantity".into(), json!(0));
+    inv_record.insert("unit_cost".into(), json!(2000));
+    inv_record.insert("unit_price".into(), json!(3000));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &inv_record).unwrap();
+
+    let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
+    let xlsx = build_xlsx(
+        &["supplier", "item_name", "quantity", "unit_cost", "received"],
+        &[vec!["Acme Distributors", "Cooking Oil", "20", "18.00", "true"]],
+    );
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "supplier").unwrap();
+    assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
+    assert_eq!(result.created, 1);
+
+    let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let row = list.iter().find(|r| r["supplier"] == json!("Acme Distributors")).unwrap();
+    assert_eq!(row["received"], json!(false), "a new order must never be created already received, even via a hand-added column");
+}

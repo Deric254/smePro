@@ -34,6 +34,22 @@
 //! its exact row number and reason and skipped; it does not abort the
 //! whole batch, and it does not get silently coerced into something
 //! technically valid but wrong.
+//!
+//! For `purchasing` specifically, two of the module's own fields never
+//! appear as template columns at all — `generate_template` leaves them
+//! out, same idea as `inventory`'s `quantity` above: `received` is
+//! system-set only (via `receiving.rs::receive()`), and
+//! `inventory_record_id` is an internal ID a spreadsheet-filling
+//! business owner has no way to know. Both are things the manual
+//! create/edit form already keeps out of a person's hands — `received`
+//! by hiding it entirely, `inventory_record_id` by resolving it from a
+//! NAME picked out of a dropdown (see ModuleView.tsx's
+//! PurchaseItemSelector) instead of asking for the ID directly. `import`
+//! below does that same name-to-id resolution itself, from the
+//! `item_name` column that's already required, and rejects a row
+//! outright if no Inventory item by that name exists — never creating
+//! or leaving behind a purchasing record that isn't actually linked to
+//! anything `receiving.rs` could ever receive against.
 
 use crate::{crud, module::ModuleDef, reference_data};
 use anyhow::{anyhow, Result};
@@ -72,6 +88,25 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
         .fields
         .iter()
         .filter(|f| !(module.id == "inventory" && f.name == "quantity"))
+        // Same reasoning as inventory's `quantity` just above, for two
+        // different purchasing fields:
+        // - `received` is set only by receiving.rs::receive(), never by
+        //   hand or by import (see is_update_blocked_field and this
+        //   file's own forced-false default on the create path below).
+        //   The generic create/edit form already hides it for the same
+        //   reason (ModuleView.tsx's isActionManagedField) — printing it
+        //   on a sheet whose values are never honored is the exact
+        //   "invites someone to type a real value there, reasonably
+        //   expecting it to land" trap the quantity fix above closes.
+        // - `inventory_record_id` is an internal database ID, not
+        //   something a business owner filling in a spreadsheet could
+        //   know or type. The manual form never asks for it either —
+        //   ModuleView.tsx's PurchaseItemSelector has the person pick
+        //   the item by NAME from existing Inventory records and fills
+        //   the ID in for them. `import` below does the same lookup
+        //   itself, from the `item_name` column that's already on the
+        //   template and already required.
+        .filter(|f| !(module.id == "purchasing" && (f.name == "received" || f.name == "inventory_record_id")))
         .collect();
 
     for (col, field) in template_fields.iter().enumerate() {
@@ -218,6 +253,47 @@ pub fn import(
         if let Err(e) = reference_data::validate_field_references(&tx, business_id, module, &record) {
             errors.push(json!({"row": row_num, "error": e.to_string()}));
             continue;
+        }
+
+        // `inventory_record_id` isn't a template column for `purchasing`
+        // (see generate_template) — it's resolved here instead, the
+        // same way ModuleView.tsx's PurchaseItemSelector resolves it for
+        // a hand-typed record: look up the Inventory item whose `name`
+        // matches this row's `item_name`, for THIS business, and use
+        // its id. This runs for both new rows and updates to existing
+        // ones — an update whose `item_name` was corrected to point at
+        // a different existing item gets relinked to match, the same
+        // way re-picking a different item in the dropdown would. No
+        // match means there's nothing to link to yet, exactly the case
+        // the dropdown's own "Create the item in Inventory first" note
+        // covers — so the row is rejected with the same guidance,
+        // rather than silently creating (or leaving) an orphaned
+        // purchase order that receiving.rs can never actually receive
+        // against.
+        if module.id == "purchasing" {
+            let item_name = record.get("item_name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if item_name.is_empty() {
+                errors.push(json!({"row": row_num, "error": "'item_name' is required"}));
+                continue;
+            }
+            match find_inventory_id_by_name(&tx, business_id, &item_name) {
+                Ok(Some(inv_id)) => {
+                    record.insert("inventory_record_id".to_string(), json!(inv_id));
+                }
+                Ok(None) => {
+                    errors.push(json!({
+                        "row": row_num,
+                        "error": format!(
+                            "no Inventory item named '{item_name}' was found — create the item in Inventory first, then re-import"
+                        )
+                    }));
+                    continue;
+                }
+                Err(e) => {
+                    errors.push(json!({"row": row_num, "error": e.to_string()}));
+                    continue;
+                }
+            }
         }
 
         let key_value = record.get(key_field).and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -416,6 +492,30 @@ pub fn import(
     Ok(ImportResult { created, updated, errors })
 }
 
+// Looks up an Inventory item's id by its `name`, for this business only,
+// case- and whitespace-insensitively — matching how a person reads and
+// picks names in the PurchaseItemSelector dropdown, not a byte-exact
+// comparison a stray trailing space or capitalization difference would
+// defeat. `module_inventory` is used directly rather than going through
+// `ModuleDef`/`table_name()` here since this lookup is specific to one
+// hardcoded module (inventory) from another module's (purchasing's) own
+// import path, not a generic per-module operation.
+fn find_inventory_id_by_name(conn: &Connection, business_id: &str, name: &str) -> Result<Option<String>> {
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM module_inventory
+             WHERE business_id = ?1 AND deleted_at IS NULL AND LOWER(TRIM(name)) = LOWER(?2)
+             LIMIT 1",
+            rusqlite::params![business_id, name],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(id)
+}
+
 fn find_existing_by_key(
     conn: &Connection,
     business_id: &str,
@@ -461,7 +561,11 @@ fn stored_field_value(
     .map_err(Into::into)
 }
 
-fn cell_to_string(cell: &Data) -> String {
+// pub(crate) rather than private: exercised directly by
+// excel_import_tests.rs to read back a generated template's own
+// header row (via calamine) without duplicating this same
+// Data-to-String conversion in the test itself.
+pub(crate) fn cell_to_string(cell: &Data) -> String {
     match cell {
         Data::String(s) => s.clone(),
         Data::Int(i) => i.to_string(),
