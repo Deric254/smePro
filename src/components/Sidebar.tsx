@@ -80,11 +80,12 @@ export default function Sidebar({
 
   const enabledModules = modules.filter((m) => m.enabled);
   const inventoryEnabled = modules.some((m) => m.id === 'inventory' && m.enabled);
-  // A module stays visible in its group even while collapsed, IF it's
-  // the one currently open — collapsing "Operations" while you're
-  // sitting inside Inventory shouldn't make Inventory disappear from
-  // the nav and leave you with no way to tell where you are.
-  const activeModuleIsHidden = !operationsOpen && enabledModules.some((m) => m.id === selected);
+  // Collapsing a group no longer forces its active child to stay
+  // visible (see Sidebar changelog) — so the header itself carries
+  // the "something in here is active" signal instead, via bold/color,
+  // whether the group is open or collapsed.
+  const operationsHasActive = enabledModules.some((m) => m.id === selected);
+  const adminHasActive = selected === '__admin__';
 
   return (
     <nav className={`app-sidebar${mobileOpen ? ' mobile-open' : ''}`}>
@@ -175,12 +176,12 @@ export default function Sidebar({
 
         {enabledModules.length > 0 && (
           <>
-            <button onClick={toggleOperations} style={styles.groupHeader}>
+            <button onClick={toggleOperations} style={{ ...styles.groupHeader, ...(operationsHasActive ? styles.groupHeaderActive : {}) }}>
               <span style={{ transform: operationsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s ease', display: 'inline-block', fontSize: '0.7rem' }}>▶</span>
               <span>Operations</span>
             </button>
 
-            {(operationsOpen || activeModuleIsHidden) && enabledModules.map((m) => (
+            {operationsOpen && enabledModules.map((m) => (
               <button
                 key={m.id}
                 onClick={() => select(m.id)}
@@ -201,7 +202,7 @@ export default function Sidebar({
           </>
         )}
 
-        <button onClick={toggleAdmin} style={styles.groupHeader}>
+        <button onClick={toggleAdmin} style={{ ...styles.groupHeader, ...(adminHasActive ? styles.groupHeaderActive : {}) }}>
           <span style={{ transform: adminOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s ease', display: 'inline-block', fontSize: '0.7rem' }}>▶</span>
           <span>Admin</span>
         </button>
@@ -252,4 +253,5 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '0.7rem', color: 'var(--ink-faint)', fontFamily: 'var(--font-body)',
     textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginTop: '0.3rem',
   },
+  groupHeaderActive: { color: 'var(--stamp)', fontWeight: 700 },
 };
