@@ -853,8 +853,23 @@ fn route(
             Some(s) => s,
             None => return json_err(400, "'file_base64' is required"),
         };
+        // THE BUG THIS FIXES: this used to default to the module's
+        // FIRST field, whatever it happened to be, with no regard for
+        // whether that field is actually safe to match records on —
+        // see excel_import.rs's own `key_field_is_unique` comment for
+        // the full explanation and what it broke in practice
+        // (Purchasing's first field, `supplier`, isn't unique — many
+        // orders share one supplier). Default to the first field the
+        // module actually declared `unique: true` instead; when a
+        // module has none (purchasing, and any similar append-only-log
+        // module), fall back to a value ("id") that deliberately can't
+        // match anything real — excel_import::import() only attempts
+        // matching at all when the resolved key_field is a genuinely
+        // unique field, so this sentinel correctly makes every row on
+        // such a module a create, never a silent mismatch onto an
+        // unrelated existing record.
         let key_field = obj.get("key_field").and_then(Value::as_str).unwrap_or_else(|| {
-            module.fields.first().map(|f| f.name.as_str()).unwrap_or("id")
+            module.fields.iter().find(|f| f.unique).map(|f| f.name.as_str()).unwrap_or("id")
         });
         use base64::Engine;
         let bytes = match base64::engine::general_purpose::STANDARD.decode(file_b64) {

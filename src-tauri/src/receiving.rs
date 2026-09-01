@@ -49,6 +49,27 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+/// Generates the next PO number for a business. Format: PO-1, PO-2,
+/// etc. Scoped per business, exactly the same shape and the same
+/// bug-avoidance as `invoice::generate_number` — see that function's
+/// own doc comment for the full reasoning. Copied rather than shared
+/// because the two operate on different tables/columns/prefixes, not
+/// because the logic itself differs: take the MAX of every po_number
+/// ever assigned to this business (deleted or not) and go one past it,
+/// rather than a live-row COUNT, so a deleted purchase order's number
+/// is retired, never silently reused by the next one created.
+/// `CAST(... AS INTEGER)` on anything not shaped like `PO-<n>` safely
+/// evaluates to 0 in SQLite rather than erroring.
+pub fn generate_po_number(conn: &Connection, business_id: &str) -> Result<String> {
+    let max_existing: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(CAST(SUBSTR(po_number, 4) AS INTEGER)), 0)
+         FROM module_purchasing WHERE business_id = ?1 AND po_number LIKE 'PO-%'",
+        params![business_id],
+        |r| r.get(0),
+    )?;
+    Ok(format!("PO-{}", max_existing + 1))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ReceiveRequest {
     pub purchase_record_id: String,

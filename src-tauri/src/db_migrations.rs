@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 14;
+const CURRENT_VERSION: i32 = 15;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -33,8 +33,9 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 11 { v11_stock_takes(conn)?; }
     if current < 12 { v12_debt_settlement_payment_method(conn)?; }
     if current < 13 { v13_scope_unique_fields_to_business(conn)?; }
-    if current < 14 { v14_index_inventory_name_lookup(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 14, "bump this alongside the last `if current < N` check above");
+    if current < 14 { v14_add_purchasing_po_number(conn)?; }
+    if current < 15 { v15_inventory_name_lookup_index(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 15, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -835,46 +836,165 @@ fn v13_scope_unique_fields_to_business(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// Backs `excel_import.rs`'s purchasing-import name lookup
-/// (`find_inventory_id_by_name`), which resolves a purchasing row's
-/// `item_name` to an existing Inventory record's id. The generic
-/// `idx_{table}_business` index every module table already gets (see
-/// v13 and `create_table`) only covers `(business_id, deleted_at)` —
-/// it narrows to one business's rows but still leaves every one of
-/// them to be scanned to find a name match. For a business with a
-/// large Inventory, that means one full scan of its Inventory table
-/// per row of every purchasing spreadsheet imported — fine at the
-/// scale a demo or a small shop's catalog runs at, but quadratic
-/// (rows imported × Inventory size) as either grows.
+/// Adds `purchasing.po_number` — a real, business-scoped-unique
+/// identifier Purchasing never had before. Its absence was the actual
+/// root cause of a production bug: with no unique field on the module,
+/// Excel import's "match existing record by key" had nothing safe to
+/// key on, defaulted to the module's first field (`supplier` — never
+/// unique, one supplier has many orders), and a same-supplier batch
+/// import silently collided every row onto one existing order instead
+/// of creating its own (see excel_import.rs's own
+/// `key_field_is_unique` comment for the full story). `po_number`
+/// closes that permanently: it's what Excel import now matches on by
+/// default, generated once at creation (crud::create), and protected
+/// from ever being hand-edited afterward (crud::is_update_blocked_field)
+/// — the same closure this app already gives `invoice_number`'s
+/// generation, `received`, and `settled`.
 ///
-/// This is a plain expression index — `LOWER(TRIM(name))` — matching
-/// the exact expression the lookup's WHERE clause already computes,
-/// so SQLite's query planner can use it directly instead of falling
-/// back to a full scan for the comparison. Table-existence is checked
-/// first: a business created before the Inventory module was ever
-/// enabled for it may not have a `module_inventory` table at all yet
-/// (module tables are created lazily on first use), and this index
-/// has nothing to attach to until one exists — `crud`'s own
-/// `create_table` path is what actually creates it later, and does
-/// not know to also create this index, so it stays purely a
-/// best-effort optimization rather than one applied unconditionally.
-fn v14_index_inventory_name_lookup(conn: &mut Connection) -> Result<()> {
+/// Same rebuild shape as v13 just above, for the same reason (SQLite
+/// can't add a NOT NULL + UNIQUE column to a table that already has
+/// rows via a plain ALTER TABLE) — rename, create fresh, copy, drop,
+/// reindex. The one real difference: v13 was only ever changing a
+/// CONSTRAINT'S shape on data that already existed, so a straight
+/// column-for-column copy was correct. This migration is populating a
+/// column that never existed at all, on rows that need to end up with
+/// genuinely DISTINCT values before the new UNIQUE(business_id,
+/// po_number) constraint is enforced — so unlike v13, the copy for
+/// this one column isn't `t.po_number` (there is no such column yet)
+/// and isn't the field's own JSON default either (a bare default would
+/// insert the SAME empty string into every existing row, which would
+/// violate the very uniqueness constraint being added the instant more
+/// than one purchasing record exists for a business). Backfilled with
+/// real, sequential, per-business numbers instead — oldest order
+/// first, via SQLite's own window function, so existing businesses get
+/// a real, sensible order history rather than a placeholder.
+fn v14_add_purchasing_po_number(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
 
+    if let Some(on_disk_raw) = crate::module_json("purchasing") {
+        if let Ok(on_disk_def) = crate::module::ModuleDef::from_json_str(on_disk_raw) {
+            let table = on_disk_def.table_name();
+            let table_exists: i64 = tx.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![table],
+                |r| r.get(0),
+            )?;
+
+            if table_exists == 1 {
+                let existing_cols: std::collections::HashSet<String> = {
+                    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+                    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+                    rows.filter_map(|r| r.ok()).collect()
+                };
+
+                // A table that already has the column (a fresh install
+                // whose create_table() ran after po_number joined
+                // purchasing.json, never touched by this migration at
+                // all) is left alone — same detect-before-rebuild
+                // discipline v13 uses.
+                if !existing_cols.contains("po_number") {
+                    let old_table = format!("{table}__pre_po_number_v14");
+                    tx.execute(&format!("ALTER TABLE {table} RENAME TO {old_table}"), [])?;
+
+                    let mut cols = vec![
+                        "id TEXT PRIMARY KEY".to_string(),
+                        "business_id TEXT NOT NULL".to_string(),
+                    ];
+                    cols.extend(on_disk_def.field_column_defs()?);
+                    cols.push("created_at TEXT NOT NULL".to_string());
+                    cols.push("updated_at TEXT NOT NULL".to_string());
+                    cols.push("deleted_at TEXT".to_string());
+                    cols.extend(on_disk_def.business_scoped_unique_constraints());
+                    tx.execute(&format!("CREATE TABLE {table} ({})", cols.join(", ")), [])?;
+
+                    let mut select_cols = vec!["t.id".to_string(), "t.business_id".to_string()];
+                    for f in &on_disk_def.fields {
+                        if f.name == "po_number" {
+                            select_cols.push(
+                                "('PO-' || ROW_NUMBER() OVER (PARTITION BY t.business_id ORDER BY t.created_at, t.id))"
+                                    .to_string(),
+                            );
+                        } else if existing_cols.contains(&f.name) {
+                            select_cols.push(format!("t.{}", f.name));
+                        } else {
+                            // Same fallback v13 uses for a declared field
+                            // the old table doesn't have yet, for the
+                            // same reason: schema drift unrelated to
+                            // this specific migration shouldn't fail the
+                            // whole rebuild over it.
+                            let default_sql = match &f.default {
+                                Some(serde_json::Value::String(s)) => format!("'{}'", s.replace('\'', "''")),
+                                Some(serde_json::Value::Number(n)) => n.to_string(),
+                                Some(serde_json::Value::Bool(b)) => if *b { "1".into() } else { "0".into() },
+                                _ => "NULL".into(),
+                            };
+                            select_cols.push(default_sql);
+                        }
+                    }
+                    select_cols.push("t.created_at".to_string());
+                    select_cols.push("t.updated_at".to_string());
+                    select_cols.push("t.deleted_at".to_string());
+
+                    tx.execute(
+                        &format!("INSERT INTO {table} SELECT {} FROM {old_table} t", select_cols.join(", ")),
+                        [],
+                    )?;
+                    tx.execute(&format!("DROP TABLE {old_table}"), [])?;
+                    tx.execute(
+                        &format!("CREATE INDEX IF NOT EXISTS idx_{table}_business ON {table}(business_id, deleted_at)"),
+                        [],
+                    )?;
+                }
+            }
+
+            // Every business that has ever enabled Purchasing carries
+            // its own snapshot of the module's schema in
+            // `modules.schema_json` (see business_panel::enable_module)
+            // — crud::load_module reads THAT, not this on-disk
+            // definition, directly. Without this, every existing
+            // business would keep operating against the pre-po_number
+            // schema (module.validate() rejecting po_number as an
+            // unknown field, crud::create never generating one) until
+            // someone happened to disable and re-enable Purchasing from
+            // the Admin panel. This runs even for a business whose
+            // table didn't need rebuilding above, for the same reason.
+            tx.execute(
+                "UPDATE modules SET schema_json = ?1 WHERE id = 'purchasing'",
+                rusqlite::params![on_disk_raw],
+            )?;
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (14)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Gives `module_inventory` an expression index on
+/// `(business_id, LOWER(TRIM(name)))` — see `module.rs::create_table`'s
+/// own comment on this index for the full reasoning (it's the same
+/// index, this is just the copy of it that reaches an install created
+/// BEFORE that fix landed, since create_table only runs again when a
+/// module is freshly enabled, not for one already sitting on disk).
+/// Unlike v13/v14, this needs no rename-copy-drop rebuild at all —
+/// `CREATE INDEX` never touches existing rows or requires downtime
+/// proportional to table size the way a rebuild does; it's genuinely
+/// just this one statement, safe to run even on a large, live table.
+fn v15_inventory_name_lookup_index(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
     let table_exists: i64 = tx.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_inventory'",
         [],
         |r| r.get(0),
     )?;
-    if table_exists > 0 {
+    if table_exists == 1 {
         tx.execute(
-            "CREATE INDEX IF NOT EXISTS idx_module_inventory_business_name
-             ON module_inventory(business_id, LOWER(TRIM(name)))",
+            "CREATE INDEX IF NOT EXISTS idx_module_inventory_name_lookup
+             ON module_inventory(business_id, LOWER(TRIM(name)));",
             [],
         )?;
     }
-
-    tx.execute("INSERT INTO _schema_version (version) VALUES (14)", [])?;
+    tx.execute("INSERT INTO _schema_version (version) VALUES (15)", [])?;
     tx.commit()?;
     Ok(())
 }

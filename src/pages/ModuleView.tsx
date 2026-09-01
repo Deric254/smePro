@@ -44,8 +44,15 @@ import DebtSummaryWidget from '../components/DebtSummary';
 // crud.rs (`create()` forces quantity to 0; `is_single_record_edit_blocked_field`
 // blocks it on update); hiding the input here is just so nobody sees a
 // field they can't actually change.
+//
+// purchasing's `po_number` joins this list for the same "generated,
+// never hand-typed" reason as `received`, just generated at creation
+// instead of by a separate action — see crud.rs::create's purchasing
+// block and db_migrations.rs's v14 for the full story of why this
+// field exists at all (it's what fixed same-supplier Excel imports
+// silently colliding with each other).
 function isActionManagedField(moduleId: string, fieldName: string): boolean {
-  return (moduleId === 'purchasing' && fieldName === 'received')
+  return (moduleId === 'purchasing' && (fieldName === 'received' || fieldName === 'po_number'))
     || (moduleId === 'debt_credit' && fieldName === 'settled')
     || (moduleId === 'debt_credit' && (fieldName === 'payment_method' || fieldName === 'source_order_id'))
     || (moduleId === 'inventory' && fieldName === 'quantity');
@@ -793,6 +800,14 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                 existing records, correct the counted quantities in that file, then reimport it; a row
                 whose SKU already exists will be rejected if it comes from the blank template.
               </p>
+            ) : moduleId === 'purchasing' ? (
+              <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+                Download the template below to place new orders — every row becomes a brand new
+                purchase order with its own PO number, even if several rows share the same supplier.
+                To correct an order before it's received (wrong quantity or cost, say), use "Export to
+                Excel" instead, fix that row, and reimport it — matching is done by PO number, so
+                the correction lands on the right order.
+              </p>
             ) : (
               <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
                 Download the template below, fill it in (or export your existing records and edit them),
@@ -813,13 +828,39 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               style={{ width: '100%' }}
             />
 
-            <label style={{ marginTop: '0.6rem', display: 'block' }}>Match existing records by</label>
-            <select value={excelKeyField} onChange={(e) => setExcelKeyField(e.target.value)} style={{ width: '100%' }}>
-              <option value="">{schema.fields[0]?.name ?? 'id'} (default)</option>
-              {schema.fields.filter((f) => f.unique).map((f) => (
-                <option key={f.name} value={f.name}>{f.name.replace(/_/g, ' ')}</option>
-              ))}
-            </select>
+            {(() => {
+              // Matching a re-uploaded row against an existing record
+              // is only ever safe on a field the module actually
+              // marked `unique` (see excel_import.rs's
+              // `key_field_is_unique` comment for the full reasoning
+              // and the exact bug this closes) — never just "whichever
+              // field happens to be listed first." Purchasing (and any
+              // similar append-only module with no unique field) has
+              // nothing safe to match on at all, so there's no picker
+              // to show; every row on that kind of module always
+              // creates a new record, which is what re-importing a
+              // transaction log should do anyway.
+              const uniqueFields = schema.fields.filter((f) => f.unique);
+              if (uniqueFields.length === 0) {
+                return (
+                  <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.6rem' }}>
+                    This module has no unique field to match rows against, so every imported row creates a
+                    new record — re-uploading the same file will create duplicates, not update anything.
+                  </div>
+                );
+              }
+              return (
+                <>
+                  <label style={{ marginTop: '0.6rem', display: 'block' }}>Match existing records by</label>
+                  <select value={excelKeyField} onChange={(e) => setExcelKeyField(e.target.value)} style={{ width: '100%' }}>
+                    <option value="">{uniqueFields[0].name} (default)</option>
+                    {uniqueFields.map((f) => (
+                      <option key={f.name} value={f.name}>{f.name.replace(/_/g, ' ')}</option>
+                    ))}
+                  </select>
+                </>
+              );
+            })()}
 
             {excelError && <div style={styles.error}>{excelError}</div>}
 

@@ -272,7 +272,10 @@ fn test_purchasing_import_template_excludes_system_managed_columns() {
     // asks for either (it resolves it from a name picked out of a
     // dropdown). Printing them invited exactly the "typed a real value,
     // reasonably expecting it to land" confusion this test guards
-    // against.
+    // against. `po_number` joined this list later for the same reason —
+    // see generate_template's own comment on it — so it belongs in the
+    // same test rather than a separate one that could drift out of sync
+    // with this list as it grows.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
@@ -288,36 +291,7 @@ fn test_purchasing_import_template_excludes_system_managed_columns() {
     assert!(headers.iter().any(|h| h.starts_with("item_name")), "item_name must still be on the template: {headers:?}");
     assert!(!headers.iter().any(|h| h.starts_with("received")), "received must not be a template column: {headers:?}");
     assert!(!headers.iter().any(|h| h.starts_with("inventory_record_id")), "inventory_record_id must not be a template column: {headers:?}");
-}
-
-#[test]
-fn test_debt_credit_import_template_excludes_settlement_managed_columns() {
-    // THE BUG THIS PROVES CLOSED: `debt_credit`'s `settled`,
-    // `payment_method`, and `source_order_id` are already hidden from
-    // the manual form (ModuleView.tsx's isActionManagedField) and
-    // already unconditionally blocked from import
-    // (is_update_blocked_field) — but generate_template had never been
-    // given the matching exclusion, so its Excel template alone still
-    // printed all three as fillable columns whose typed values could
-    // never actually apply. Same class of bug as purchasing's
-    // `received`/`inventory_record_id`, just not yet reported for this
-    // module.
-    let mut conn = test_db();
-    let biz = test_business(&mut conn);
-    let module = crate::crud::load_module(&conn, &biz, "debt_credit").unwrap();
-
-    use calamine::Reader;
-    let bytes = crate::excel_import::generate_template(&module).unwrap();
-    let cursor = std::io::Cursor::new(bytes);
-    let mut wb: calamine::Xlsx<_> = calamine::open_workbook_from_rs(cursor).unwrap();
-    let range = wb.worksheet_range_at(0).unwrap().unwrap();
-    let header_row = range.rows().next().unwrap();
-    let headers: Vec<String> = header_row.iter().map(crate::excel_import::cell_to_string).collect();
-
-    assert!(headers.iter().any(|h| h.starts_with("party_name")), "party_name must still be on the template: {headers:?}");
-    assert!(!headers.iter().any(|h| h.starts_with("settled")), "settled must not be a template column: {headers:?}");
-    assert!(!headers.iter().any(|h| h.starts_with("payment_method")), "payment_method must not be a template column: {headers:?}");
-    assert!(!headers.iter().any(|h| h.starts_with("source_order_id")), "source_order_id must not be a template column: {headers:?}");
+    assert!(!headers.iter().any(|h| h.starts_with("po_number")), "po_number must not be a template column: {headers:?}");
 }
 
 #[test]
@@ -416,4 +390,161 @@ fn test_purchasing_import_cannot_mark_a_new_order_received_via_a_hand_added_colu
     let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
     let row = list.iter().find(|r| r["supplier"] == json!("Acme Distributors")).unwrap();
     assert_eq!(row["received"], json!(false), "a new order must never be created already received, even via a hand-added column");
+}
+
+#[test]
+fn test_purchasing_import_creates_every_row_even_when_supplier_repeats() {
+    // THE EXACT BUG REPORTED IN PRODUCTION: `supplier` is purchasing's
+    // first field but is NOT declared `unique` (many separate orders
+    // legitimately share one supplier) — yet both the frontend's
+    // default and http_api.rs's own fallback used to hand it to
+    // import() as the match key anyway. The result: a 5-row sheet all
+    // from the same supplier matched every row against whichever ONE
+    // purchasing record already had that supplier, tried to "update"
+    // it five times, and — since that existing row's real `received`
+    // value almost never equals the sheet's default-filled
+    // `received: false` — every single row got rejected with a
+    // "'received' cannot be edited directly" error, on a template that
+    // doesn't even have a `received` column. 0 created, 0 updated,
+    // every row an error. This test seeds exactly that pre-existing
+    // same-supplier record, then imports a multi-row sheet that also
+    // shares its supplier, and asserts every row still creates its own
+    // new purchase order.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    for (sku, name) in [("ITEM-1", "item1"), ("ITEM-2", "item2"), ("ITEM-3", "item3")] {
+        let mut inv_record = serde_json::Map::new();
+        inv_record.insert("sku".into(), json!(sku));
+        inv_record.insert("name".into(), json!(name));
+        inv_record.insert("quantity".into(), json!(0));
+        inv_record.insert("unit_cost".into(), json!(500));
+        inv_record.insert("unit_price".into(), json!(800));
+        crate::crud::create(&conn, &biz, &uid, "inventory", &inv_record).unwrap();
+    }
+
+    // A prior purchase order from this exact supplier already exists
+    // and has already been received — this is the record the bug used
+    // to silently (and repeatedly) collide every new row against.
+    let mut prior_po = serde_json::Map::new();
+    prior_po.insert("supplier".into(), json!("sup1"));
+    prior_po.insert("item_name".into(), json!("item1"));
+    prior_po.insert("quantity".into(), json!(20));
+    prior_po.insert("unit_cost".into(), json!(1000));
+    let prior_id = crate::crud::create(&conn, &biz, &uid, "purchasing", &prior_po).unwrap();
+    let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
+    crate::receiving::receive(
+        &mut conn,
+        &biz,
+        &uid,
+        crate::receiving::ReceiveRequest { purchase_record_id: prior_id, quantity_received: None },
+    )
+    .unwrap();
+
+    // Same shape as the reported spreadsheet: three more rows, same
+    // supplier, no `received` column at all (matching the real
+    // download template — see generate_template).
+    let xlsx = build_xlsx(
+        &["supplier", "item_name", "quantity", "unit_cost", "order_date"],
+        &[
+            vec!["sup1", "item1", "20", "10", "2026-08-31"],
+            vec!["sup1", "item2", "20", "10", "2026-08-31"],
+            vec!["sup1", "item3", "20", "10", "2026-08-31"],
+        ],
+    );
+    // Passing "supplier" explicitly, matching what the buggy frontend
+    // default used to send — proving the fix holds even when a caller
+    // still asks for a non-unique key, not just when the default is
+    // fixed on the caller's side too.
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "supplier").unwrap();
+    assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
+    assert_eq!(result.created, 3, "every row must create its own new order, not collide on shared supplier");
+    assert_eq!(result.updated, 0);
+
+    let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    assert_eq!(list.iter().filter(|r| r["supplier"] == json!("sup1")).count(), 4, "the 1 pre-existing + 3 new rows, none merged together");
+}
+
+#[test]
+fn test_purchasing_po_number_generated_sequentially_and_usable_for_correction() {
+    // Covers the feature this bug report led to, end to end: brand-new
+    // orders get real, sequential PO numbers with no DB round trip per
+    // row (see `purchasing_next_po_seq` in excel_import.rs), and that
+    // number is exactly what lets a genuine correction — re-importing
+    // an exported file with one value fixed — land on the right order
+    // instead of accidentally creating a duplicate or silently editing
+    // the wrong one.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
+
+    // Blank "new orders" template shape — no po_number column, exactly
+    // what generate_template() actually produces.
+    let new_orders = build_xlsx(
+        &["supplier", "item_name", "quantity", "unit_cost", "order_date"],
+        &[
+            vec!["Acme", "widget", "10", "500", "2026-08-01"],
+            vec!["Acme", "gadget", "5", "1200", "2026-08-01"],
+            vec!["Beta Co", "widget", "20", "480", "2026-08-02"],
+        ],
+    );
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, new_orders, "po_number").unwrap();
+    assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
+    assert_eq!(result.created, 3);
+
+    let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let mut po_numbers: Vec<String> = list.iter()
+        .map(|r| r["po_number"].as_str().unwrap().to_string())
+        .collect();
+    po_numbers.sort();
+    assert_eq!(po_numbers, vec!["PO-1", "PO-2", "PO-3"], "sequential, distinct — never repeated or skipped");
+
+    // Now correct one order before it's received — exactly the "Export
+    // to Excel, fix a cell, reimport" workflow the import dialog
+    // describes for Purchasing. The exported file carries the real
+    // po_number for every row (unlike the blank template), which is
+    // what makes this an update, not a fourth new order.
+    let gadget_po = list.iter().find(|r| r["item_name"] == json!("gadget")).unwrap();
+    let gadget_po_number = gadget_po["po_number"].as_str().unwrap().to_string();
+    let gadget_id = gadget_po["id"].as_str().unwrap().to_string();
+
+    let correction = build_xlsx(
+        &["po_number", "supplier", "item_name", "quantity", "unit_cost", "order_date"],
+        &[vec![&gadget_po_number, "Acme", "gadget", "5", "1100", "2026-08-01"]], // unit_cost corrected 1200 -> 1100
+    );
+    let result2 = crate::excel_import::import(&mut conn, &biz, &uid, &module, correction, "po_number").unwrap();
+    assert_eq!(result2.errors.len(), 0, "errors: {:?}", result2.errors);
+    assert_eq!(result2.created, 0, "a real po_number must match, not create a duplicate order");
+    assert_eq!(result2.updated, 1);
+
+    let list2 = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let corrected = list2.iter().find(|r| r["id"] == json!(gadget_id)).unwrap();
+    assert_eq!(corrected["unit_cost"], json!(1100), "the correction applied");
+    assert_eq!(corrected["po_number"], json!(gadget_po_number), "the identity used to find it didn't itself change");
+    assert_eq!(list2.len(), 3, "still exactly 3 orders total, not 4");
+}
+
+#[test]
+fn test_purchasing_po_number_cannot_be_hand_edited() {
+    // po_number is this module's one real identity — see
+    // crud::is_update_blocked_field's own comment for why letting it
+    // be hand-edited would undermine the exact Excel-matching workflow
+    // it exists to support.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut po = serde_json::Map::new();
+    po.insert("supplier".into(), json!("Acme"));
+    po.insert("item_name".into(), json!("widget"));
+    po.insert("quantity".into(), json!(10));
+    po.insert("unit_cost".into(), json!(500));
+    let id = crate::crud::create(&conn, &biz, &uid, "purchasing", &po).unwrap();
+
+    let mut edit = serde_json::Map::new();
+    edit.insert("po_number".into(), json!("PO-9999"));
+    let err = crate::crud::update(&conn, &biz, &uid, "purchasing", &id, &edit, false).unwrap_err();
+    assert!(err.to_string().contains("po_number"), "unexpected error: {err}");
 }

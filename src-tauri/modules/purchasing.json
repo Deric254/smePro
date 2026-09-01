@@ -3,6 +3,13 @@
   "display_name": "Purchasing",
   "fields": [
     {
+      "name": "po_number",
+      "type": "text",
+      "required": true,
+      "unique": true,
+      "default": ""
+    },
+    {
       "name": "supplier",
       "type": "text",
       "required": true

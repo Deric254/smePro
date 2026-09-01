@@ -98,7 +98,19 @@ pub(crate) fn is_update_blocked_field(module_id: &str, field_name: &str, bulk_im
     }
     // Everything below is blocked unconditionally — bulk_import
     // exempts none of it, for the reasoning above.
-    (module_id == "purchasing" && field_name == "received")
+    //
+    // `purchasing.po_number` joins this list for a related but
+    // distinct reason from `received`: it's not that editing it could
+    // skip an atomic side effect (there isn't one), it's that this is
+    // the one field the module's own business-scoped UNIQUE constraint
+    // is built on AND the field Excel import matches existing rows by
+    // (see excel_import.rs) — letting it be hand-edited into an
+    // arbitrary value would mean a "correct this PO before receiving"
+    // re-import could silently stop matching the row it's meant to
+    // correct, or start colliding with a different one. It's generated
+    // exactly once, at creation (see crud::create), and never changes
+    // again for the life of the record.
+    (module_id == "purchasing" && (field_name == "received" || field_name == "po_number"))
         || (module_id == "debt_credit" && field_name == "settled")
         // debt_credit's payment_method and source_order_id are
         // system-recorded facts about HOW and FROM WHICH sale a debt
@@ -197,6 +209,20 @@ pub fn create(
     // own quantity/settled comments already make.
     if module_id == "purchasing" {
         record.insert("received".to_string(), json!(false));
+        // Same forced-baseline treatment as `received` just above, for
+        // the same reason: `po_number` exists specifically to give
+        // Purchasing a real, business-scoped-unique identifier — the
+        // one thing this module never had before, which is what let
+        // Excel re-imports silently mismatch rows onto each other by
+        // `supplier` (not unique — one supplier has many orders). A
+        // caller-supplied po_number could collide with an existing one
+        // (rejected loudly by the DB's own UNIQUE(business_id,
+        // po_number) constraint — safe, but a confusing error for
+        // something that should just work) or simply not follow the
+        // sequence real receipts and audits expect. Always generated
+        // here, never taken from the caller, exactly like `received`.
+        let po_number = crate::receiving::generate_po_number(conn, business_id)?;
+        record.insert("po_number".to_string(), json!(po_number));
     }
     // Hard business rule, not just a UI nicety: an inventory item can
     // never be saved with a selling price below its cost price. Both

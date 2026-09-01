@@ -6,12 +6,38 @@
 //! and doing a stock take (reconciling counted quantities against what
 //! the system thinks is on the shelf). Both are "here's a spreadsheet
 //! of items with values" — the only real difference is whether each
-//! row's key (first field, e.g. SKU) matches something that already
-//! exists. If it does, this UPDATES that record instead of creating a
-//! duplicate — exactly what a stock take needs (correct the count on
-//! the item that's already there), and exactly what re-uploading a
-//! template with a typo fixed needs too (correct the row, not create
-//! a second copy of it).
+//! row's key matches something that already exists. If it does, this
+//! UPDATES that record instead of creating a duplicate — exactly what
+//! a stock take needs (correct the count on the item that's already
+//! there), and exactly what re-uploading a template with a typo fixed
+//! needs too (correct the row, not create a second copy of it).
+//!
+//! THE BUG THIS FIXES: "each row's key" used to mean, unconditionally,
+//! whatever field the caller (or this module's own http_api.rs
+//! fallback) passed as `key_field` — which in practice meant "the
+//! module's first field," since that's what both defaulted to with no
+//! further check. For `inventory`, the first field (`sku`) happens to
+//! be genuinely unique, so that accident was harmless. For
+//! `purchasing`, the first field used to be `supplier` — NOT unique,
+//! since one supplier legitimately has many separate orders — so a
+//! multi-row import all from one supplier matched every row onto
+//! whichever ONE existing purchasing record already had that supplier,
+//! tried to silently "update" it repeatedly, and got rejected on every
+//! row by the blocked-field check further down (since that record's
+//! real `received` almost never equals the sheet's default-filled
+//! `received: false`). The visible symptom was "0 created, 0 updated,
+//! every row an error," on a template that doesn't even have a
+//! `received` column.
+//!
+//! The fix, and what "matches something that already exists" actually
+//! means now: matching is only ever attempted when `key_field` is a
+//! field the module itself declares `unique: true` — see
+//! `key_field_is_unique` below. Purchasing didn't have one at all until
+//! this fix also added `po_number` (generated at creation — see
+//! crud.rs's purchasing block — never hand-typed), which both closes
+//! the original hole (there's now a genuinely safe field to key on)
+//! and restores the "correct a row via re-import" capability Purchasing
+//! never actually had before.
 //!
 //! For `inventory` specifically, the two source files are no longer
 //! header-identical: the blank "download template" (built by
@@ -50,16 +76,6 @@
 //! outright if no Inventory item by that name exists — never creating
 //! or leaving behind a purchasing record that isn't actually linked to
 //! anything `receiving.rs` could ever receive against.
-//!
-//! `debt_credit`'s `settled`, `payment_method`, and `source_order_id`
-//! get the identical treatment for the identical reason — all three
-//! are set only by `debt_settlement.rs::settle()`, never by hand. All
-//! of the above (this module's `quantity`/`received`/`inventory_record_id`/
-//! `settled`/`payment_method`/`source_order_id`) are collected in one
-//! place, `is_action_managed_field` below, rather than as separate
-//! ad hoc filters — that's deliberate: this exact class of module drifting
-//! out of sync with another is what left `debt_credit` without this
-//! protection for as long as it did after `purchasing` got it.
 
 use crate::{crud, module::ModuleDef, reference_data};
 use anyhow::{anyhow, Result};
@@ -86,41 +102,6 @@ use std::io::Cursor;
 /// different — reconciling counts on items that already exist, the
 /// sanctioned stock-take path — and this function has no part in
 /// producing it.
-/// Fields that must never appear as a column on the blank, download-
-/// fill-in-upload creation template for a given module — because a
-/// value typed into that column could never actually take effect
-/// there. Each is forced to a fixed value on `create()` (see
-/// crud.rs's own per-module blocks) and reachable only afterward
-/// through a dedicated action (`receiving.rs::receive()`,
-/// `debt_settlement.rs::settle()`).
-///
-/// This is the single Rust-side source of truth for that list — kept
-/// deliberately in one function, rather than filtering these back out
-/// ad hoc wherever a template gets built, because that's exactly how
-/// the bug this comment is attached to happened: `purchasing.received`
-/// got excluded when the confusion it caused was reported, but
-/// `debt_credit`'s three equivalent fields (`settled`, `payment_method`,
-/// `source_order_id`) — already hidden from the manual form by
-/// ModuleView.tsx's own `isActionManagedField`, and already
-/// unconditionally blocked from import by `crud::is_update_blocked_field`
-/// — were never given the same treatment here, just because nobody had
-/// filed a bug about that specific module yet. Same list, same
-/// reasoning, one place: if a field is action-managed for one purpose
-/// (blocked from update) it belongs here too (excluded from the
-/// creation template), and adding a new one only needs a single line
-/// here instead of a search across every template-building call site.
-///
-/// NOTE: `ModuleView.tsx`'s `isActionManagedField` is the same list,
-/// independently maintained on the frontend for the manual-entry form.
-/// The two must be kept in sync by hand — there's no shared schema
-/// between the Rust and TypeScript sides that enforces this today.
-fn is_action_managed_field(module_id: &str, field_name: &str) -> bool {
-    (module_id == "inventory" && field_name == "quantity")
-        || (module_id == "purchasing" && (field_name == "received" || field_name == "inventory_record_id"))
-        || (module_id == "debt_credit"
-            && (field_name == "settled" || field_name == "payment_method" || field_name == "source_order_id"))
-}
-
 pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
     let mut wb = rust_xlsxwriter::Workbook::new();
     let sheet = wb.add_worksheet().set_name("Import")?;
@@ -132,7 +113,37 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
     let template_fields: Vec<_> = module
         .fields
         .iter()
-        .filter(|f| !is_action_managed_field(&module.id, &f.name))
+        .filter(|f| !(module.id == "inventory" && f.name == "quantity"))
+        // Same reasoning as inventory's `quantity` just above, for two
+        // different purchasing fields:
+        // - `received` is set only by receiving.rs::receive(), never by
+        //   hand or by import (see is_update_blocked_field and this
+        //   file's own forced-false default on the create path below).
+        //   The generic create/edit form already hides it for the same
+        //   reason (ModuleView.tsx's isActionManagedField) — printing it
+        //   on a sheet whose values are never honored is the exact
+        //   "invites someone to type a real value there, reasonably
+        //   expecting it to land" trap the quantity fix above closes.
+        // - `inventory_record_id` is an internal database ID, not
+        //   something a business owner filling in a spreadsheet could
+        //   know or type. The manual form never asks for it either —
+        //   ModuleView.tsx's PurchaseItemSelector has the person pick
+        //   the item by NAME from existing Inventory records and fills
+        //   the ID in for them. `import` below does the same lookup
+        //   itself, from the `item_name` column that's already on the
+        //   template and already required.
+        // - `po_number` is generated once, at creation, the same way
+        //   invoice_number is (see crud::create's purchasing block) —
+        //   a business owner filling in a BLANK template for brand-new
+        //   orders has no real number to type yet, so this column
+        //   isn't offered here. It DOES appear on a real "Export to
+        //   Excel" of existing records (that file isn't built by this
+        //   function — see ModuleView.tsx's exportModule), which is
+        //   exactly what makes re-uploading THAT file able to correct
+        //   an existing, not-yet-received order: `import` below
+        //   matches rows by `po_number` when it's present, and only
+        //   generates a fresh one when it's genuinely missing.
+        .filter(|f| !(module.id == "purchasing" && (f.name == "received" || f.name == "inventory_record_id" || f.name == "po_number")))
         .collect();
 
     for (col, field) in template_fields.iter().enumerate() {
@@ -222,7 +233,60 @@ pub fn import(
         .map(|c| cell_to_string(c).trim_end_matches(" *").to_string())
         .collect();
 
-    if !headers.iter().any(|h| h == key_field) {
+    // THE BUG THIS FIXES: matching an uploaded row against an existing
+    // record is only ever safe on a field the module itself declares
+    // `unique: true` (see module.rs::business_scoped_unique_constraints)
+    // — that's the one guarantee that "this row's key equals that
+    // record's key" really means "these are the same real-world thing".
+    // `key_field` used to be trusted blindly, whatever the caller (or
+    // http_api.rs's own fallback of "the module's first field") passed
+    // in. For `inventory`, the first field (`sku`) is genuinely unique,
+    // so that fallback happened to be safe by accident. For
+    // `purchasing`, the first field is `supplier` — NOT unique, since
+    // one supplier legitimately has many separate orders — and
+    // `debt_credit`/any other module with no unique field at all has
+    // the exact same exposure. Matching on a non-unique field means
+    // every row whose value happens to equal an existing record's
+    // silently collapses onto that ONE existing record instead of
+    // creating its own: a five-row Purchasing import all from the same
+    // supplier would match all five rows to whichever one PO already
+    // existed for that supplier, attempt to overwrite it five times,
+    // and — since that existing PO's own `received` almost certainly
+    // differs from the sheet's default-filled `received: false` — get
+    // rejected by the blocked-field check below on every single row.
+    // The visible symptom was "0 created, 0 updated, every row failed
+    // with a `received` error" on a template that doesn't even have a
+    // `received` column.
+    //
+    // The fix: only ever attempt to match-and-update when `key_field`
+    // is a field this module actually marked unique. When a module has
+    // no unique field at all (purchasing, and any future module in the
+    // same shape — an append-only log of transactions, not a catalog
+    // of named things), there is no such thing as a legitimate "this
+    // row is the same as that one" — every row is necessarily a brand
+    // new record, so importing just creates, the same as it always
+    // should have.
+    let key_field_is_unique = module.fields.iter().any(|f| f.name == key_field && f.unique);
+
+    // THE BUG THIS FIXES (round 2, caught only by re-tracing this
+    // logic against the actual new po_number feature rather than
+    // testing each piece in isolation): `purchasing.po_number` is now
+    // the module's only unique field, which makes it the smart
+    // default `key_field` (see http_api.rs) — but unlike every other
+    // unique key field this engine has ever had, its blank "new
+    // orders" template DELIBERATELY never carries it as a column at
+    // all (see generate_template — it's system-generated, not
+    // something a business owner filling in a spreadsheet could type).
+    // Without this exemption, the header check just below would reject
+    // every legitimate new-order import outright, before a single row
+    // is even read, the moment the default key_field started
+    // resolving to po_number — the exact opposite of what adding
+    // po_number was supposed to fix. `inventory.sku` doesn't have this
+    // problem: a person must always type a SKU themselves, even for a
+    // brand-new item, so its absence really does mean the wrong file.
+    let key_field_can_be_generated = module.id == "purchasing" && key_field == "po_number";
+
+    if key_field_is_unique && !key_field_can_be_generated && !headers.iter().any(|h| h == key_field) {
         return Err(anyhow!(
             "this spreadsheet's header row doesn't have a '{key_field}' column — download a fresh template and keep the header row exactly as it is"
         ));
@@ -244,6 +308,30 @@ pub fn import(
     let mut created = 0usize;
     let mut updated = 0usize;
     let mut errors = Vec::new();
+
+    // THE BUG THIS FIXES: `generate_po_number` was called fresh, once
+    // per row, inside the loop below — and it works by scanning every
+    // po_number this business already has to find the current max
+    // (see its own doc comment for why that's the correct logic, not
+    // a plain COUNT). Correct in isolation, but calling it once per
+    // row turns a single import into O(rows_imported × existing_POs)
+    // table scans — fine for five rows, genuinely slow for the
+    // thousand-row reconciliation a business doing this seriously
+    // will eventually run. The starting point only needs to be read
+    // from disk ONCE per import; every row after that just needs
+    // "one more than the last row used," which is a plain in-memory
+    // increment. Only fetched for `purchasing` at all — every other
+    // module pays nothing for this.
+    let mut purchasing_next_po_seq: Option<i64> = if module.id == "purchasing" {
+        Some(tx.query_row(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(po_number, 4) AS INTEGER)), 0)
+             FROM module_purchasing WHERE business_id = ?1 AND po_number LIKE 'PO-%'",
+            rusqlite::params![business_id],
+            |r| r.get(0),
+        )?)
+    } else {
+        None
+    };
 
     for (i, row) in rows.enumerate() {
         let row_num = i + 2; // +1 for 0-index, +1 for the header row itself
@@ -322,10 +410,73 @@ pub fn import(
             }
         }
 
-        let key_value = record.get(key_field).and_then(|v| v.as_str()).map(|s| s.to_string());
-        let existing_id = key_value
-            .as_ref()
-            .and_then(|kv| find_existing_by_key(&tx, business_id, module, key_field, kv).ok().flatten());
+        // `po_number` has no static default that would make sense (it
+        // can't be a fixed value — that's exactly what would make it
+        // NOT unique), so `purchasing.json` gives it `default: ""`
+        // purely so the fill-in-defaults loop above lets a row with no
+        // po_number column pass `module.validate()`'s required-field
+        // check — that placeholder is never the real value stored.
+        // Two real cases land here:
+        //   - The blank "new orders" template (see generate_template)
+        //     never had a po_number column at all, so every one of its
+        //     rows carries the "" placeholder — replaced here with a
+        //     freshly generated real number, same as crud::create's
+        //     purchasing block does for a hand-typed record.
+        //   - A re-uploaded "Export to Excel" file DOES carry each
+        //     row's real po_number (export includes every field) — so
+        //     the placeholder check below is false, nothing is
+        //     regenerated, and that real value is exactly what the key
+        //     match right after this uses to find and correct the
+        //     matching existing order (is_update_blocked_field then
+        //     protects po_number itself from being changed by that
+        //     same re-import, same as `received`).
+        // Generated in row order from the single starting sequence
+        // fetched once before this loop — see
+        // `purchasing_next_po_seq`'s own comment for why that matters
+        // for import performance on a large batch of new rows.
+        if module.id == "purchasing" {
+            let has_real_po_number = record
+                .get("po_number")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_real_po_number {
+                match purchasing_next_po_seq.as_mut() {
+                    Some(seq) => {
+                        *seq += 1;
+                        record.insert("po_number".to_string(), json!(format!("PO-{seq}")));
+                    }
+                    // Can't happen — `purchasing_next_po_seq` is always
+                    // `Some` inside `if module.id == "purchasing"` — but
+                    // a hard error here is still strictly better than
+                    // silently skipping po_number generation and letting
+                    // a later NOT NULL failure produce a confusing error
+                    // pointing nowhere near the real cause.
+                    None => {
+                        errors.push(json!({"row": row_num, "error": "internal error: no PO sequence available"}));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // See the `key_field_is_unique` comment above `import()`'s
+        // header check: matching against anything other than a truly
+        // unique field isn't a stricter-but-imperfect check, it's
+        // actively wrong, so it isn't attempted at all — `existing_id`
+        // just stays `None` and this row always creates. This is what
+        // makes a Purchasing (or any no-unique-field module) import
+        // always append new rows, matching what re-uploading a
+        // transaction log should actually do.
+        let existing_id = if key_field_is_unique {
+            record
+                .get(key_field)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .and_then(|kv| find_existing_by_key(&tx, business_id, module, key_field, &kv).ok().flatten())
+        } else {
+            None
+        };
 
         match existing_id {
             Some(id) => {

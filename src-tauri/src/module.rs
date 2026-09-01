@@ -246,6 +246,30 @@ impl ModuleDef {
         );
         tx.execute(&index_sql, [])?;
 
+        // Inventory-specific: `excel_import::find_inventory_id_by_name`
+        // (used on every single row of a Purchasing import, to resolve
+        // `item_name` to the actual Inventory record) looks records up
+        // by `LOWER(TRIM(name))`, and nothing above gives it anything
+        // to use — the business-scoped unique index only exists for
+        // fields actually marked `unique` (sku), and name isn't one of
+        // those. Without this, that lookup is a full scan of every
+        // inventory row this business has, for every single row of
+        // every Purchasing import — fine at a handful of SKUs,
+        // genuinely slow at the thousands a real catalog reaches. A
+        // SQLite expression index, built on the exact same expression
+        // the lookup's WHERE clause uses, lets that query hit the
+        // index directly instead. Special-cased here rather than made
+        // generic (a `unique`-style flag in the JSON schema, say)
+        // because this is the one lookup in the whole codebase shaped
+        // like this — see the `unique` field for the general case.
+        if self.id == "inventory" {
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS idx_module_inventory_name_lookup
+                 ON module_inventory(business_id, LOWER(TRIM(name)));",
+                [],
+            )?;
+        }
+
         // Register (or update) this module against the business in the
         // core `modules` registry table.
         tx.execute(
