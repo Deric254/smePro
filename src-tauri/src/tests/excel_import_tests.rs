@@ -554,7 +554,9 @@ fn test_purchasing_po_number_generated_sequentially_and_usable_for_correction() 
 
     let list2 = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
     let corrected = list2.iter().find(|r| r["id"] == json!(gadget_id)).unwrap();
-    assert_eq!(corrected["unit_cost"], json!(1100), "the correction applied");
+    // unit_cost is a "money" field — stored as integer cents, so
+    // "1100" (typed as $1100.00) round-trips to 110000, not 1100.
+    assert_eq!(corrected["unit_cost"], json!(110000), "the correction applied");
     assert_eq!(corrected["po_number"], json!(gadget_po_number), "the identity used to find it didn't itself change");
     assert_eq!(list2.len(), 3, "still exactly 3 orders total, not 4");
 }
@@ -568,6 +570,18 @@ fn test_purchasing_po_number_cannot_be_hand_edited() {
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
+
+    // `crud::create()` now resolves `item_name` against Inventory and
+    // rejects the row if no match exists (see crud.rs's "THE BUG THIS
+    // FIXES" comment on the purchasing block) — so the item has to be
+    // seeded first, same as every other purchasing-create test does.
+    let mut inv = serde_json::Map::new();
+    inv.insert("sku".into(), json!("WIDGET-001"));
+    inv.insert("name".into(), json!("widget"));
+    inv.insert("quantity".into(), json!(0));
+    inv.insert("unit_cost".into(), json!(400));
+    inv.insert("unit_price".into(), json!(600));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &inv).unwrap();
 
     let mut po = serde_json::Map::new();
     po.insert("supplier".into(), json!("Acme"));
