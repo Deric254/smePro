@@ -144,6 +144,14 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
         //   matches rows by `po_number` when it's present, and only
         //   generates a fresh one when it's genuinely missing.
         .filter(|f| !(module.id == "purchasing" && (f.name == "received" || f.name == "inventory_record_id" || f.name == "po_number")))
+        // Same reasoning as purchasing's `po_number` just above,
+        // applied to debt_credit's own generated identity: a blank
+        // "new entries" template has no real `entry_number` to offer
+        // yet (see crud::create's debt_credit block), so it isn't a
+        // column here — but it DOES appear on a real "Export to Excel"
+        // of existing records, which is what lets `import` below match
+        // rows by `entry_number` on a genuine re-upload.
+        .filter(|f| !(module.id == "debt_credit" && f.name == "entry_number"))
         .collect();
 
     for (col, field) in template_fields.iter().enumerate() {
@@ -284,7 +292,8 @@ pub fn import(
     // po_number was supposed to fix. `inventory.sku` doesn't have this
     // problem: a person must always type a SKU themselves, even for a
     // brand-new item, so its absence really does mean the wrong file.
-    let key_field_can_be_generated = module.id == "purchasing" && key_field == "po_number";
+    let key_field_can_be_generated = (module.id == "purchasing" && key_field == "po_number")
+        || (module.id == "debt_credit" && key_field == "entry_number");
 
     if key_field_is_unique && !key_field_can_be_generated && !headers.iter().any(|h| h == key_field) {
         return Err(anyhow!(
@@ -326,6 +335,21 @@ pub fn import(
         Some(tx.query_row(
             "SELECT COALESCE(MAX(CAST(SUBSTR(po_number, 4) AS INTEGER)), 0)
              FROM module_purchasing WHERE business_id = ?1 AND po_number LIKE 'PO-%'",
+            rusqlite::params![business_id],
+            |r| r.get(0),
+        )?)
+    } else {
+        None
+    };
+
+    // Same fix, same reason, as `purchasing_next_po_seq` just above,
+    // for debt_credit's own generated identity — see
+    // debt_settlement::generate_entry_number's doc comment for why
+    // this exists at all.
+    let mut debt_credit_next_entry_seq: Option<i64> = if module.id == "debt_credit" {
+        Some(tx.query_row(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(entry_number, 4) AS INTEGER)), 0)
+             FROM module_debt_credit WHERE business_id = ?1 AND entry_number LIKE 'DC-%'",
             rusqlite::params![business_id],
             |r| r.get(0),
         )?)
@@ -454,6 +478,30 @@ pub fn import(
                     // pointing nowhere near the real cause.
                     None => {
                         errors.push(json!({"row": row_num, "error": "internal error: no PO sequence available"}));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Same "generate once for a blank new-entries sheet, keep
+        // whatever's already there on a genuine re-upload" logic as
+        // purchasing's `po_number` just above, for debt_credit's
+        // `entry_number`.
+        if module.id == "debt_credit" {
+            let has_real_entry_number = record
+                .get("entry_number")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !has_real_entry_number {
+                match debt_credit_next_entry_seq.as_mut() {
+                    Some(seq) => {
+                        *seq += 1;
+                        record.insert("entry_number".to_string(), json!(format!("DC-{seq}")));
+                    }
+                    None => {
+                        errors.push(json!({"row": row_num, "error": "internal error: no entry sequence available"}));
                         continue;
                     }
                 }
@@ -677,7 +725,16 @@ pub fn import(
 // `ModuleDef`/`table_name()` here since this lookup is specific to one
 // hardcoded module (inventory) from another module's (purchasing's) own
 // import path, not a generic per-module operation.
-fn find_inventory_id_by_name(conn: &Connection, business_id: &str, name: &str) -> Result<Option<String>> {
+//
+// pub(crate) rather than private: crud::create() also calls this
+// directly for a purchasing record's own `item_name` — this used to be
+// resolved only on the Excel-import path, so any purchasing record
+// created through the ordinary single-record create() (a raw API call,
+// or any backend code that doesn't go through ModuleView.tsx's
+// PurchaseItemSelector) could end up with no `inventory_record_id` at
+// all, silently unlinked from anything receiving.rs::receive() could
+// ever update. Same lookup, one implementation, both callers.
+pub(crate) fn find_inventory_id_by_name(conn: &Connection, business_id: &str, name: &str) -> Result<Option<String>> {
     if name.is_empty() {
         return Ok(None);
     }

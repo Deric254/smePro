@@ -48,6 +48,42 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// Generates the next `entry_number` for a Debt & Credit record —
+/// same shape and same reasoning as `receiving::generate_po_number`:
+/// a real, business-scoped-unique identifier, read once as a max and
+/// incremented, never taken from the caller.
+///
+/// THE BUG THIS FIXES: `debt_credit` used to have no field marked
+/// `unique: true` at all, which meant Excel re-import could only ever
+/// safely match against nothing — see excel_import.rs's own
+/// `key_field_is_unique` comment. That's the intentionally SAFE
+/// behavior for a field like `party_name` (one party can legitimately
+/// have many separate, simultaneous debt/credit entries — pos.rs
+/// creates one per credit sale, and two different anonymous walk-in
+/// customers can both have an empty `party_name`), so `party_name`
+/// itself must never become the unique key — doing that would put a
+/// real `UNIQUE(business_id, party_name)` constraint in the way of a
+/// second credit sale to the same repeat customer, an outright
+/// regression on a core POS path.
+///
+/// `entry_number` is what `po_number` is for Purchasing: a field with
+/// no other purpose than being a safe, always-present, never-hand-
+/// edited identity a spreadsheet re-import can match rows against —
+/// so "download an Export to Excel, correct a value, reimport it" can
+/// finally work for Debt & Credit the same way it already does for
+/// Purchasing and Inventory, without reopening the exact "matches
+/// whichever ONE existing record happens to share a non-unique value"
+/// hole this whole mechanism exists to close.
+pub fn generate_entry_number(conn: &Connection, business_id: &str) -> Result<String> {
+    let max_existing: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(CAST(SUBSTR(entry_number, 4) AS INTEGER)), 0)
+         FROM module_debt_credit WHERE business_id = ?1 AND entry_number LIKE 'DC-%'",
+        params![business_id],
+        |r| r.get(0),
+    )?;
+    Ok(format!("DC-{}", max_existing + 1))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SettleDebtRequest {
     pub debt_record_id: String,

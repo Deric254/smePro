@@ -111,7 +111,14 @@ pub(crate) fn is_update_blocked_field(module_id: &str, field_name: &str, bulk_im
     // exactly once, at creation (see crud::create), and never changes
     // again for the life of the record.
     (module_id == "purchasing" && (field_name == "received" || field_name == "po_number"))
-        || (module_id == "debt_credit" && field_name == "settled")
+        // `debt_credit.entry_number` joins this list for the exact same
+        // reason `purchasing.po_number` is here: it's the one field
+        // Excel import matches existing Debt & Credit rows by (see
+        // debt_settlement::generate_entry_number and
+        // excel_import.rs's `key_field_is_unique`) — letting it be
+        // hand-edited would let a re-import stop matching the row it's
+        // meant to correct, or collide with a different one.
+        || (module_id == "debt_credit" && (field_name == "settled" || field_name == "entry_number"))
         // debt_credit's payment_method and source_order_id are
         // system-recorded facts about HOW and FROM WHICH sale a debt
         // was settled — set only by debt_settlement::settle() /
@@ -190,6 +197,15 @@ pub fn create(
         record.insert("settled".to_string(), json!(false));
         record.remove("payment_method");
         record.remove("source_order_id");
+        // Same forced-baseline treatment as purchasing's `po_number`
+        // just below, same reason: `entry_number` exists purely to
+        // give Debt & Credit a real, business-scoped-unique identity
+        // to safely match on during Excel re-import — see
+        // debt_settlement::generate_entry_number's own doc comment for
+        // why `party_name` itself can never safely be that field.
+        // Always generated here, never taken from the caller.
+        let entry_number = crate::debt_settlement::generate_entry_number(conn, business_id)?;
+        record.insert("entry_number".to_string(), json!(entry_number));
     }
     // Same forced-baseline treatment, same reason, for purchasing's
     // `received` — this was the one field in this "post-action state"
@@ -223,6 +239,51 @@ pub fn create(
         // here, never taken from the caller, exactly like `received`.
         let po_number = crate::receiving::generate_po_number(conn, business_id)?;
         record.insert("po_number".to_string(), json!(po_number));
+
+        // THE BUG THIS FIXES: `inventory_record_id` used to be resolved
+        // from `item_name` only on the Excel-import path
+        // (excel_import.rs::find_inventory_id_by_name) — the assumption
+        // being that the only other way a purchasing record gets
+        // created is ModuleView.tsx's PurchaseItemSelector, which picks
+        // the item from a dropdown and sends the real ID directly. That
+        // assumption doesn't hold for this single-record path itself:
+        // called directly (a raw API request, or any backend code that
+        // supplies `item_name` without also resolving the ID itself),
+        // it would happily create a purchasing record with no
+        // `inventory_record_id` at all — `inventory_record_id` isn't a
+        // required field, so module.validate() below never catches it.
+        // The record looks fine right up until receiving.rs::receive()
+        // is called against it and fails outright, because there is no
+        // linked Inventory item for it to update. Resolving here too —
+        // same lookup, same "must already exist in Inventory" standard
+        // the import path and the dropdown both hold callers to (see
+        // find_inventory_id_by_name's own doc comment) — closes that
+        // gap for every path that creates a purchasing record, not
+        // just the spreadsheet one. Always resolved from `item_name`
+        // rather than trusting any `inventory_record_id` the caller
+        // might also have sent, so the two can never silently diverge.
+        let item_name = record
+            .get("item_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if !item_name.is_empty() {
+            match crate::excel_import::find_inventory_id_by_name(conn, business_id, &item_name)? {
+                Some(inv_id) => {
+                    record.insert("inventory_record_id".to_string(), json!(inv_id));
+                }
+                None => {
+                    return Err(anyhow!(
+                        "no Inventory item named '{item_name}' was found — create the item in Inventory first"
+                    ));
+                }
+            }
+        }
+        // An empty/missing `item_name` is left alone here — `item_name`
+        // is a required field, so module.validate() just below already
+        // rejects that case with its own clear "item_name is required"
+        // message; duplicating that check here would just produce a
+        // second, less specific error for the same problem.
     }
     // Hard business rule, not just a UI nicety: an inventory item can
     // never be saved with a selling price below its cost price. Both

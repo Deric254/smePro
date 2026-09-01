@@ -55,6 +55,14 @@ function isActionManagedField(moduleId: string, fieldName: string): boolean {
   return (moduleId === 'purchasing' && (fieldName === 'received' || fieldName === 'po_number'))
     || (moduleId === 'debt_credit' && fieldName === 'settled')
     || (moduleId === 'debt_credit' && (fieldName === 'payment_method' || fieldName === 'source_order_id'))
+    // debt_credit's `entry_number` joins this list for the same
+    // "generated, never hand-typed" reason as purchasing's `po_number`
+    // just above — see crud.rs::create's debt_credit block and
+    // db_migrations.rs's v16 for why this field exists at all (it's
+    // what makes an Excel re-import of Debt & Credit able to safely
+    // match an existing row without matching on `party_name`, which
+    // one party can legitimately have many separate entries under).
+    || (moduleId === 'debt_credit' && fieldName === 'entry_number')
     || (moduleId === 'inventory' && fieldName === 'quantity');
 }
 

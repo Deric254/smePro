@@ -243,13 +243,28 @@ fn test_excel_import_cannot_settle_a_debt_by_reimporting_a_settled_column() {
     record.insert("party_name".into(), json!("Gamma Traders"));
     record.insert("direction".into(), json!("owed_to_business"));
     record.insert("amount".into(), json!(50000));
-    crate::crud::create(&conn, &biz, &uid, "debt_credit", &record).unwrap();
+    let debt_id = crate::crud::create(&conn, &biz, &uid, "debt_credit", &record).unwrap();
+
+    // `entry_number` — not `party_name` — is debt_credit's real,
+    // system-generated identity (see
+    // debt_settlement::generate_entry_number's own doc comment for why
+    // `party_name` itself can never safely be an import-matching key:
+    // one party can legitimately have many separate debt/credit
+    // entries, e.g. repeat credit-sale customers in pos.rs). A genuine
+    // "Export to Excel, fix a cell, reimport" of this record carries
+    // its real entry_number, which is exactly what lets this re-import
+    // match it at all.
+    let before = crate::crud::list(&conn, &biz, &uid, "debt_credit", None, 50, 0).unwrap();
+    let entry_number = before.iter().find(|r| r["id"] == json!(debt_id)).unwrap()["entry_number"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let xlsx = build_xlsx(
-        &["party_name", "direction", "amount", "settled"],
-        &[vec!["Gamma Traders", "owed_to_business", "500.00", "true"]],
+        &["entry_number", "party_name", "direction", "amount", "settled"],
+        &[vec![&entry_number, "Gamma Traders", "owed_to_business", "500.00", "true"]],
     );
-    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "party_name").unwrap();
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "entry_number").unwrap();
     assert_eq!(result.updated, 0);
     assert_eq!(result.errors.len(), 1, "an update touching a blocked field must be rejected, not silently applied");
     assert!(
@@ -479,6 +494,24 @@ fn test_purchasing_po_number_generated_sequentially_and_usable_for_correction() 
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
     let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
+
+    // Every row's `item_name` must already exist in Inventory (see
+    // excel_import.rs's own `find_inventory_id_by_name` requirement,
+    // exercised directly by
+    // test_purchasing_import_rejects_item_name_with_no_matching_inventory_item)
+    // — this test is about the po_number sequencing/correction
+    // workflow, not that check, so it seeds the two items the sheet
+    // below references first, same as the other purchasing import
+    // tests do for the items they use.
+    for (sku, name) in [("WIDGET-001", "widget"), ("GADGET-001", "gadget")] {
+        let mut inv_record = serde_json::Map::new();
+        inv_record.insert("sku".into(), json!(sku));
+        inv_record.insert("name".into(), json!(name));
+        inv_record.insert("quantity".into(), json!(0));
+        inv_record.insert("unit_cost".into(), json!(400));
+        inv_record.insert("unit_price".into(), json!(600));
+        crate::crud::create(&conn, &biz, &uid, "inventory", &inv_record).unwrap();
+    }
 
     // Blank "new orders" template shape — no po_number column, exactly
     // what generate_template() actually produces.
