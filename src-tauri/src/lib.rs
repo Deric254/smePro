@@ -25,6 +25,7 @@ pub mod network_mode;
 pub mod notifications;
 pub mod onboarding;
 pub mod pos;
+pub mod profit;
 pub mod rate_limit;
 pub mod rbac;
 pub mod receipt;

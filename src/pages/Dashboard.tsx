@@ -1,7 +1,7 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary } from '../api';
+import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary } from '../api';
 import type { ModuleListItem } from '../types';
-import type { DebtSummary } from '../api';
+import type { DebtSummary, GrossProfitSummary } from '../api';
 import { formatMoney } from '../lib/money';
 
 // Lazy-loaded specifically because it's the only thing in the app that
@@ -53,6 +53,8 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
   // in-progress or failed fetch never shows a wrong or half-formed
   // number.
   const [debtSummary, setDebtSummary] = useState<DebtSummary | null>(null);
+  // Same null-until-real-data discipline as debtSummary above.
+  const [grossProfit, setGrossProfit] = useState<GrossProfitSummary | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,6 +102,9 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
     // render — same as every module tile already does when its own
     // metric fetch fails.
     getDebtSummary().then((d) => { if (!cancelled) setDebtSummary(d); }).catch(() => {});
+    // Same best-effort fetch, same reason — Sales not enabled, or no
+    // "read" permission on it, and the card below just doesn't render.
+    getGrossProfitSummary().then((p) => { if (!cancelled) setGrossProfit(p); }).catch(() => {});
 
     return () => { cancelled = true; };
   }, []);
@@ -118,6 +123,8 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
         <div style={styles.eyebrow}>Welcome back</div>
         <h1 style={{ margin: '0.15rem 0 0' }}>{businessName || 'Your business'}</h1>
       </div>
+
+      {grossProfit && <GrossProfitKpi data={grossProfit} currency={currency} onOpen={() => onSelectModule('sales')} />}
 
       {debtSummary && <DebtStandingKpi data={debtSummary} currency={currency} onOpen={() => onSelectModule('debt_credit')} />}
 
@@ -181,6 +188,51 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
         </div>
       )}
     </div>
+  );
+}
+
+// Gross profit KPI — same "one card, distilled to the single figure
+// that matters most" shape as DebtStandingKpi just below.
+//
+// `has_cost_data` gets its own explicit warning banner rather than
+// just showing "100% margin" silently: a business that's only ever
+// made sales predating this feature (see db_migrations.rs's v17 doc
+// comment — cost_at_sale is permanently 0 on those) would otherwise
+// see a margin number that LOOKS like a real, great result but is
+// actually just "no cost was ever recorded for any of this," which is
+// exactly the kind of confidently-wrong number this whole feature
+// exists to not produce.
+function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; currency: string; onOpen: () => void }) {
+  const isProfit = data.profit_cents >= 0;
+  return (
+    <button
+      className="card"
+      onClick={onOpen}
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
+        width: '100%', textAlign: 'left', cursor: 'pointer', marginBottom: '0.9rem', padding: '0.8rem 1.1rem',
+        ...(!isProfit ? { borderColor: 'var(--stamp)', background: 'var(--stamp-wash)' } : {}),
+      }}
+    >
+      <div>
+        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          Gross profit
+        </div>
+        <div style={{ fontSize: '1.7rem', fontWeight: 700, marginTop: '0.15rem', ...(!isProfit ? { color: 'var(--stamp)' } : {}) }}>
+          {isProfit ? '+' : '−'}{formatMoney(Math.abs(data.profit_cents), currency)}
+        </div>
+        <div style={{ fontSize: '0.82rem', color: 'var(--ink-soft)', marginTop: '0.1rem' }}>
+          {data.margin_pct === null
+            ? `Across ${data.sales_count} sale${data.sales_count === 1 ? '' : 's'} — no revenue yet`
+            : `${data.margin_pct.toFixed(1)}% margin, across ${data.sales_count} sale${data.sales_count === 1 ? '' : 's'}`}
+        </div>
+      </div>
+      {!data.has_cost_data && data.sales_count > 0 ? (
+        <div style={{ textAlign: 'right', flexShrink: 0, fontSize: '0.78rem', color: 'var(--ink-soft)', maxWidth: '9rem' }}>
+          No cost data yet — margin will fill in as new sales happen
+        </div>
+      ) : null}
+    </button>
   );
 }
 

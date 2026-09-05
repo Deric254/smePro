@@ -52,6 +52,12 @@
       "name": "order_id",
       "type": "text",
       "required": false
+    },
+    {
+      "name": "cost_at_sale",
+      "type": "money",
+      "required": true,
+      "default": 0
     }
   ],
   "actions": [

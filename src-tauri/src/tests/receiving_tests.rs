@@ -130,13 +130,35 @@ fn test_purchase_order_without_inventory_link_is_rejected() {
     let biz = test_food_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
+    // `crud::create()` now resolves `item_name` against Inventory at
+    // creation time and rejects the row outright if there's no match
+    // (see crud.rs's "THE BUG THIS FIXES" comment on the purchasing
+    // block) — so a truly unlinked PO can no longer be produced through
+    // this path at all. Seed the item, create the PO normally so it
+    // gets linked, then strip the link directly in the DB to simulate
+    // the orphaned-record case (e.g. the Inventory item was deleted
+    // after the PO was made) that `receive()` itself is meant to guard
+    // against.
+    let mut inv = serde_json::Map::new();
+    inv.insert("sku".into(), serde_json::json!("UNLINK-001"));
+    inv.insert("name".into(), serde_json::json!("Unlinked Item"));
+    inv.insert("quantity".into(), serde_json::json!(0));
+    inv.insert("unit_cost".into(), serde_json::json!(400));
+    inv.insert("unit_price".into(), serde_json::json!(600));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &inv).unwrap();
+
     let mut po = serde_json::Map::new();
     po.insert("supplier".into(), serde_json::json!("Test Supplier"));
     po.insert("item_name".into(), serde_json::json!("Unlinked Item"));
     po.insert("quantity".into(), serde_json::json!(10));
     po.insert("unit_cost".into(), serde_json::json!(500));
-    // Deliberately no inventory_record_id.
     let po_id = crate::crud::create(&conn, &biz, &uid, "purchasing", &po).unwrap();
+
+    conn.execute(
+        "UPDATE module_purchasing SET inventory_record_id = NULL WHERE id = ?1",
+        rusqlite::params![po_id],
+    )
+    .unwrap();
 
     let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
     assert!(crate::receiving::receive(&mut conn, &biz, &uid, req).is_err());

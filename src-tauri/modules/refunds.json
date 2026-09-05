@@ -47,6 +47,12 @@
       "name": "customer",
       "type": "text",
       "required": false
+    },
+    {
+      "name": "cost_reversed",
+      "type": "money",
+      "required": true,
+      "default": 0
     }
   ],
   "actions": [

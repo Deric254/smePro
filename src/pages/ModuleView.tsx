@@ -55,6 +55,14 @@ function isActionManagedField(moduleId: string, fieldName: string): boolean {
   return (moduleId === 'purchasing' && (fieldName === 'received' || fieldName === 'po_number'))
     || (moduleId === 'debt_credit' && fieldName === 'settled')
     || (moduleId === 'debt_credit' && (fieldName === 'payment_method' || fieldName === 'source_order_id'))
+    // debt_credit's `entry_number` joins this list for the same
+    // "generated, never hand-typed" reason as purchasing's `po_number`
+    // just above — see crud.rs::create's debt_credit block and
+    // db_migrations.rs's v16 for why this field exists at all (it's
+    // what makes an Excel re-import of Debt & Credit able to safely
+    // match an existing row without matching on `party_name`, which
+    // one party can legitimately have many separate entries under).
+    || (moduleId === 'debt_credit' && fieldName === 'entry_number')
     || (moduleId === 'inventory' && fieldName === 'quantity');
 }
 
@@ -227,6 +235,14 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
   const [repackSourceId, setRepackSourceId] = useState<string | null>(null);
   const [repackTargetId, setRepackTargetId] = useState('');
+  // Lets the modal create the target item in the same step instead of
+  // requiring a separate trip to Inventory's own create form first —
+  // see repack.rs's module doc comment for why. 'existing' is the
+  // original behavior (repackTargetId); 'new' switches the target
+  // picker for a name + selling-price pair instead.
+  const [repackTargetMode, setRepackTargetMode] = useState<'existing' | 'new'>('existing');
+  const [repackNewTargetName, setRepackNewTargetName] = useState('');
+  const [repackNewTargetPriceText, setRepackNewTargetPriceText] = useState('');
   const [repackSourceQtyText, setRepackSourceQtyText] = useState('1');
   const [repackTargetQtyText, setRepackTargetQtyText] = useState('');
   const [repackNotes, setRepackNotes] = useState('');
@@ -277,7 +293,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   }
 
   async function submitRepack() {
-    if (!repackSourceId || !repackTargetId) return;
+    if (!repackSourceId) return;
     const sourceQty = parseInt(repackSourceQtyText, 10);
     const targetQty = parseInt(repackTargetQtyText, 10);
     if (!Number.isInteger(sourceQty) || sourceQty <= 0) {
@@ -288,13 +304,34 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       setRepackError('Quantity produced must be a positive whole number.');
       return;
     }
+    // Exactly one of the two ways to say what this repack produces —
+    // mirrors the same either/or repack.rs itself enforces, checked
+    // here too so the person sees the problem immediately rather than
+    // waiting on a round trip to the backend for it.
+    let newTargetPriceCents: number | undefined;
+    if (repackTargetMode === 'new') {
+      if (!repackNewTargetName.trim()) {
+        setRepackError('Enter a name for the new item being created.');
+        return;
+      }
+      newTargetPriceCents = parseMoneyInput(repackNewTargetPriceText, businessCurrency) ?? undefined;
+      if (newTargetPriceCents == null) {
+        setRepackError('Enter a selling price for the new item.');
+        return;
+      }
+    } else if (!repackTargetId) {
+      setRepackError('Select the item being produced, or switch to "Create a new item".');
+      return;
+    }
     setRepackSubmitting(true);
     setRepackError(null);
     try {
       const summary = await repackStock({
         source_record_id: repackSourceId,
         source_quantity: sourceQty,
-        target_record_id: repackTargetId,
+        ...(repackTargetMode === 'new'
+          ? { new_target_name: repackNewTargetName.trim(), new_target_unit_price: newTargetPriceCents }
+          : { target_record_id: repackTargetId }),
         target_quantity_produced: targetQty,
         notes: repackNotes || undefined,
       });
@@ -314,11 +351,15 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       const roundingLine = summary.rounding_adjustment_cents
         ? ` (A ${formatMoney(Math.abs(summary.rounding_adjustment_cents), businessCurrency)} rounding ${summary.rounding_adjustment_cents > 0 ? 'loss' : 'gain'} was posted to Bookkeeping under Stock Revaluation.)`
         : '';
+      const newItemLine = summary.target_created ? ' (new item created)' : '';
       setActionResult(
-        `Repacked ${sourceQty} of "${summary.source_name}" into ${targetQty} of "${summary.target_name}". New cost: ${formatMoney(summary.target_unit_cost_after, businessCurrency)} each.${profitLine}${roundingLine}`
+        `Repacked ${sourceQty} of "${summary.source_name}" into ${targetQty} of "${summary.target_name}"${newItemLine}. New cost: ${formatMoney(summary.target_unit_cost_after, businessCurrency)} each.${profitLine}${roundingLine}`
       );
       setRepackSourceId(null);
       setRepackTargetId('');
+      setRepackTargetMode('existing');
+      setRepackNewTargetName('');
+      setRepackNewTargetPriceText('');
       setRepackSourceQtyText('1');
       setRepackTargetQtyText('');
       setRepackNotes('');
@@ -494,9 +535,20 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // "not ambiguous, not clutter" reason payment_method IS shown: one
   // is a real fact someone wants to see at a glance, the other is
   // plumbing.
+  //
+  // `invoice.items_json` joins this exception for a different but
+  // related reason: it's not plumbing, it's real content (the line
+  // items), but showing the raw JSON string itself in a plain table
+  // cell is pure clutter — a person already sees those same line
+  // items rendered properly (description/qty/price/amount) the moment
+  // they open the invoice via InvoiceView, one click away in the same
+  // row. Showing the raw JSON a second time here adds nothing but a
+  // wall of `{"description":...}` text, and — being far longer than
+  // every other column — is also what was forcing this table into
+  // horizontal scroll on an otherwise perfectly ordinary-width screen.
   const columns = useMemo(
-    () => schema?.fields.map((f) => f.name).filter((n) => n !== 'source_order_id') ?? [],
-    [schema]
+    () => schema?.fields.map((f) => f.name).filter((n) => n !== 'source_order_id' && !(moduleId === 'invoice' && n === 'items_json')) ?? [],
+    [schema, moduleId]
   );
   const canDelete = schema?.my_permissions.includes('delete');
   const canExport = schema?.my_permissions.includes('export');
@@ -643,7 +695,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                             </button>
                           )}
                           {moduleId === 'inventory' && inventoryCanRepack && (
-                            <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setRepackSourceId(r.id); setRepackTargetId(''); setRepackSourceQtyText('1'); setRepackTargetQtyText(''); setRepackNotes(''); setRepackError(null); }}>
+                            <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setRepackSourceId(r.id); setRepackTargetId(''); setRepackTargetMode('existing'); setRepackNewTargetName(''); setRepackNewTargetPriceText(''); setRepackSourceQtyText('1'); setRepackTargetQtyText(''); setRepackNotes(''); setRepackError(null); }}>
                               Repack
                             </button>
                           )}
@@ -724,12 +776,62 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               different retail unit — e.g. breaking a sack into loose kilogram bags.
             </p>
             <label>Produces (target item)</label>
-            <select value={repackTargetId} onChange={(e) => setRepackTargetId(e.target.value)} style={{ width: '100%' }}>
-              <option value="">Select the item being produced…</option>
-              {records.filter((r) => r.id !== repackSourceId).map((r) => (
-                <option key={r.id} value={r.id}>{String(r.name ?? r.sku ?? r.id)}</option>
-              ))}
-            </select>
+            <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.4rem', fontSize: '0.85rem' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 'normal' }}>
+                <input
+                  type="radio"
+                  checked={repackTargetMode === 'existing'}
+                  onChange={() => setRepackTargetMode('existing')}
+                />
+                An existing item
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 'normal' }}>
+                <input
+                  type="radio"
+                  checked={repackTargetMode === 'new'}
+                  onChange={() => setRepackTargetMode('new')}
+                />
+                Create a new item
+              </label>
+            </div>
+            {repackTargetMode === 'existing' ? (
+              <select value={repackTargetId} onChange={(e) => setRepackTargetId(e.target.value)} style={{ width: '100%' }}>
+                <option value="">Select the item being produced…</option>
+                {records.filter((r) => r.id !== repackSourceId).map((r) => (
+                  <option key={r.id} value={r.id}>{String(r.name ?? r.sku ?? r.id)}</option>
+                ))}
+              </select>
+            ) : (
+              <div style={{ display: 'flex', gap: '0.6rem' }}>
+                <div style={{ flex: 2 }}>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 'normal' }}>Name</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Rice — 1kg bag"
+                    value={repackNewTargetName}
+                    onChange={(e) => setRepackNewTargetName(e.target.value)}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 'normal' }}>Selling price</label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={repackNewTargetPriceText}
+                    onChange={(e) => setRepackNewTargetPriceText(e.target.value)}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+              </div>
+            )}
+            {repackTargetMode === 'new' && (
+              <p style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
+                A SKU is generated automatically. Cost isn't asked for here — it's calculated from what this
+                repack actually consumes.
+              </p>
+            )}
             <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.6rem' }}>
               <div style={{ flex: 1 }}>
                 <label>Quantity consumed</label>
@@ -745,7 +847,11 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             {repackError && <div style={styles.error}>{repackError}</div>}
             <div style={styles.modalActions}>
               <button className="btn btn-outline" onClick={() => setRepackSourceId(null)} disabled={repackSubmitting}>Cancel</button>
-              <button className="btn btn-stamp" onClick={submitRepack} disabled={repackSubmitting || !repackTargetId}>
+              <button
+                className="btn btn-stamp"
+                onClick={submitRepack}
+                disabled={repackSubmitting || (repackTargetMode === 'existing' ? !repackTargetId : !repackNewTargetName.trim())}
+              >
                 {repackSubmitting ? 'Repacking…' : 'Confirm repack'}
               </button>
             </div>
@@ -803,10 +909,13 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             ) : moduleId === 'purchasing' ? (
               <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
                 Download the template below to place new orders — every row becomes a brand new
-                purchase order with its own PO number, even if several rows share the same supplier.
-                To correct an order before it's received (wrong quantity or cost, say), use "Export to
-                Excel" instead, fix that row, and reimport it — matching is done by PO number, so
-                the correction lands on the right order.
+                purchase order with its own PO number, and is received immediately: stock lands in
+                Inventory and its cost is recalculated right away, no separate "Receive" click needed.
+                To correct a mistake afterward, use "Export to Excel" instead, fix that row, and reimport
+                it — matching is done by PO number, so the correction lands on the right order (note:
+                once an order has been received this way, its quantity and cost can no longer be changed
+                by reimporting, since Inventory has already been updated from the original figures — use
+                Repack or an Inventory stock take to adjust from there instead).
               </p>
             ) : (
               <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
@@ -866,7 +975,10 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
             {excelResult && (
               <div style={{ marginTop: '0.8rem', fontSize: '0.85rem' }}>
-                <div>{excelResult.created} created, {excelResult.updated} updated.</div>
+                <div>
+                  {excelResult.created} created, {excelResult.updated} updated.
+                  {moduleId === 'purchasing' && excelResult.created > 0 ? ' New orders were received immediately — stock is already in Inventory.' : ''}
+                </div>
                 {excelResult.errors.length > 0 && (
                   <div style={{ marginTop: '0.4rem', color: 'var(--stamp)' }}>
                     {excelResult.errors.length} row(s) had problems:
@@ -1014,7 +1126,7 @@ function FieldInput({ field, value, units, currencies, businessCurrency, onChang
   );
 }
 
-function ReportPanel({ moduleId, schema, canExport, businessCurrency }: { moduleId: string; schema: ModuleSchema; canExport: boolean; businessCurrency: string }) {
+export function ReportPanel({ moduleId, schema, canExport, businessCurrency }: { moduleId: string; schema: ModuleSchema; canExport: boolean; businessCurrency: string }) {
   const numericFields = schema.fields.filter((f) => f.type === 'integer' || f.type === 'real' || f.type === 'money');
   const categoryFields = schema.fields.filter((f) => f.type === 'text' || f.type === 'unit' || f.type === 'currency');
   const [agg, setAgg] = useState<'sum' | 'count' | 'avg'>('sum');

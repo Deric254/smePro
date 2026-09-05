@@ -162,6 +162,22 @@ export default function Sidebar({
         )}
 
         <button
+          onClick={() => select('__reports__')}
+          style={{ ...styles.item, ...(selected === '__reports__' ? styles.itemActive : {}) }}
+        >
+          <span
+            className="stamp-badge"
+            style={{
+              width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
+              color: selected === '__reports__' ? 'var(--stamp)' : 'var(--ink-faint)',
+            }}
+          >
+            %
+          </span>
+          <span>Reports</span>
+        </button>
+
+        <button
           onClick={() => { onOpenAi(); onCloseMobile?.(); }}
           style={styles.item}
         >

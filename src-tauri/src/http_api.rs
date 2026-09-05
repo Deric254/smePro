@@ -1035,6 +1035,17 @@ fn route(
         };
     }
 
+    // ---- Gross profit widget for the main Dashboard — see profit.rs
+    // for why this is one direct SQL query against Sales' own
+    // `revenue`/`cost_at_sale` columns rather than a join across
+    // modules.
+    if parts.as_slice() == ["sales", "profit-summary"] && *method == Method::Get {
+        return match crate::profit::summary(conn, &business_id, &user_id) {
+            Ok(summary) => ApiResponse::Json(200, json!(summary)),
+            Err(e) => crud_error(&e),
+        };
+    }
+
     // ---- Audit log: the actual point of recording all of this is being
     // able to look at it. Owner-only — this is oversight data about
     // what every user in the business has done, not something a Staff

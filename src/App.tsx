@@ -9,6 +9,7 @@ import PointOfSale from './pages/PointOfSale';
 import ServiceSale from './pages/ServiceSale';
 import Customers from './pages/Customers';
 import StockTakePage from './pages/StockTake';
+import Reports from './pages/Reports';
 import Sidebar from './components/Sidebar';
 import AiFloatingButton from './components/AiFloatingButton';
 import UpdateChecker from './components/UpdateChecker';
@@ -183,6 +184,8 @@ export default function App() {
           <Customers />
         ) : selected === '__stocktake__' ? (
           <StockTakePage />
+        ) : selected === '__reports__' ? (
+          <Reports />
         ) : selected ? (
           <ModuleView moduleId={selected} />
         ) : (

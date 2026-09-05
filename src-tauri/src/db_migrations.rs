@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 15;
+const CURRENT_VERSION: i32 = 17;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -35,7 +35,9 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 13 { v13_scope_unique_fields_to_business(conn)?; }
     if current < 14 { v14_add_purchasing_po_number(conn)?; }
     if current < 15 { v15_inventory_name_lookup_index(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 15, "bump this alongside the last `if current < N` check above");
+    if current < 16 { v16_add_debt_credit_entry_number(conn)?; }
+    if current < 17 { v17_sales_cost_at_sale(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 17, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -995,6 +997,217 @@ fn v15_inventory_name_lookup_index(conn: &mut Connection) -> Result<()> {
         )?;
     }
     tx.execute("INSERT INTO _schema_version (version) VALUES (15)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Gives `debt_credit` the same real, business-scoped-unique identity
+/// Purchasing got from v14 — `entry_number` — for the exact same
+/// reason: it's the one field Excel re-import can safely match
+/// existing rows by (see debt_settlement::generate_entry_number's own
+/// doc comment for why `party_name` itself never safely can). Mirrors
+/// v14's rename-rebuild-copy-drop shape exactly, since this is the
+/// same kind of change: a NEW field that's both `required` and
+/// `unique`, which — unlike v12's plain nullable `payment_method` /
+/// `source_order_id` columns — a bare `ALTER TABLE ADD COLUMN` can't
+/// express (SQLite has no way to add a NOT NULL column with no
+/// default to a table that may already have rows, nor a UNIQUE
+/// constraint via ALTER TABLE at all).
+fn v16_add_debt_credit_entry_number(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    if let Some(on_disk_raw) = crate::module_json("debt_credit") {
+        if let Ok(on_disk_def) = crate::module::ModuleDef::from_json_str(on_disk_raw) {
+            let table = on_disk_def.table_name();
+            let table_exists: i64 = tx.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![table],
+                |r| r.get(0),
+            )?;
+
+            if table_exists == 1 {
+                let existing_cols: std::collections::HashSet<String> = {
+                    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+                    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+                    rows.filter_map(|r| r.ok()).collect()
+                };
+
+                // A table that already has the column (a fresh install
+                // whose create_table() ran after entry_number joined
+                // debt_credit.json, never touched by this migration at
+                // all) is left alone — same detect-before-rebuild
+                // discipline v13/v14 use.
+                if !existing_cols.contains("entry_number") {
+                    let old_table = format!("{table}__pre_entry_number_v16");
+                    tx.execute(&format!("ALTER TABLE {table} RENAME TO {old_table}"), [])?;
+
+                    let mut cols = vec![
+                        "id TEXT PRIMARY KEY".to_string(),
+                        "business_id TEXT NOT NULL".to_string(),
+                    ];
+                    cols.extend(on_disk_def.field_column_defs()?);
+                    cols.push("created_at TEXT NOT NULL".to_string());
+                    cols.push("updated_at TEXT NOT NULL".to_string());
+                    cols.push("deleted_at TEXT".to_string());
+                    cols.extend(on_disk_def.business_scoped_unique_constraints());
+                    tx.execute(&format!("CREATE TABLE {table} ({})", cols.join(", ")), [])?;
+
+                    let mut select_cols = vec!["t.id".to_string(), "t.business_id".to_string()];
+                    for f in &on_disk_def.fields {
+                        if f.name == "entry_number" {
+                            select_cols.push(
+                                "('DC-' || ROW_NUMBER() OVER (PARTITION BY t.business_id ORDER BY t.created_at, t.id))"
+                                    .to_string(),
+                            );
+                        } else if existing_cols.contains(&f.name) {
+                            select_cols.push(format!("t.{}", f.name));
+                        } else {
+                            // Same fallback v13/v14 use for a declared
+                            // field the old table doesn't have yet, for
+                            // the same reason: schema drift unrelated to
+                            // this specific migration shouldn't fail the
+                            // whole rebuild over it.
+                            let default_sql = match &f.default {
+                                Some(serde_json::Value::String(s)) => format!("'{}'", s.replace('\'', "''")),
+                                Some(serde_json::Value::Number(n)) => n.to_string(),
+                                Some(serde_json::Value::Bool(b)) => if *b { "1".into() } else { "0".into() },
+                                _ => "NULL".into(),
+                            };
+                            select_cols.push(default_sql);
+                        }
+                    }
+                    select_cols.push("t.created_at".to_string());
+                    select_cols.push("t.updated_at".to_string());
+                    select_cols.push("t.deleted_at".to_string());
+
+                    tx.execute(
+                        &format!("INSERT INTO {table} SELECT {} FROM {old_table} t", select_cols.join(", ")),
+                        [],
+                    )?;
+                    tx.execute(&format!("DROP TABLE {old_table}"), [])?;
+                    tx.execute(
+                        &format!("CREATE INDEX IF NOT EXISTS idx_{table}_business ON {table}(business_id, deleted_at)"),
+                        [],
+                    )?;
+                }
+            }
+
+            // Same two-part gap v12/v14 close, same reason: every
+            // business that already had Debt & Credit enabled carries
+            // its own snapshot of the module's schema in
+            // `modules.schema_json`, which crud::load_module reads
+            // instead of this on-disk definition. Runs even for a
+            // business whose table didn't need rebuilding above.
+            tx.execute(
+                "UPDATE modules SET schema_json = ?1 WHERE id = 'debt_credit'",
+                rusqlite::params![on_disk_raw],
+            )?;
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (16)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Same two-part shape as v12: a physical column per table, then a
+/// schema_json snapshot patch per business, so crud::load_module (which
+/// reads the snapshot, not this on-disk definition) sees the new field
+/// immediately without needing every business to somehow re-save its
+/// module config.
+///
+/// Unlike v12's fields, `cost_at_sale`/`cost_reversed` are declared
+/// `required: true, default: 0` — a money field that can be missing
+/// entirely (NULL) would make `SUM(revenue - cost_at_sale)` in
+/// profit.rs's gross-profit query silently skip rows outright (SQL's
+/// `NULL` poisons arithmetic it touches), which is exactly the kind of
+/// quietly-wrong number this feature exists to not produce. `NOT NULL
+/// DEFAULT 0` on the ALTER TABLE itself is what makes that safe to add
+/// to tables that already have rows: SQLite backfills every existing
+/// row with the literal 0 at the moment the column is added, so there
+/// is no NULL gap between "table altered" and "every row has a real
+/// value" for any sale or refund that existed before this migration
+/// ran.
+///
+/// A real limitation, not fixed by this migration and not fixable by
+/// one: sales recorded BEFORE this migration have no way to know what
+/// their true cost was at the time they happened — that fact simply
+/// was never captured, and backfilling it with today's Inventory cost
+/// would be presenting a guess as if it were the recorded number,
+/// exactly what this feature exists to stop doing. Those historical
+/// rows keep `cost_at_sale = 0` permanently; gross profit computed
+/// over a date range that includes them will overstate profit for
+/// that older period specifically. Every sale from this migration
+/// forward has the real figure, captured the moment it's sold (see
+/// pos.rs::checkout()).
+fn v17_sales_cost_at_sale(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    for (table, column) in [
+        ("module_sales", "cost_at_sale"),
+        ("module_refunds", "cost_reversed"),
+    ] {
+        let table_exists: i64 = tx.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![table],
+            |r| r.get(0),
+        )?;
+        if table_exists == 0 {
+            continue; // module never enabled on this install — create_table will build it right, whenever it first is
+        }
+        let already_has_column: i64 = tx.query_row(
+            &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name=?1"),
+            rusqlite::params![column],
+            |r| r.get(0),
+        )?;
+        if already_has_column == 0 {
+            tx.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"),
+                [],
+            )?;
+        }
+    }
+
+    for (module_id, field_name) in [("sales", "cost_at_sale"), ("refunds", "cost_reversed")] {
+        let rows: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT business_id, schema_json FROM modules WHERE id = ?1 AND enabled = 1",
+            )?;
+            let mapped = stmt.query_map(rusqlite::params![module_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (business_id, schema_json) in rows {
+            let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+                Ok(v) => v,
+                Err(_) => continue, // corrupt snapshot pre-dating this migration is out of scope to repair here; leave it untouched rather than risk making it worse
+            };
+            let mut changed = false;
+            if let Some(fields) = parsed.get_mut("fields").and_then(|f| f.as_array_mut()) {
+                let already_present = fields.iter().any(|f| f.get("name").and_then(|n| n.as_str()) == Some(field_name));
+                if !already_present {
+                    fields.push(serde_json::json!({
+                        "name": field_name,
+                        "type": "money",
+                        "required": true,
+                        "unique": false,
+                        "default": 0,
+                    }));
+                    changed = true;
+                }
+            }
+            if changed {
+                let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+                tx.execute(
+                    "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = ?3",
+                    rusqlite::params![new_json, business_id, module_id],
+                )?;
+            }
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (17)", [])?;
     tx.commit()?;
     Ok(())
 }

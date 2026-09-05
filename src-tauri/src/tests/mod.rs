@@ -33,6 +33,8 @@ mod totp_tests;
 #[cfg(test)]
 mod pos_tests;
 #[cfg(test)]
+mod profit_tests;
+#[cfg(test)]
 mod receipt_tests;
 #[cfg(test)]
 mod receiving_tests;

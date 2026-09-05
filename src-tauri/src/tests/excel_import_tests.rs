@@ -79,6 +79,48 @@ fn test_excel_import_updates_existing_record_by_key_field() {
 }
 
 #[test]
+fn test_excel_import_stock_take_sheet_omitting_cost_and_price_leaves_them_untouched() {
+    // THE BUG THIS FIXES: `unit_cost`, `unit_price`, and `reorder_level`
+    // all have declared defaults (0, 0, and 5 — see inventory.json), so
+    // a stock-take sheet built with just `sku`/`name`/`quantity` — a
+    // real, plausible file for someone only recounting stock, not
+    // re-pricing it — used to have the importer's own default-fill
+    // loop insert `unit_cost: 0` and `unit_price: 0` for the columns
+    // this sheet never mentioned, and then write those zeros straight
+    // into the update, silently wiping out the item's real cost and
+    // selling price. A single-record edit through the app never has
+    // this problem (it only ever touches fields actually sent); a
+    // stock-take reimport must not either.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let module = crate::crud::load_module(&conn, &biz, "inventory").unwrap();
+
+    let mut record = serde_json::Map::new();
+    record.insert("sku".into(), json!("BEANS-001"));
+    record.insert("name".into(), json!("Beans"));
+    record.insert("quantity".into(), json!(20));
+    record.insert("unit_cost".into(), json!(800));
+    record.insert("unit_price".into(), json!(1200));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &record).unwrap();
+
+    let xlsx = build_xlsx(
+        &["sku", "name", "quantity"],
+        &[vec!["BEANS-001", "Beans", "17"]], // recounted 3 fewer on the shelf
+    );
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "sku").unwrap();
+    assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
+    assert_eq!(result.created, 0);
+    assert_eq!(result.updated, 1);
+
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let row = list.iter().find(|r| r["sku"] == json!("BEANS-001")).unwrap();
+    assert_eq!(row["quantity"], json!(17), "the actual recount applied");
+    assert_eq!(row["unit_cost"], json!(800), "omitted from the sheet — must not be zeroed to its default");
+    assert_eq!(row["unit_price"], json!(1200), "omitted from the sheet — must not be zeroed to its default");
+}
+
+#[test]
 fn test_excel_import_reports_invalid_money_cell_as_a_clear_row_error() {
     // A garbage value in a money column must surface as a specific,
     // per-row error — not silently become 0, not crash the whole
@@ -243,13 +285,28 @@ fn test_excel_import_cannot_settle_a_debt_by_reimporting_a_settled_column() {
     record.insert("party_name".into(), json!("Gamma Traders"));
     record.insert("direction".into(), json!("owed_to_business"));
     record.insert("amount".into(), json!(50000));
-    crate::crud::create(&conn, &biz, &uid, "debt_credit", &record).unwrap();
+    let debt_id = crate::crud::create(&conn, &biz, &uid, "debt_credit", &record).unwrap();
+
+    // `entry_number` — not `party_name` — is debt_credit's real,
+    // system-generated identity (see
+    // debt_settlement::generate_entry_number's own doc comment for why
+    // `party_name` itself can never safely be an import-matching key:
+    // one party can legitimately have many separate debt/credit
+    // entries, e.g. repeat credit-sale customers in pos.rs). A genuine
+    // "Export to Excel, fix a cell, reimport" of this record carries
+    // its real entry_number, which is exactly what lets this re-import
+    // match it at all.
+    let before = crate::crud::list(&conn, &biz, &uid, "debt_credit", None, 50, 0).unwrap();
+    let entry_number = before.iter().find(|r| r["id"] == json!(debt_id)).unwrap()["entry_number"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let xlsx = build_xlsx(
-        &["party_name", "direction", "amount", "settled"],
-        &[vec!["Gamma Traders", "owed_to_business", "500.00", "true"]],
+        &["entry_number", "party_name", "direction", "amount", "settled"],
+        &[vec![&entry_number, "Gamma Traders", "owed_to_business", "500.00", "true"]],
     );
-    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "party_name").unwrap();
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "entry_number").unwrap();
     assert_eq!(result.updated, 0);
     assert_eq!(result.errors.len(), 1, "an update touching a blocked field must be rejected, not silently applied");
     assert!(
@@ -300,7 +357,10 @@ fn test_purchasing_import_resolves_inventory_record_id_from_item_name() {
     // (the one column the template actually has) — this proves import
     // resolves that to the real Inventory id itself, the same lookup
     // the manual form's PurchaseItemSelector performs, rather than
-    // requiring the id as a column at all.
+    // requiring the id as a column at all. It also proves the row
+    // comes out received — see excel_import.rs's auto-receive block:
+    // a brand-new order placed this way is received immediately, in
+    // the same transaction, with no separate "Receive" click needed.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -325,7 +385,7 @@ fn test_purchasing_import_resolves_inventory_record_id_from_item_name() {
     let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
     let row = list.iter().find(|r| r["supplier"] == json!("Acme Distributors")).unwrap();
     assert_eq!(row["inventory_record_id"], json!(inv_id), "must resolve to the real Inventory item's id, not require it as a column");
-    assert_eq!(row["received"], json!(false), "received must default false — never settable via import");
+    assert_eq!(row["received"], json!(true), "a brand-new order imported this way is received immediately");
 }
 
 #[test]
@@ -363,9 +423,17 @@ fn test_purchasing_import_cannot_mark_a_new_order_received_via_a_hand_added_colu
     // Defense in depth: even if someone hand-adds a "received" column
     // to a re-uploaded spreadsheet (the template itself no longer has
     // one, but nothing stops a determined edit), a brand-new purchasing
-    // row must still never be created already `received: true` —
-    // that's the exact hole this app is built around closing (see
-    // crud.rs::create's own matching purchasing block).
+    // row must never come out received by that column short-circuiting
+    // straight to `received: true` — it must still go through the real
+    // receiving pipeline (see crud.rs::create's own matching purchasing
+    // block, and excel_import.rs's auto-receive block, which forces
+    // `received: false` on the insert itself before running
+    // `receive_in_tx` in the same transaction). A hand-typed "true"
+    // happens to match the real outcome for a fresh order either way
+    // (see the previous test) — what this test actually guards against
+    // is the column being taken at face value and skipping the
+    // mechanics, which would leave the flag flipped but Inventory's
+    // stock and cost untouched.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -389,7 +457,11 @@ fn test_purchasing_import_cannot_mark_a_new_order_received_via_a_hand_added_colu
 
     let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
     let row = list.iter().find(|r| r["supplier"] == json!("Acme Distributors")).unwrap();
-    assert_eq!(row["received"], json!(false), "a new order must never be created already received, even via a hand-added column");
+    assert_eq!(row["received"], json!(true), "a new order is received through the real pipeline regardless of the hand-added column");
+
+    let inv_list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let inv_row = inv_list.iter().find(|r| r["name"] == json!("Cooking Oil")).unwrap();
+    assert_eq!(inv_row["quantity"], json!(20), "stock must actually land in Inventory via receive_in_tx, not just flip the flag");
 }
 
 #[test]
@@ -480,6 +552,24 @@ fn test_purchasing_po_number_generated_sequentially_and_usable_for_correction() 
     let (uid, _) = test_owner(&mut conn, &biz);
     let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
 
+    // Every row's `item_name` must already exist in Inventory (see
+    // excel_import.rs's own `find_inventory_id_by_name` requirement,
+    // exercised directly by
+    // test_purchasing_import_rejects_item_name_with_no_matching_inventory_item)
+    // — this test is about the po_number sequencing/correction
+    // workflow, not that check, so it seeds the two items the sheet
+    // below references first, same as the other purchasing import
+    // tests do for the items they use.
+    for (sku, name) in [("WIDGET-001", "widget"), ("GADGET-001", "gadget")] {
+        let mut inv_record = serde_json::Map::new();
+        inv_record.insert("sku".into(), json!(sku));
+        inv_record.insert("name".into(), json!(name));
+        inv_record.insert("quantity".into(), json!(0));
+        inv_record.insert("unit_cost".into(), json!(400));
+        inv_record.insert("unit_price".into(), json!(600));
+        crate::crud::create(&conn, &biz, &uid, "inventory", &inv_record).unwrap();
+    }
+
     // Blank "new orders" template shape — no po_number column, exactly
     // what generate_template() actually produces.
     let new_orders = build_xlsx(
@@ -501,18 +591,23 @@ fn test_purchasing_po_number_generated_sequentially_and_usable_for_correction() 
     po_numbers.sort();
     assert_eq!(po_numbers, vec!["PO-1", "PO-2", "PO-3"], "sequential, distinct — never repeated or skipped");
 
-    // Now correct one order before it's received — exactly the "Export
-    // to Excel, fix a cell, reimport" workflow the import dialog
-    // describes for Purchasing. The exported file carries the real
-    // po_number for every row (unlike the blank template), which is
-    // what makes this an update, not a fourth new order.
+    // Now correct one order — exactly the "Export to Excel, fix a cell,
+    // reimport" workflow the import dialog describes for Purchasing.
+    // The exported file carries the real po_number for every row
+    // (unlike the blank template), which is what makes this an update,
+    // not a fourth new order. Every order from `new_orders` above was
+    // already received the moment it was created (see excel_import.rs's
+    // auto-receive block), so this correction targets `supplier` — a
+    // field the receive doesn't lock — rather than quantity/unit_cost,
+    // which are covered by the dedicated test right after this one.
     let gadget_po = list.iter().find(|r| r["item_name"] == json!("gadget")).unwrap();
     let gadget_po_number = gadget_po["po_number"].as_str().unwrap().to_string();
     let gadget_id = gadget_po["id"].as_str().unwrap().to_string();
+    assert_eq!(gadget_po["received"], json!(true), "sanity check — this order was auto-received on creation");
 
     let correction = build_xlsx(
-        &["po_number", "supplier", "item_name", "quantity", "unit_cost", "order_date"],
-        &[vec![&gadget_po_number, "Acme", "gadget", "5", "1100", "2026-08-01"]], // unit_cost corrected 1200 -> 1100
+        &["po_number", "supplier", "item_name", "quantity", "unit_cost", "order_date", "received"],
+        &[vec![&gadget_po_number, "Acme Distributors", "gadget", "5", "1200", "2026-08-01", "true"]], // supplier typo corrected; received carried through unchanged, exactly as a real "Export to Excel" file would already contain it
     );
     let result2 = crate::excel_import::import(&mut conn, &biz, &uid, &module, correction, "po_number").unwrap();
     assert_eq!(result2.errors.len(), 0, "errors: {:?}", result2.errors);
@@ -521,9 +616,105 @@ fn test_purchasing_po_number_generated_sequentially_and_usable_for_correction() 
 
     let list2 = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
     let corrected = list2.iter().find(|r| r["id"] == json!(gadget_id)).unwrap();
-    assert_eq!(corrected["unit_cost"], json!(1100), "the correction applied");
+    assert_eq!(corrected["supplier"], json!("Acme Distributors"), "the correction applied");
     assert_eq!(corrected["po_number"], json!(gadget_po_number), "the identity used to find it didn't itself change");
     assert_eq!(list2.len(), 3, "still exactly 3 orders total, not 4");
+
+    // A correction that instead touches quantity or unit_cost must be
+    // rejected once the order is received — Inventory's stock and
+    // weighted-average cost were already derived from the original
+    // figures (see excel_import.rs's "NEW CONSISTENCY CHECK"), so
+    // silently applying a changed number here would let the purchase
+    // order and Inventory drift apart.
+    let bad_correction = build_xlsx(
+        &["po_number", "supplier", "item_name", "quantity", "unit_cost", "order_date", "received"],
+        &[vec![&gadget_po_number, "Acme Distributors", "gadget", "5", "1100", "2026-08-01", "true"]], // unit_cost 1200 -> 1100; received carried through unchanged
+    );
+    let result3 = crate::excel_import::import(&mut conn, &biz, &uid, &module, bad_correction, "po_number").unwrap();
+    assert_eq!(result3.updated, 0, "a locked-field change must not be applied");
+    assert_eq!(result3.errors.len(), 1);
+    assert!(
+        result3.errors[0]["error"].as_str().unwrap().contains("already been received"),
+        "got: {:?}", result3.errors[0]
+    );
+
+    let list3 = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let unchanged = list3.iter().find(|r| r["id"] == json!(gadget_id)).unwrap();
+    assert_eq!(unchanged["unit_cost"], json!(120000), "rejected correction must leave the stored figure untouched");
+}
+
+#[test]
+fn test_purchasing_partial_correction_sheet_omitting_received_and_quantity_still_applies() {
+    // THE BUG THIS FIXES: a hand-built correction sheet has no reason
+    // to carry every column the module defines — someone fixing just
+    // `supplier` on an already-received order would naturally leave
+    // `received` and `quantity` off the sheet entirely (both have
+    // declared defaults; `unit_cost` has none and stays required on
+    // every row regardless, so it's still included below, matching
+    // its stored value). But this importer's own default-fill loop
+    // (see excel_import.rs) used to insert each field's declared
+    // default for any column the sheet didn't mention — `received:
+    // false` and `quantity: 1` — and then both compare THOSE defaults
+    // against the stored, already-received values as if the sheet had
+    // actually tried to change them, AND write those same defaults
+    // back to the database as the "new" value. The result: any
+    // correction sheet that simply didn't repeat every column either
+    // got rejected with a "cannot be edited"/"already been received"
+    // error over a field the person never touched, or — worse, had
+    // the update been allowed through some other path — would have
+    // silently overwritten that field with its default. Fixed by
+    // tracking which fields a row's own cells actually carried a
+    // value for, and treating everything else as untouched, the same
+    // way crud::update()'s own single-record PATCH already does.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut inv_record = serde_json::Map::new();
+    inv_record.insert("sku".into(), json!("NAILS-001"));
+    inv_record.insert("name".into(), json!("Nails"));
+    inv_record.insert("quantity".into(), json!(0));
+    inv_record.insert("unit_cost".into(), json!(300));
+    inv_record.insert("unit_price".into(), json!(500));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &inv_record).unwrap();
+
+    let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
+    let new_order = build_xlsx(
+        &["supplier", "item_name", "quantity", "unit_cost", "order_date"],
+        &[vec!["Acem Distributors", "Nails", "40", "3.00", "2026-08-01"]], // supplier deliberately misspelled
+    );
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, new_order, "po_number").unwrap();
+    assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
+    assert_eq!(result.created, 1);
+
+    let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let row = list.iter().find(|r| r["item_name"] == json!("Nails")).unwrap();
+    assert_eq!(row["received"], json!(true), "sanity check — auto-received on creation");
+    let po_number = row["po_number"].as_str().unwrap().to_string();
+    let id = row["id"].as_str().unwrap().to_string();
+
+    // The correction sheet below fixes only `supplier` — it has no
+    // `received` or `quantity` column at all, exactly the shape a
+    // person hand-fixing one cell would naturally produce (as opposed
+    // to the full-fidelity "Export to Excel" file the other correction
+    // tests use). `unit_cost` is still present, unchanged, since it's
+    // a required field with no default and so must be on every row
+    // regardless of whether this fix touches it.
+    let correction = build_xlsx(
+        &["po_number", "supplier", "item_name", "unit_cost", "order_date"],
+        &[vec![&po_number, "Acme Distributors", "Nails", "3.00", "2026-08-01"]],
+    );
+    let result2 = crate::excel_import::import(&mut conn, &biz, &uid, &module, correction, "po_number").unwrap();
+    assert_eq!(result2.errors.len(), 0, "a correction that never mentions received/quantity must not be rejected over them: {:?}", result2.errors);
+    assert_eq!(result2.created, 0);
+    assert_eq!(result2.updated, 1);
+
+    let list2 = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let corrected = list2.iter().find(|r| r["id"] == json!(id)).unwrap();
+    assert_eq!(corrected["supplier"], json!("Acme Distributors"), "the actual correction still applied");
+    assert_eq!(corrected["received"], json!(true), "omitted from the sheet — must stay exactly as stored, not reset to its default");
+    assert_eq!(corrected["quantity"], json!(40), "omitted from the sheet — must stay exactly as stored, not reset to its default");
+    assert_eq!(corrected["unit_cost"], json!(30000), "unchanged value carried through");
 }
 
 #[test]
@@ -535,6 +726,18 @@ fn test_purchasing_po_number_cannot_be_hand_edited() {
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
+
+    // `crud::create()` now resolves `item_name` against Inventory and
+    // rejects the row if no match exists (see crud.rs's "THE BUG THIS
+    // FIXES" comment on the purchasing block) — so the item has to be
+    // seeded first, same as every other purchasing-create test does.
+    let mut inv = serde_json::Map::new();
+    inv.insert("sku".into(), json!("WIDGET-001"));
+    inv.insert("name".into(), json!("widget"));
+    inv.insert("quantity".into(), json!(0));
+    inv.insert("unit_cost".into(), json!(400));
+    inv.insert("unit_price".into(), json!(600));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &inv).unwrap();
 
     let mut po = serde_json::Map::new();
     po.insert("supplier".into(), json!("Acme"));

@@ -3,6 +3,13 @@
   "display_name": "Debt & Credit Ledger",
   "fields": [
     {
+      "name": "entry_number",
+      "type": "text",
+      "required": true,
+      "unique": true,
+      "default": ""
+    },
+    {
       "name": "party_name",
       "type": "text",
       "required": true

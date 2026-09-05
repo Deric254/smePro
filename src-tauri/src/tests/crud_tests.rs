@@ -65,6 +65,51 @@ fn test_unique_field_is_scoped_per_business_not_global() {
     record_a_dup.insert("unit_price".into(), json!(200));
     let result = crate::crud::create(&conn, &biz_a, &uid_a, "inventory", &record_a_dup);
     assert!(result.is_err(), "the SAME business must still be blocked from reusing a SKU");
+
+    // THE BUG THIS FIXES: this used to surface the raw SQLite message
+    // ("UNIQUE constraint failed: module_inventory.business_id,
+    // module_inventory.sku") straight through to the end user, since
+    // insert_validated_record()'s own conn.execute() call had nothing
+    // translating it first. A person typing a SKU that's already in
+    // use should see a plain sentence naming the field and the value
+    // they typed, not a database's internal table/column names.
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("sku") && msg.contains("SHARED-SKU"), "got: {msg}");
+    assert!(!msg.to_uppercase().contains("CONSTRAINT") && !msg.contains("module_inventory"), "must not leak raw SQL: {msg}");
+}
+
+#[test]
+fn test_update_to_a_duplicate_unique_value_is_a_friendly_error() {
+    // Same fix as test_unique_field_is_scoped_per_business_not_global
+    // just above, for the other write path: update()'s own
+    // conn.execute() had the identical raw-SQL-leak problem — editing
+    // an existing item's SKU to one another item already has is just
+    // as ordinary a mistake as typing a duplicate on create.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut record_a = serde_json::Map::new();
+    record_a.insert("sku".into(), json!("FLOUR-001"));
+    record_a.insert("name".into(), json!("Flour"));
+    record_a.insert("unit_cost".into(), json!(100));
+    record_a.insert("unit_price".into(), json!(200));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &record_a).unwrap();
+
+    let mut record_b = serde_json::Map::new();
+    record_b.insert("sku".into(), json!("SUGAR-001"));
+    record_b.insert("name".into(), json!("Sugar"));
+    record_b.insert("unit_cost".into(), json!(100));
+    record_b.insert("unit_price".into(), json!(200));
+    let sugar_id = crate::crud::create(&conn, &biz, &uid, "inventory", &record_b).unwrap();
+
+    let mut body = serde_json::Map::new();
+    body.insert("sku".into(), json!("FLOUR-001")); // already taken by the other item
+    let result = crate::crud::update(&conn, &biz, &uid, "inventory", &sugar_id, &body, false);
+    assert!(result.is_err(), "must not silently rename onto another item's SKU");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("sku") && msg.contains("FLOUR-001"), "got: {msg}");
+    assert!(!msg.to_uppercase().contains("CONSTRAINT") && !msg.contains("module_inventory"), "must not leak raw SQL: {msg}");
 }
 
 #[test]
@@ -189,6 +234,56 @@ fn test_crud_create_forces_zero_even_when_quantity_is_omitted() {
     let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
     let created = list.iter().find(|r| r["id"] == json!(id)).unwrap();
     assert_eq!(created["quantity"].as_i64().unwrap(), 0);
+}
+
+#[test]
+fn test_crud_create_forces_sales_cost_at_sale_to_zero() {
+    // Same "starts at a forced, correct baseline" rule as inventory's
+    // quantity above — a hand-created (or raw-POSTed) sales record was
+    // never rung up through pos.rs::checkout(), so there's no real
+    // Inventory unit_cost to snapshot for it. Whatever cost_at_sale
+    // the caller tries to supply is silently discarded, same as
+    // inventory's quantity is.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut record = serde_json::Map::new();
+    record.insert("item_name".into(), json!("Hand-entered sale"));
+    record.insert("quantity".into(), json!(1));
+    record.insert("revenue".into(), json!(5000));
+    record.insert("cost_at_sale".into(), json!(9999)); // must be ignored, not honored
+    let id = crate::crud::create(&conn, &biz, &uid, "sales", &record).unwrap();
+
+    let list = crate::crud::list(&conn, &biz, &uid, "sales", None, 50, 0).unwrap();
+    let created = list.iter().find(|r| r["id"] == json!(id)).unwrap();
+    assert_eq!(created["cost_at_sale"], json!(0), "cost_at_sale must be forced to 0 regardless of what was supplied");
+}
+
+#[test]
+fn test_crud_update_rejects_direct_cost_at_sale_edit_on_sales() {
+    // Same rule as inventory's quantity block below: cost_at_sale is a
+    // "post-action state" field, written only by checkout()/refund(),
+    // never hand-editable — see crud::is_update_blocked_field's own
+    // comment on why.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut record = serde_json::Map::new();
+    record.insert("item_name".into(), json!("Hand-entered sale"));
+    record.insert("quantity".into(), json!(1));
+    record.insert("revenue".into(), json!(5000));
+    let id = crate::crud::create(&conn, &biz, &uid, "sales", &record).unwrap();
+
+    let mut body = serde_json::Map::new();
+    body.insert("cost_at_sale".into(), json!(4000));
+    let result = crate::crud::update(&conn, &biz, &uid, "sales", &id, &body, false);
+    assert!(result.is_err(), "cost_at_sale must not be directly editable");
+
+    let list = crate::crud::list(&conn, &biz, &uid, "sales", None, 50, 0).unwrap();
+    let unchanged = list.iter().find(|r| r["id"] == json!(id)).unwrap();
+    assert_eq!(unchanged["cost_at_sale"], json!(0), "rejected edit must leave the stored figure untouched");
 }
 
 #[test]

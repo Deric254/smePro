@@ -136,14 +136,14 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             return Err(anyhow!("quantity must be greater than zero"));
         }
 
-        let row: Option<(String, i64, i64, String)> = tx
+        let row: Option<(String, i64, i64, i64, String)> = tx
             .query_row(
-                &format!("SELECT name, quantity, unit_price, sku FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+                &format!("SELECT name, quantity, unit_price, unit_cost, sku FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
                 params![item.inventory_record_id, business_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let Some((name, current_qty, unit_price, sku)) = row else {
+        let Some((name, current_qty, unit_price, unit_cost, sku)) = row else {
             return Err(anyhow!("product not found: {}", item.inventory_record_id));
         };
 
@@ -164,12 +164,32 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         let line_total: i64 = unit_price * item.quantity;
         subtotal += line_total;
 
+        // THE ACTUAL FIX Deric asked for: snapshot what this item
+        // actually cost, right now, at the exact moment it's sold —
+        // `unit_cost` read fresh from the same row this line's price
+        // and stock deduction just came from, so it's always whatever
+        // Inventory's real weighted-average cost is at this instant,
+        // whether that cost basis came from a straight Purchasing
+        // receipt or from a repack (repack.rs already keeps
+        // `unit_cost` exact — see its own doc comment on rounding —
+        // so a repacked item's sale is costed correctly with zero
+        // special-casing needed here). Before this, Sales had no cost
+        // concept at all: "profit" could only ever be revenue, and a
+        // later price change on the item would have silently rewritten
+        // the apparent cost of every past sale of it, retroactively,
+        // every time the report ran. This makes every sale's margin a
+        // fixed historical fact from the moment it happens, immune to
+        // whatever Inventory's cost does afterward. See profit.rs for
+        // what reads this, and refund.rs for how a return reverses it.
+        let cost_total: i64 = unit_cost * item.quantity;
+
         let mut record: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
         record.insert("item_name".into(), json!(name));
         record.insert("quantity".into(), json!(item.quantity));
         record.insert("revenue".into(), json!(line_total));
         record.insert("unit_price".into(), json!(unit_price));
         record.insert("order_id".into(), json!(order_id));
+        record.insert("cost_at_sale".into(), json!(cost_total));
         if let Some(c) = &req.customer {
             record.insert("customer".into(), json!(c));
         }
@@ -209,6 +229,8 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             "quantity": item.quantity,
             "unit_price": unit_price,
             "line_total": line_total,
+            "unit_cost": unit_cost,
+            "cost_total": cost_total,
             "remaining_stock": new_qty,
             "sale_id": sale_id,
         }));
@@ -240,6 +262,21 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         // parsed back out of `notes` because notes is free text a
         // person can edit later; this isn't.
         debt_record.insert("source_order_id".into(), json!(order_id));
+        // Same forced-generation as crud::create's debt_credit block —
+        // this insert path calls insert_validated_record() directly,
+        // not crud::create(), so it doesn't get that generation for
+        // free. Without this, every credit sale's debt_record would
+        // fall through to the module's own default ("") for
+        // entry_number, and a business's SECOND credit sale in the
+        // same transaction-scoped counter (or, worse, two committed
+        // separately) would collide on the real
+        // UNIQUE(business_id, entry_number) constraint entry_number
+        // exists to be safe under — see
+        // debt_settlement::generate_entry_number's doc comment.
+        debt_record.insert(
+            "entry_number".into(),
+            json!(crate::debt_settlement::generate_entry_number(&tx, business_id)?),
+        );
         if let Some(d) = &req.due_date {
             debt_record.insert("due_date".into(), json!(d));
         }

@@ -18,11 +18,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 /// The columns pulled from a sale row when looking one up for a refund:
-/// (item_name, quantity, order_id, customer, <reserved/unused>). Named
-/// here purely to satisfy clippy's type-complexity lint on a bare
-/// 5-tuple — no behavior change, just a label for what was already
-/// being destructured immediately below.
-type SaleRow = (String, i64, Option<String>, Option<String>, Option<String>);
+/// (item_name, quantity, order_id, customer, cost_at_sale). Named here
+/// purely to satisfy clippy's type-complexity lint on a bare 5-tuple —
+/// no other behavior implied, just a label for what's destructured
+/// immediately below.
+type SaleRow = (String, i64, Option<String>, Option<String>, i64);
 
 #[derive(Debug, Deserialize)]
 pub struct RefundRequest {
@@ -80,14 +80,14 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
     let sale_row: Option<SaleRow> = tx
         .query_row(
             &format!(
-                "SELECT item_name, quantity, order_id, customer, NULL
+                "SELECT item_name, quantity, order_id, customer, cost_at_sale
                  FROM {sales_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
             ),
             params![req.sale_id, business_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((item_name, original_qty, order_id, customer, _)) = sale_row else {
+    let Some((item_name, original_qty, order_id, customer, original_cost_at_sale)) = sale_row else {
         return Err(anyhow!("sale not found: {}", req.sale_id));
     };
 
@@ -117,6 +117,60 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
         ));
     }
 
+    // THE ACTUAL FIX Deric asked for: a refund used to only reverse
+    // `revenue` (see the comment just below) — it never touched
+    // `cost_at_sale` at all, so a fully refunded sale still counted
+    // its full original cost against gross profit (see profit.rs)
+    // with none of the matching revenue left to offset it, permanently
+    // understating profit by exactly the cost of every refunded sale
+    // forever. Whether cost gets reversed at all depends on `restock`,
+    // deliberately, because the two cases are economically different
+    // facts, not the same event with a checkbox: if the item comes
+    // BACK onto the shelf (restock), the business hasn't actually lost
+    // anything — reversing both revenue and cost nets this sale to
+    // zero, as if it never happened. If it does NOT come back (damaged,
+    // expired, given away), the business already paid for that unit
+    // and it's gone — cost_at_sale is left exactly as it was, so the
+    // reversed revenue with no matching cost reversal shows up as a
+    // real loss on that sale, which is the true economic outcome, not
+    // a bug to paper over.
+    //
+    // Computed the same "running remainder" way `already_refunded`
+    // above already is — NOT as `original_cost_at_sale * req.quantity
+    // / original_qty` freshly each time, which would let integer-
+    // division rounding silently gain or lose a coin across repeated
+    // partial refunds of the same sale (three partial refunds of a
+    // 3-unit, 1000-cent sale would round 1000/3=333 three separate
+    // times, reversing 999 total and leaving 1 cent permanently
+    // stranded in `cost_at_sale`, or the reverse). Instead: figure out
+    // the TOTAL cost that should be reversed once this refund is
+    // applied (`already_refunded + req.quantity` units' worth,
+    // proportional to the original sale), then subtract whatever's
+    // already been reversed by earlier refunds on this same sale. The
+    // remainder from integer division always lands on whichever refund
+    // pushes the running total to the next whole cent, and the LAST
+    // refund that fully closes out the sale — `already_refunded +
+    // req.quantity == original_qty` — always reverses the exact
+    // remaining balance, coin for coin, by construction.
+    let already_refunded_cost: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(cost_reversed), 0) FROM {refunds_table}
+                 WHERE sale_id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
+            ),
+            params![req.sale_id, business_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let this_cost_reversal: i64 = if req.restock && original_qty > 0 {
+        let total_cost_reversed_after = (original_cost_at_sale as i128
+            * (already_refunded + req.quantity) as i128
+            / original_qty as i128) as i64;
+        total_cost_reversed_after - already_refunded_cost
+    } else {
+        0
+    };
+
     // THE BUG THIS FIXES: a refund used to only ever create a new row
     // in Refunds — it never touched the original sale's `revenue`, so
     // a fully refunded sale still counted as full revenue everywhere
@@ -134,6 +188,14 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
         ),
         params![req.refund_amount, req.sale_id, business_id],
     )?;
+    if this_cost_reversal > 0 {
+        tx.execute(
+            &format!(
+                "UPDATE {sales_table} SET cost_at_sale = MAX(0, cost_at_sale - ?1) WHERE id = ?2 AND business_id = ?3"
+            ),
+            params![this_cost_reversal, req.sale_id, business_id],
+        )?;
+    }
 
     // Restocking is optional and, when requested, needs an actual
     // inventory item to credit back — a sale that was never linked to
@@ -146,24 +208,15 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
             .map_err(|_| anyhow!("restocking needs the Inventory module enabled for this business"))?;
         let inventory_table = inventory_module.table_name();
 
-        // THE BUG THIS FIXES: this used to match `name = ?2` exactly —
-        // case- and whitespace-sensitive — while excel_import.rs's
-        // identical-purpose lookup (resolve a stored item NAME back to
-        // its real Inventory record) already used
-        // `LOWER(TRIM(name)) = LOWER(?2)`, for good reason: a sale's
-        // `item_name` and Inventory's own `name` can legitimately drift
-        // in case or whitespace (a rename after the sale, a copy-paste
-        // artifact at entry time) without meaning a different item.
-        // Two lookups doing the same real-world job on the same table
-        // with different matching rules is exactly the kind of
-        // inconsistency that shows up as "it says the item doesn't
-        // exist" for an item that plainly does — same fix, same
-        // reasoning, brought in line here.
+        // The sale record itself doesn't carry inventory_record_id
+        // (see sales.json) -- looked up by matching item_name, the
+        // same linkage POS checkout itself relies on when it writes
+        // item_name onto the sale in the first place.
         let inv_row: Option<(String, i64)> = tx
             .query_row(
                 &format!(
                     "SELECT id, quantity FROM {inventory_table}
-                     WHERE business_id = ?1 AND deleted_at IS NULL AND LOWER(TRIM(name)) = LOWER(?2)"
+                     WHERE business_id = ?1 AND name = ?2 AND deleted_at IS NULL"
                 ),
                 params![business_id, item_name],
                 |r| Ok((r.get(0)?, r.get(1)?)),
@@ -189,6 +242,7 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
     record.insert("quantity_refunded".into(), json!(req.quantity));
     record.insert("refund_amount".into(), json!(req.refund_amount));
     record.insert("restocked".into(), json!(req.restock));
+    record.insert("cost_reversed".into(), json!(this_cost_reversal));
     if let Some(oid) = &order_id {
         record.insert("order_id".into(), json!(oid));
     }
@@ -250,6 +304,7 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
         "item_name": item_name,
         "quantity_refunded": req.quantity,
         "refund_amount": req.refund_amount,
+        "cost_reversed": this_cost_reversal,
         "remaining_refundable_after": remaining_refundable - req.quantity,
         "restocked": req.restock,
         "inventory_record_id": inventory_record_id,
