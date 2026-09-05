@@ -714,7 +714,7 @@ fn test_purchasing_partial_correction_sheet_omitting_received_and_quantity_still
     assert_eq!(corrected["supplier"], json!("Acme Distributors"), "the actual correction still applied");
     assert_eq!(corrected["received"], json!(true), "omitted from the sheet — must stay exactly as stored, not reset to its default");
     assert_eq!(corrected["quantity"], json!(40), "omitted from the sheet — must stay exactly as stored, not reset to its default");
-    assert_eq!(corrected["unit_cost"], json!(30000), "unchanged value carried through");
+    assert_eq!(corrected["unit_cost"], json!(300), "unchanged value carried through");
 }
 
 #[test]

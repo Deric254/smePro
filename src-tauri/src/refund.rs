@@ -18,10 +18,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 /// The columns pulled from a sale row when looking one up for a refund:
-/// (item_name, quantity, order_id, customer, cost_at_sale). Named here
-/// purely to satisfy clippy's type-complexity lint on a bare 5-tuple —
-/// no other behavior implied, just a label for what's destructured
-/// immediately below.
+/// (item_name, quantity, order_id, customer, cost_at_sale — the
+/// CURRENT stored value, already reduced by any earlier refunds on
+/// this same sale, not the original amount from the moment it was
+/// sold). Named here purely to satisfy clippy's type-complexity lint
+/// on a bare 5-tuple — no other behavior implied, just a label for
+/// what's destructured immediately below.
 type SaleRow = (String, i64, Option<String>, Option<String>, i64);
 
 #[derive(Debug, Deserialize)]
@@ -87,7 +89,7 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((item_name, original_qty, order_id, customer, original_cost_at_sale)) = sale_row else {
+    let Some((item_name, original_qty, order_id, customer, current_cost_at_sale)) = sale_row else {
         return Err(anyhow!("sale not found: {}", req.sale_id));
     };
 
@@ -135,6 +137,35 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
     // real loss on that sale, which is the true economic outcome, not
     // a bug to paper over.
     //
+    // THE BUG THIS FIXES: the proportional math below needs the sale's
+    // ORIGINAL cost_at_sale — fixed, from the moment it was sold — but
+    // `current_cost_at_sale` just fetched above is whatever's left
+    // AFTER any earlier refunds on this sale have already decremented
+    // it (see the UPDATE further down, the same one every refund call
+    // runs). Using that shrinking, already-reduced number as if it
+    // were the fixed original meant every refund after the first
+    // computed its "share" against a smaller and smaller base, so
+    // three partial refunds of the same sale reversed LESS than the
+    // real total cost, stranding real money in `cost_at_sale` forever
+    // (verified: a 3-unit, 3000-cent sale refunded one unit at a time
+    // reversed 1000, then 333, then 334 — 1667 total, not 3000). The
+    // original is always recoverable exactly, though, because it's an
+    // invariant that never breaks: original = whatever's currently
+    // left + whatever's already been given back. `already_refunded_cost`
+    // is computed the same "sum of every refund already recorded"
+    // way `already_refunded` (the quantity) above already is.
+    let already_refunded_cost: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(cost_reversed), 0) FROM {refunds_table}
+                 WHERE sale_id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
+            ),
+            params![req.sale_id, business_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let original_cost_at_sale = current_cost_at_sale + already_refunded_cost;
+
     // Computed the same "running remainder" way `already_refunded`
     // above already is — NOT as `original_cost_at_sale * req.quantity
     // / original_qty` freshly each time, which would let integer-
@@ -152,16 +183,6 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
     // refund that fully closes out the sale — `already_refunded +
     // req.quantity == original_qty` — always reverses the exact
     // remaining balance, coin for coin, by construction.
-    let already_refunded_cost: i64 = tx
-        .query_row(
-            &format!(
-                "SELECT COALESCE(SUM(cost_reversed), 0) FROM {refunds_table}
-                 WHERE sale_id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
-            ),
-            params![req.sale_id, business_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
     let this_cost_reversal: i64 = if req.restock && original_qty > 0 {
         let total_cost_reversed_after = (original_cost_at_sale as i128
             * (already_refunded + req.quantity) as i128
