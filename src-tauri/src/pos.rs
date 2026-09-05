@@ -240,21 +240,6 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         // parsed back out of `notes` because notes is free text a
         // person can edit later; this isn't.
         debt_record.insert("source_order_id".into(), json!(order_id));
-        // Same forced-generation as crud::create's debt_credit block —
-        // this insert path calls insert_validated_record() directly,
-        // not crud::create(), so it doesn't get that generation for
-        // free. Without this, every credit sale's debt_record would
-        // fall through to the module's own default ("") for
-        // entry_number, and a business's SECOND credit sale in the
-        // same transaction-scoped counter (or, worse, two committed
-        // separately) would collide on the real
-        // UNIQUE(business_id, entry_number) constraint entry_number
-        // exists to be safe under — see
-        // debt_settlement::generate_entry_number's doc comment.
-        debt_record.insert(
-            "entry_number".into(),
-            json!(crate::debt_settlement::generate_entry_number(&tx, business_id)?),
-        );
         if let Some(d) = &req.due_date {
             debt_record.insert("due_date".into(), json!(d));
         }

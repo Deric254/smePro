@@ -290,14 +290,7 @@ export const receiveStock = (purchaseRecordId: string, quantityReceived?: number
 // ---- Repacking / breaking bulk. See repack.rs. ----
 export const repackStock = (req: {
   source_record_id: string; source_quantity: number;
-  // Exactly one of target_record_id / new_target_name must be set —
-  // see repack.rs's module doc comment. new_target_unit_price is
-  // required alongside new_target_name; its unit_cost is never sent,
-  // since repack computes that itself from what was actually consumed.
-  target_record_id?: string;
-  new_target_name?: string;
-  new_target_unit_price?: number;
-  target_quantity_produced: number; notes?: string;
+  target_record_id: string; target_quantity_produced: number; notes?: string;
 }) => request('/inventory/repack', { method: 'POST', body: JSON.stringify(req) });
 
 // ---- Stock Take: initiate -> count -> close. See stock_take.rs. ----

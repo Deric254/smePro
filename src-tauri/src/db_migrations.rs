@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 16;
+const CURRENT_VERSION: i32 = 15;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -35,8 +35,7 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 13 { v13_scope_unique_fields_to_business(conn)?; }
     if current < 14 { v14_add_purchasing_po_number(conn)?; }
     if current < 15 { v15_inventory_name_lookup_index(conn)?; }
-    if current < 16 { v16_add_debt_credit_entry_number(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 16, "bump this alongside the last `if current < N` check above");
+    debug_assert_eq!(CURRENT_VERSION, 15, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -996,115 +995,6 @@ fn v15_inventory_name_lookup_index(conn: &mut Connection) -> Result<()> {
         )?;
     }
     tx.execute("INSERT INTO _schema_version (version) VALUES (15)", [])?;
-    tx.commit()?;
-    Ok(())
-}
-
-/// Gives `debt_credit` the same real, business-scoped-unique identity
-/// Purchasing got from v14 — `entry_number` — for the exact same
-/// reason: it's the one field Excel re-import can safely match
-/// existing rows by (see debt_settlement::generate_entry_number's own
-/// doc comment for why `party_name` itself never safely can). Mirrors
-/// v14's rename-rebuild-copy-drop shape exactly, since this is the
-/// same kind of change: a NEW field that's both `required` and
-/// `unique`, which — unlike v12's plain nullable `payment_method` /
-/// `source_order_id` columns — a bare `ALTER TABLE ADD COLUMN` can't
-/// express (SQLite has no way to add a NOT NULL column with no
-/// default to a table that may already have rows, nor a UNIQUE
-/// constraint via ALTER TABLE at all).
-fn v16_add_debt_credit_entry_number(conn: &mut Connection) -> Result<()> {
-    let tx = conn.transaction()?;
-
-    if let Some(on_disk_raw) = crate::module_json("debt_credit") {
-        if let Ok(on_disk_def) = crate::module::ModuleDef::from_json_str(on_disk_raw) {
-            let table = on_disk_def.table_name();
-            let table_exists: i64 = tx.query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                rusqlite::params![table],
-                |r| r.get(0),
-            )?;
-
-            if table_exists == 1 {
-                let existing_cols: std::collections::HashSet<String> = {
-                    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
-                    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
-                    rows.filter_map(|r| r.ok()).collect()
-                };
-
-                // A table that already has the column (a fresh install
-                // whose create_table() ran after entry_number joined
-                // debt_credit.json, never touched by this migration at
-                // all) is left alone — same detect-before-rebuild
-                // discipline v13/v14 use.
-                if !existing_cols.contains("entry_number") {
-                    let old_table = format!("{table}__pre_entry_number_v16");
-                    tx.execute(&format!("ALTER TABLE {table} RENAME TO {old_table}"), [])?;
-
-                    let mut cols = vec![
-                        "id TEXT PRIMARY KEY".to_string(),
-                        "business_id TEXT NOT NULL".to_string(),
-                    ];
-                    cols.extend(on_disk_def.field_column_defs()?);
-                    cols.push("created_at TEXT NOT NULL".to_string());
-                    cols.push("updated_at TEXT NOT NULL".to_string());
-                    cols.push("deleted_at TEXT".to_string());
-                    cols.extend(on_disk_def.business_scoped_unique_constraints());
-                    tx.execute(&format!("CREATE TABLE {table} ({})", cols.join(", ")), [])?;
-
-                    let mut select_cols = vec!["t.id".to_string(), "t.business_id".to_string()];
-                    for f in &on_disk_def.fields {
-                        if f.name == "entry_number" {
-                            select_cols.push(
-                                "('DC-' || ROW_NUMBER() OVER (PARTITION BY t.business_id ORDER BY t.created_at, t.id))"
-                                    .to_string(),
-                            );
-                        } else if existing_cols.contains(&f.name) {
-                            select_cols.push(format!("t.{}", f.name));
-                        } else {
-                            // Same fallback v13/v14 use for a declared
-                            // field the old table doesn't have yet, for
-                            // the same reason: schema drift unrelated to
-                            // this specific migration shouldn't fail the
-                            // whole rebuild over it.
-                            let default_sql = match &f.default {
-                                Some(serde_json::Value::String(s)) => format!("'{}'", s.replace('\'', "''")),
-                                Some(serde_json::Value::Number(n)) => n.to_string(),
-                                Some(serde_json::Value::Bool(b)) => if *b { "1".into() } else { "0".into() },
-                                _ => "NULL".into(),
-                            };
-                            select_cols.push(default_sql);
-                        }
-                    }
-                    select_cols.push("t.created_at".to_string());
-                    select_cols.push("t.updated_at".to_string());
-                    select_cols.push("t.deleted_at".to_string());
-
-                    tx.execute(
-                        &format!("INSERT INTO {table} SELECT {} FROM {old_table} t", select_cols.join(", ")),
-                        [],
-                    )?;
-                    tx.execute(&format!("DROP TABLE {old_table}"), [])?;
-                    tx.execute(
-                        &format!("CREATE INDEX IF NOT EXISTS idx_{table}_business ON {table}(business_id, deleted_at)"),
-                        [],
-                    )?;
-                }
-            }
-
-            // Same two-part gap v12/v14 close, same reason: every
-            // business that already had Debt & Credit enabled carries
-            // its own snapshot of the module's schema in
-            // `modules.schema_json`, which crud::load_module reads
-            // instead of this on-disk definition. Runs even for a
-            // business whose table didn't need rebuilding above.
-            tx.execute(
-                "UPDATE modules SET schema_json = ?1 WHERE id = 'debt_credit'",
-                rusqlite::params![on_disk_raw],
-            )?;
-        }
-    }
-
-    tx.execute("INSERT INTO _schema_version (version) VALUES (16)", [])?;
     tx.commit()?;
     Ok(())
 }

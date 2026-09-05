@@ -73,52 +73,6 @@
 //! — so `GET /audit-log?record_id=<id>` finds it whether you're
 //! looking up "what became of this sack" or "what was this bag made
 //! from," not just one direction.
-//!
-//! CREATING THE TARGET INLINE: the retail unit a repack produces very
-//! often doesn't exist in Inventory yet — that's the whole point of
-//! repacking for the first time ("Rice — 1kg bag" has no reason to
-//! exist until something has actually been broken down into it). The
-//! old design forced a business owner out of this modal, into
-//! Inventory's own create form, to make that record first (typing a
-//! SKU and a zero opening quantity that would immediately be
-//! overwritten anyway), then back into this modal to actually run the
-//! repack — two trips, and an easy way to end up with an abandoned
-//! zero-quantity item if the second trip never happens. `target_record_id`
-//! is now optional; `new_target_name` + `new_target_unit_price` let
-//! this same call create that record and repack into it in one atomic
-//! step. Exactly one of the two must be supplied (see the `match` near
-//! the top of `repack()`) — there is no legitimate "neither" (which
-//! item is this repack even for?) or "both" (which one actually
-//! happened?).
-//!
-//! Deliberately NOT asking for a SKU or an opening cost alongside the
-//! name: a SKU is an internal bookkeeping code no one filling in "what
-//! did we just produce" naturally has ready, so one is generated here
-//! (see `generate_repack_sku`) from the name itself, the same
-//! "generate it, never hand-type it" treatment `po_number` and
-//! `entry_number` already get elsewhere in this codebase. An opening
-//! cost would be worse than redundant — it's the ONE thing about a
-//! freshly-repacked item that must never be typed in, since the
-//! entire reason this module exists is computing that cost correctly
-//! from what was actually consumed. The new record is inserted at
-//! quantity 0 / unit_cost 0 and then carried through the exact same
-//! weighted-average math as an existing target (a zero starting
-//! quantity contributes nothing to that formula, so no special case
-//! is needed) — one code path computes the real cost for a brand-new
-//! item and a restocked existing one alike, which is what keeps this
-//! consistent rather than having two subtly different ways to arrive
-//! at "the cost of this item."
-//!
-//! CONSISTENCY CHECK ADDED ALONGSIDE THIS: repacking an EXISTING
-//! target can change its cost (the whole point of the weighted
-//! average) without ever touching its selling price — which, before
-//! this fix, could silently leave an item priced below its own cost
-//! if an expensive source got broken into it. Every other path in
-//! this app that can set or change a cost (`crud::create`,
-//! `receiving::receive`) already refuses to leave price under cost;
-//! repack is now held to the same standard, checked once against the
-//! final computed cost, whether the target is brand-new or already
-//! existed.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -134,77 +88,14 @@ pub struct RepackRequest {
     /// How many of the source unit are being consumed (usually 1 sack,
     /// but nothing stops breaking multiple sacks in one operation).
     pub source_quantity: i64,
-    /// The smaller retail item being produced (e.g. "Rice — 1kg bag"),
-    /// when it already exists in Inventory. Omit this and supply
-    /// `new_target_name` instead to create it as part of this same
-    /// repack — see the module doc comment. Exactly one of the two
-    /// must be present.
-    #[serde(default)]
-    pub target_record_id: Option<String>,
+    /// The smaller retail item being produced (e.g. "Rice — 1kg bag").
+    pub target_record_id: String,
     /// How many target units this specific repack actually produced —
     /// supplied explicitly, not computed from a stored ratio. See the
     /// module doc comment for why.
     pub target_quantity_produced: i64,
-    /// Set this (instead of `target_record_id`) to create a brand-new
-    /// Inventory item as the target of this repack. Its SKU is
-    /// generated automatically and its opening cost is computed from
-    /// what this repack actually consumes — see `generate_repack_sku`
-    /// and the module doc comment for why neither is asked for here.
-    #[serde(default)]
-    pub new_target_name: Option<String>,
-    /// Required alongside `new_target_name`: the new item's selling
-    /// price. Ignored (and should be omitted) when `target_record_id`
-    /// is used instead — an existing item's price is its own, set
-    /// through the ordinary edit form, not through a repack.
-    #[serde(default)]
-    pub new_target_unit_price: Option<i64>,
     #[serde(default)]
     pub notes: Option<String>,
-}
-
-/// Generates a fresh, guaranteed-unique SKU for a brand-new item
-/// created inline by a repack — see the module doc comment for why
-/// this modal deliberately never asks a person to type one. Derived
-/// from the item's own name (upper-cased, any run of non-alphanumeric
-/// characters collapsed to a single hyphen) so the result is still
-/// recognizable at a glance rather than an opaque code, then
-/// de-duplicated the same "scan what already exists, go one past the
-/// highest match" way `receiving::generate_po_number` does — a plain
-/// COUNT-based suffix would be wrong here for the identical reason
-/// it's wrong there: a previously deleted record with the same
-/// generated SKU must not free that SKU up for silent reuse.
-fn generate_repack_sku(tx: &rusqlite::Transaction<'_>, business_id: &str, table: &str, name: &str) -> Result<String> {
-    let mut base: String = name
-        .to_uppercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    while base.contains("--") {
-        base = base.replace("--", "-");
-    }
-    let base = base.trim_matches('-');
-    let base = if base.is_empty() { "ITEM" } else { base };
-
-    let sku_exists = |candidate: &str| -> Result<bool> {
-        let count: i64 = tx.query_row(
-            &format!("SELECT COUNT(*) FROM {table} WHERE business_id = ?1 AND sku = ?2"),
-            params![business_id, candidate],
-            |r| r.get(0),
-        )?;
-        Ok(count > 0)
-    };
-
-    if !sku_exists(base)? {
-        return Ok(base.to_string());
-    }
-    let mut n = 2;
-    loop {
-        let candidate = format!("{base}-{n}");
-        if !sku_exists(&candidate)? {
-            return Ok(candidate);
-        }
-        n += 1;
-    }
 }
 
 /// Runs the whole repack as one atomic transaction: the source item's
@@ -213,51 +104,14 @@ fn generate_repack_sku(tx: &rusqlite::Transaction<'_>, business_id: &str, table:
 pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: RepackRequest) -> Result<Value> {
     crate::rbac::require(conn, user_id, "inventory", "repack")?;
 
+    if req.source_record_id == req.target_record_id {
+        return Err(anyhow!("the source and target can't be the same inventory item — that isn't a repack, it's a no-op"));
+    }
     if req.source_quantity <= 0 {
         return Err(anyhow!("source quantity must be greater than zero"));
     }
     if req.target_quantity_produced <= 0 {
         return Err(anyhow!("target quantity produced must be greater than zero"));
-    }
-
-    // Exactly one way to say which item this repack produces — see the
-    // module doc comment for why "both" and "neither" are each
-    // rejected outright rather than one silently winning over the
-    // other.
-    let new_target_name = req
-        .new_target_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    match (&req.target_record_id, new_target_name) {
-        (Some(_), Some(_)) => {
-            return Err(anyhow!(
-                "provide either an existing target item or a name for a new one — not both"
-            ))
-        }
-        (None, None) => {
-            return Err(anyhow!(
-                "a target item is required — pick an existing item, or name a new one to create"
-            ))
-        }
-        _ => {}
-    }
-    if let Some(id) = &req.target_record_id {
-        if id == &req.source_record_id {
-            return Err(anyhow!("the source and target can't be the same inventory item — that isn't a repack, it's a no-op"));
-        }
-    }
-    // Creating a brand-new Inventory item is a "create", not a
-    // "repack", from a permissions standpoint — a role that can repack
-    // stock between two items that already exist isn't automatically a
-    // role that should be able to add new items to the catalog.
-    if new_target_name.is_some() {
-        crate::rbac::require(conn, user_id, "inventory", "create")?;
-        match req.new_target_unit_price {
-            None => return Err(anyhow!("a selling price is required for the new item being created")),
-            Some(p) if p < 0 => return Err(anyhow!("selling price can't be negative")),
-            Some(_) => {}
-        }
     }
 
     let inventory_module = crud::load_module(conn, business_id, "inventory")
@@ -286,51 +140,15 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         ));
     }
 
-    // Create the new target item now, inside this same transaction, so
-    // it either comes into being together with the stock/cost update
-    // just below or (on any later error in this function) not at all —
-    // see the module doc comment for why a two-trip "create it in
-    // Inventory first, then repack into it" flow is what this
-    // replaces. Started at quantity 0 / unit_cost 0: the weighted-average
-    // math a few lines down treats that identically to an existing
-    // target that's simply out of stock right now, so this needs no
-    // special case of its own.
-    let target_record_id: String = if let Some(name) = new_target_name {
-        let sku = generate_repack_sku(&tx, business_id, &table, name)?;
-        let mut new_record: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-        new_record.insert("sku".to_string(), json!(sku));
-        new_record.insert("name".to_string(), json!(name));
-        new_record.insert("quantity".to_string(), json!(0));
-        new_record.insert("unit_cost".to_string(), json!(0));
-        // Safe to unwrap: validated as `Some` above whenever
-        // `new_target_name` is present.
-        new_record.insert("unit_price".to_string(), json!(req.new_target_unit_price.unwrap()));
-        for f in &inventory_module.fields {
-            if !new_record.contains_key(&f.name) {
-                if let Some(d) = &f.default {
-                    new_record.insert(f.name.clone(), d.clone());
-                }
-            }
-        }
-        inventory_module.validate(&new_record)?;
-        crate::reference_data::validate_field_references(&tx, business_id, &inventory_module, &new_record)?;
-        crud::insert_validated_record(&tx, business_id, &inventory_module, &new_record)?
-    } else {
-        // Safe to unwrap: the `match` near the top of this function
-        // already guarantees exactly one of `target_record_id` /
-        // `new_target_name` is present.
-        req.target_record_id.clone().unwrap()
-    };
-
     let target: Option<(String, i64, i64, i64)> = tx
         .query_row(
             &format!("SELECT name, quantity, unit_cost, unit_price FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
-            params![target_record_id, business_id],
+            params![req.target_record_id, business_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
     let Some((target_name, target_current_qty, target_current_unit_cost, target_unit_price)) = target else {
-        return Err(anyhow!("target inventory item not found: {}", target_record_id));
+        return Err(anyhow!("target inventory item not found: {}", req.target_record_id));
     };
 
     let source_new_qty = source_current_qty - req.source_quantity;
@@ -376,29 +194,13 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
     let stored_target_value = target_new_qty * target_new_unit_cost;
     let rounding_adjustment_cents = numerator - stored_target_value;
 
-    // Same "never sell at a loss" invariant crud::create()/update() and
-    // receiving::receive() already hold every other cost-affecting
-    // write to — see the module doc comment's "CONSISTENCY CHECK"
-    // paragraph for why repack needs this too: this is the one path in
-    // the app that can change an item's cost without ever touching its
-    // price, so without this check a repack could silently leave an
-    // item selling below what it now costs. Checked before either
-    // UPDATE below runs, so a rejected repack changes nothing at all —
-    // not even the source's stock — rather than leaving the source
-    // decremented with no matching target increase.
-    if target_unit_price < target_new_unit_cost {
-        return Err(anyhow!(
-            "this repack would leave '{target_name}' costing more per unit than it currently sells for — selling price cannot be lower than cost; adjust the target's price, or the repack quantities, before continuing"
-        ));
-    }
-
     tx.execute(
         &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
         params![source_new_qty, req.source_record_id, business_id],
     )?;
     tx.execute(
         &format!("UPDATE {table} SET quantity = ?1, unit_cost = ?2, updated_at = datetime('now') WHERE id = ?3 AND business_id = ?4"),
-        params![target_new_qty, target_new_unit_cost, target_record_id, business_id],
+        params![target_new_qty, target_new_unit_cost, req.target_record_id, business_id],
     )?;
 
     // Never silently absorbed: whatever the rounding step couldn't
@@ -468,8 +270,7 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         "source_quantity_after": source_new_qty,
         "source_unit_cost": source_unit_cost,
         "source_unit_price": source_unit_price,
-        "target_record_id": target_record_id,
-        "target_created": new_target_name.is_some(),
+        "target_record_id": req.target_record_id,
         "target_name": target_name,
         "target_quantity_before": target_current_qty,
         "target_quantity_after": target_new_qty,
@@ -502,7 +303,7 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
     // /audit-log?record_id=<id>` finds it starting from whichever item
     // someone actually has in front of them.
     let _ = crate::audit::log(conn, business_id, Some(user_id), "_repack", "repack", Some(&req.source_record_id), Some(&summary));
-    let _ = crate::audit::log(conn, business_id, Some(user_id), "_repack", "repack", Some(&target_record_id), Some(&summary));
+    let _ = crate::audit::log(conn, business_id, Some(user_id), "_repack", "repack", Some(&req.target_record_id), Some(&summary));
 
     Ok(summary)
 }

@@ -32,10 +32,8 @@ fn test_repack_a_dozen_eggs_into_singles_produces_the_exact_correct_cost() {
     let req = crate::repack::RepackRequest {
         source_record_id: dozen_id.clone(),
         source_quantity: 1,
-        target_record_id: Some(single_id.clone()),
+        target_record_id: single_id.clone(),
         target_quantity_produced: 12,
-        new_target_name: None,
-        new_target_unit_price: None,
         notes: None,
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req).unwrap();
@@ -72,10 +70,8 @@ fn test_repack_blends_with_existing_target_stock_at_a_different_cost() {
     let req = crate::repack::RepackRequest {
         source_record_id: sack_id,
         source_quantity: 1,
-        target_record_id: Some(loose_id.clone()),
+        target_record_id: loose_id.clone(),
         target_quantity_produced: 10,
-        new_target_name: None,
-        new_target_unit_price: None,
         notes: None,
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req).unwrap();
@@ -99,10 +95,8 @@ fn test_repack_cannot_consume_more_than_available_stock() {
     let req = crate::repack::RepackRequest {
         source_record_id: dozen_id.clone(),
         source_quantity: 5, // only 2 dozens on hand
-        target_record_id: Some(single_id),
+        target_record_id: single_id,
         target_quantity_produced: 60,
-        new_target_name: None,
-        new_target_unit_price: None,
         notes: None,
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req);
@@ -124,10 +118,8 @@ fn test_repack_rejects_same_source_and_target() {
     let req = crate::repack::RepackRequest {
         source_record_id: id.clone(),
         source_quantity: 1,
-        target_record_id: Some(id),
+        target_record_id: id,
         target_quantity_produced: 1,
-        new_target_name: None,
-        new_target_unit_price: None,
         notes: None,
     };
     assert!(crate::repack::repack(&mut conn, &biz, &uid, req).is_err());

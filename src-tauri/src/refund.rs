@@ -146,15 +146,24 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
             .map_err(|_| anyhow!("restocking needs the Inventory module enabled for this business"))?;
         let inventory_table = inventory_module.table_name();
 
-        // The sale record itself doesn't carry inventory_record_id
-        // (see sales.json) -- looked up by matching item_name, the
-        // same linkage POS checkout itself relies on when it writes
-        // item_name onto the sale in the first place.
+        // THE BUG THIS FIXES: this used to match `name = ?2` exactly —
+        // case- and whitespace-sensitive — while excel_import.rs's
+        // identical-purpose lookup (resolve a stored item NAME back to
+        // its real Inventory record) already used
+        // `LOWER(TRIM(name)) = LOWER(?2)`, for good reason: a sale's
+        // `item_name` and Inventory's own `name` can legitimately drift
+        // in case or whitespace (a rename after the sale, a copy-paste
+        // artifact at entry time) without meaning a different item.
+        // Two lookups doing the same real-world job on the same table
+        // with different matching rules is exactly the kind of
+        // inconsistency that shows up as "it says the item doesn't
+        // exist" for an item that plainly does — same fix, same
+        // reasoning, brought in line here.
         let inv_row: Option<(String, i64)> = tx
             .query_row(
                 &format!(
                     "SELECT id, quantity FROM {inventory_table}
-                     WHERE business_id = ?1 AND name = ?2 AND deleted_at IS NULL"
+                     WHERE business_id = ?1 AND deleted_at IS NULL AND LOWER(TRIM(name)) = LOWER(?2)"
                 ),
                 params![business_id, item_name],
                 |r| Ok((r.get(0)?, r.get(1)?)),

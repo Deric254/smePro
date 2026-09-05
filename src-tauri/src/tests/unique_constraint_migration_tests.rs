@@ -145,7 +145,7 @@ fn test_v13_migration_scopes_unique_sku_per_business() {
 #[test]
 fn test_v13_migration_is_idempotent_and_leaves_already_fixed_tables_alone() {
     let mut conn = test_db();
-    let (_biz_a, biz_b) = seed_two_businesses_with_globally_unique_sku(&mut conn);
+    let (biz_a, biz_b) = seed_two_businesses_with_globally_unique_sku(&mut conn);
     conn.execute("DELETE FROM _schema_version WHERE version >= 13", []).unwrap();
 
     crate::db_migrations::run(&mut conn).expect("first run applies v13");

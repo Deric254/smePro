@@ -41,21 +41,6 @@
 //! quantity received × the PO's own unit cost, not the blended
 //! average) — this fix is specifically for the inventory *valuation*
 //! side, not the cash side.
-//!
-//! FOURTH FIX, same file: the core of this logic is now split out into
-//! `receive_in_tx`, which runs against a `Transaction` the CALLER
-//! already owns, rather than only ever being reachable through
-//! `receive()`'s own newly-opened one. This is what lets
-//! `excel_import::import()` call it directly, once per newly-created
-//! Purchasing row, inside the single big transaction the whole import
-//! already runs in — so a bulk-imported purchase order and its stock
-//! arriving are one atomic step, not "import creates it unreceived,
-//! then someone has to click Receive on each of what might be 150
-//! rows." `receive()` itself is now a thin wrapper: open a
-//! transaction, call `receive_in_tx`, commit, audit-log. Same math,
-//! same Bookkeeping posting, same rounding reconciliation, whichever
-//! caller reaches it — one implementation, so there's no way for the
-//! two paths to quietly drift out of sync with each other.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -111,60 +96,19 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
     let inventory_table = inventory_module.table_name();
 
     let tx = conn.transaction()?;
-    let summary = receive_in_tx(
-        &tx,
-        business_id,
-        &purchasing_table,
-        &inventory_table,
-        &req.purchase_record_id,
-        req.quantity_received,
-    )?;
-    // Same discipline as checkout() and repack(): nothing above is
-    // durable until this line.
-    tx.commit()?;
 
-    let _ = crate::audit::log(conn, business_id, Some(user_id), "_receiving", "receive", Some(&req.purchase_record_id), Some(&summary));
-
-    Ok(summary)
-}
-
-/// The actual receive logic, runnable against a `Transaction` the
-/// caller already owns — see this file's own "FOURTH FIX" doc comment
-/// for why this is split out from `receive()` above: it's what lets
-/// `excel_import::import()` call this directly, once per newly-created
-/// Purchasing row, inside the ONE transaction the whole import already
-/// runs in, so a bulk-imported order and its stock arriving happen
-/// atomically together rather than needing a separate Receive click
-/// per row afterward. Takes table names rather than re-deriving them
-/// from `ModuleDef`s, since `excel_import::import()` already has both
-/// on hand (the module it's importing, plus a lookup of the other) and
-/// there's no reason to load either module definition twice per row of
-/// a large import. Does NOT check rbac or commit/audit-log — those are
-/// each caller's own responsibility (a single manual receive checks
-/// "receive" once and audit-logs once per call; a bulk import checks
-/// "receive" once for the whole batch up front and audit-logs once per
-/// row actually received, inside the loop) — this function is purely
-/// the atomic stock-and-cost mechanics both share.
-pub(crate) fn receive_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    business_id: &str,
-    purchasing_table: &str,
-    inventory_table: &str,
-    purchase_record_id: &str,
-    quantity_received_override: Option<i64>,
-) -> Result<Value> {
     let row: Option<(String, i64, bool, Option<String>, String, i64)> = tx
         .query_row(
             &format!(
                 "SELECT item_name, quantity, received, inventory_record_id, supplier, unit_cost
                  FROM {purchasing_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
             ),
-            params![purchase_record_id, business_id],
+            params![req.purchase_record_id, business_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .optional()?;
     let Some((item_name, ordered_qty, already_received, inventory_record_id, supplier, po_unit_cost)) = row else {
-        return Err(anyhow!("purchase order not found: {purchase_record_id}"));
+        return Err(anyhow!("purchase order not found: {}", req.purchase_record_id));
     };
 
     if already_received {
@@ -177,7 +121,7 @@ pub(crate) fn receive_in_tx(
         ));
     };
 
-    let quantity_received = quantity_received_override.unwrap_or(ordered_qty);
+    let quantity_received = req.quantity_received.unwrap_or(ordered_qty);
     if quantity_received <= 0 {
         return Err(anyhow!("quantity received must be greater than zero"));
     }
@@ -219,7 +163,7 @@ pub(crate) fn receive_in_tx(
 
     tx.execute(
         &format!("UPDATE {purchasing_table} SET received = 1, updated_at = datetime('now') WHERE id = ?1 AND business_id = ?2"),
-        params![purchase_record_id, business_id],
+        params![req.purchase_record_id, business_id],
     )?;
 
     // Same Bookkeeping auto-post as checkout() and process_refund(),
@@ -288,8 +232,12 @@ pub(crate) fn receive_in_tx(
         }
     }
 
+    // Same "commit is the one moment this becomes real" discipline as
+    // checkout() — nothing above is durable until this line.
+    tx.commit()?;
+
     let summary = json!({
-        "purchase_record_id": purchase_record_id,
+        "purchase_record_id": req.purchase_record_id,
         "item_name": item_name,
         "supplier": supplier,
         "inventory_record_id": inventory_record_id,
@@ -306,9 +254,7 @@ pub(crate) fn receive_in_tx(
         "rounding_adjustment_posted_to_bookkeeping": rounding_adjustment_cents != 0,
     });
 
-    // Committing and audit-logging are each caller's own responsibility
-    // — see this function's own doc comment for why (a manual receive
-    // commits/logs once per call; a bulk import commits once for the
-    // whole batch and logs once per row, inside its own loop).
+    let _ = crate::audit::log(conn, business_id, Some(user_id), "_receiving", "receive", Some(&req.purchase_record_id), Some(&summary));
+
     Ok(summary)
 }

@@ -77,7 +77,7 @@
 //! or leaving behind a purchasing record that isn't actually linked to
 //! anything `receiving.rs` could ever receive against.
 
-use crate::{audit, crud, module::ModuleDef, receiving, reference_data};
+use crate::{crud, module::ModuleDef, reference_data};
 use anyhow::{anyhow, Result};
 use calamine::{open_workbook_from_rs, Data, Reader, Xlsx};
 use rusqlite::Connection;
@@ -144,14 +144,6 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
         //   matches rows by `po_number` when it's present, and only
         //   generates a fresh one when it's genuinely missing.
         .filter(|f| !(module.id == "purchasing" && (f.name == "received" || f.name == "inventory_record_id" || f.name == "po_number")))
-        // Same reasoning as purchasing's `po_number` just above,
-        // applied to debt_credit's own generated identity: a blank
-        // "new entries" template has no real `entry_number` to offer
-        // yet (see crud::create's debt_credit block), so it isn't a
-        // column here — but it DOES appear on a real "Export to Excel"
-        // of existing records, which is what lets `import` below match
-        // rows by `entry_number` on a genuine re-upload.
-        .filter(|f| !(module.id == "debt_credit" && f.name == "entry_number"))
         .collect();
 
     for (col, field) in template_fields.iter().enumerate() {
@@ -215,18 +207,6 @@ pub fn import(
     // existing key will correctly fail for them individually, not
     // silently succeed as an unauthorized overwrite.
     crate::rbac::require(conn, user_id, &module.id, "create")?;
-
-    // Importing a Purchasing order now also receives it immediately
-    // (see the big comment on the auto-receive block further down for
-    // why) — which means this import can increase Inventory stock,
-    // the exact same effect `receiving::receive` has, so it needs that
-    // same permission checked up front for the whole batch. Without
-    // this, someone with only "create" on Purchasing could use a bulk
-    // import to do something a plain single receive() call would
-    // correctly have refused them.
-    if module.id == "purchasing" {
-        crate::rbac::require(conn, user_id, "inventory", "receive")?;
-    }
 
     // Needed to correctly parse any "money"-typed column — a human
     // typing "19.99" into a spreadsheet cell means something
@@ -304,8 +284,7 @@ pub fn import(
     // po_number was supposed to fix. `inventory.sku` doesn't have this
     // problem: a person must always type a SKU themselves, even for a
     // brand-new item, so its absence really does mean the wrong file.
-    let key_field_can_be_generated = (module.id == "purchasing" && key_field == "po_number")
-        || (module.id == "debt_credit" && key_field == "entry_number");
+    let key_field_can_be_generated = module.id == "purchasing" && key_field == "po_number";
 
     if key_field_is_unique && !key_field_can_be_generated && !headers.iter().any(|h| h == key_field) {
         return Err(anyhow!(
@@ -347,21 +326,6 @@ pub fn import(
         Some(tx.query_row(
             "SELECT COALESCE(MAX(CAST(SUBSTR(po_number, 4) AS INTEGER)), 0)
              FROM module_purchasing WHERE business_id = ?1 AND po_number LIKE 'PO-%'",
-            rusqlite::params![business_id],
-            |r| r.get(0),
-        )?)
-    } else {
-        None
-    };
-
-    // Same fix, same reason, as `purchasing_next_po_seq` just above,
-    // for debt_credit's own generated identity — see
-    // debt_settlement::generate_entry_number's doc comment for why
-    // this exists at all.
-    let mut debt_credit_next_entry_seq: Option<i64> = if module.id == "debt_credit" {
-        Some(tx.query_row(
-            "SELECT COALESCE(MAX(CAST(SUBSTR(entry_number, 4) AS INTEGER)), 0)
-             FROM module_debt_credit WHERE business_id = ?1 AND entry_number LIKE 'DC-%'",
             rusqlite::params![business_id],
             |r| r.get(0),
         )?)
@@ -496,30 +460,6 @@ pub fn import(
             }
         }
 
-        // Same "generate once for a blank new-entries sheet, keep
-        // whatever's already there on a genuine re-upload" logic as
-        // purchasing's `po_number` just above, for debt_credit's
-        // `entry_number`.
-        if module.id == "debt_credit" {
-            let has_real_entry_number = record
-                .get("entry_number")
-                .and_then(|v| v.as_str())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            if !has_real_entry_number {
-                match debt_credit_next_entry_seq.as_mut() {
-                    Some(seq) => {
-                        *seq += 1;
-                        record.insert("entry_number".to_string(), json!(format!("DC-{seq}")));
-                    }
-                    None => {
-                        errors.push(json!({"row": row_num, "error": "internal error: no entry sequence available"}));
-                        continue;
-                    }
-                }
-            }
-        }
-
         // See the `key_field_is_unique` comment above `import()`'s
         // header check: matching against anything other than a truly
         // unique field isn't a stricter-but-imperfect check, it's
@@ -633,52 +573,6 @@ pub fn import(
                     continue;
                 }
 
-                // NEW CONSISTENCY CHECK, added alongside auto-receive
-                // (see the `None` branch below): a purchasing row is
-                // now received the moment it's first created by this
-                // importer, which means by the time anyone re-imports
-                // a correction, `quantity`/`unit_cost` have almost
-                // always already been consumed into Inventory's stock
-                // level and weighted-average cost. Neither of those
-                // two fields is in the permanently-blocked list above
-                // (they're ordinary editable columns on an UNRECEIVED
-                // order, same as before this change), but editing
-                // either one AFTER receipt would silently rewrite what
-                // the purchase order claims happened without touching
-                // the Inventory numbers that were already derived from
-                // the old values — exactly the kind of drift this
-                // importer exists to prevent elsewhere. Checked the
-                // same way the blocked-field comparison just above is:
-                // only rejected if the incoming value actually differs
-                // from what's stored, so a re-upload that merely
-                // carries the same received order's existing figures
-                // unchanged (the ordinary case) still goes through.
-                if module.id == "purchasing" {
-                    let already_received = stored_field_value(&tx, &table, business_id, &id, "received", true)
-                        .unwrap_or(Value::Bool(false))
-                        == Value::Bool(true);
-                    let mut rejected_field: Option<&str> = None;
-                    if already_received {
-                        for field in ["quantity", "unit_cost"] {
-                            let Some(incoming) = record.get(field) else { continue };
-                            let stored = stored_field_value(&tx, &table, business_id, &id, field, false).unwrap_or(Value::Null);
-                            if incoming != &stored {
-                                rejected_field = Some(field);
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(field) = rejected_field {
-                        errors.push(json!({
-                            "row": row_num,
-                            "error": format!(
-                                "'{field}' cannot be changed on a purchase order that's already been received — its stock and cost are already applied to Inventory; adjust Inventory directly (or use Repack) instead"
-                            )
-                        }));
-                        continue;
-                    }
-                }
-
                 // `inventory`'s `quantity` is deliberately NOT filtered
                 // here even when changed: that field's whole reason
                 // for being in the template is the sanctioned
@@ -760,68 +654,7 @@ pub fn import(
                     }
                 }
                 match crud::insert_validated_record(&tx, business_id, module, &record) {
-                    Ok(new_id) => {
-                        created += 1;
-                        // THE ACTUAL FIX Deric asked for: a purchase
-                        // order imported from Excel is, in every real
-                        // case this template exists for, stock that
-                        // has ALREADY arrived — the whole reason
-                        // someone is recording it now is that it's
-                        // sitting in front of them. Requiring a
-                        // separate manual "Receive" click per row
-                        // afterward (150 of them, for a 150-row
-                        // import) added a whole second pass over the
-                        // same data with zero new information in it.
-                        // So: the moment a new purchasing row is
-                        // created here, it's received immediately, in
-                        // this SAME transaction — `receive_in_tx` is
-                        // the exact mechanics `receiving::receive`
-                        // itself runs (weighted-average cost, the
-                        // Purchasing expense post, the rounding
-                        // reconciliation, all of it), just reused
-                        // directly against the transaction this import
-                        // already has open, rather than duplicating
-                        // that logic here or opening a second nested
-                        // transaction (which rusqlite can't do against
-                        // the same connection anyway). Quantity
-                        // received is always the row's own ordered
-                        // `quantity` — an Excel import has no separate
-                        // "partial delivery" column, so there's no
-                        // other number it could mean.
-                        //
-                        // Deliberately only for freshly-CREATED rows
-                        // (this `Ok(new_id)` arm), never for the
-                        // `Some(id)` update branch above: re-uploading
-                        // a spreadsheet to correct an existing order's
-                        // details is not a second delivery of the same
-                        // stock, and `received` is already a
-                        // permanently blocked field on that path (see
-                        // crud.rs) for exactly that reason.
-                        if module.id == "purchasing" {
-                            let quantity = record.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let purchasing_table = module.table_name();
-                            match receiving::receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &new_id, Some(quantity)) {
-                                Ok(summary) => {
-                                    let _ = audit::log(&tx, business_id, Some(user_id), "_receiving", "receive", Some(&new_id), Some(&summary));
-                                }
-                                Err(e) => {
-                                    // Should not happen — this row's
-                                    // inventory_record_id was already
-                                    // resolved successfully above, and
-                                    // a row that was just inserted
-                                    // can't already be "received". If
-                                    // it somehow does, surface it
-                                    // plainly against this row rather
-                                    // than leaving a purchase order
-                                    // silently stuck unreceived, right
-                                    // next to rows that succeeded, with
-                                    // no indication anything was
-                                    // different about it.
-                                    errors.push(json!({"row": row_num, "error": format!("created purchase order but could not automatically receive it: {e}")}));
-                                }
-                            }
-                        }
-                    }
+                    Ok(_) => created += 1,
                     Err(e) => errors.push(json!({"row": row_num, "error": e.to_string()})),
                 }
             }
@@ -844,16 +677,7 @@ pub fn import(
 // `ModuleDef`/`table_name()` here since this lookup is specific to one
 // hardcoded module (inventory) from another module's (purchasing's) own
 // import path, not a generic per-module operation.
-//
-// pub(crate) rather than private: crud::create() also calls this
-// directly for a purchasing record's own `item_name` — this used to be
-// resolved only on the Excel-import path, so any purchasing record
-// created through the ordinary single-record create() (a raw API call,
-// or any backend code that doesn't go through ModuleView.tsx's
-// PurchaseItemSelector) could end up with no `inventory_record_id` at
-// all, silently unlinked from anything receiving.rs::receive() could
-// ever update. Same lookup, one implementation, both callers.
-pub(crate) fn find_inventory_id_by_name(conn: &Connection, business_id: &str, name: &str) -> Result<Option<String>> {
+fn find_inventory_id_by_name(conn: &Connection, business_id: &str, name: &str) -> Result<Option<String>> {
     if name.is_empty() {
         return Ok(None);
     }
