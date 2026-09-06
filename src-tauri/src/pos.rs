@@ -97,6 +97,20 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     }
     let inventory_table = inventory_module.table_name();
 
+    // For display only (error messages below) — every actual money
+    // computation in this function stays in integer cents throughout,
+    // per money.rs. Same "default USD if this fails, never block the
+    // sale" fallback the frontend already uses for its own display
+    // (see PointOfSale.tsx), so a missing/unreadable business row
+    // can't turn into a checkout failure over a formatting detail.
+    let business_currency: String = conn
+        .query_row(
+            "SELECT currency FROM businesses WHERE id = ?1",
+            params![business_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "USD".to_string());
+
     let order_id = Uuid::new_v4().to_string();
     let mut lines = Vec::with_capacity(req.items.len());
     // Parallel to `lines` above but in the exact shape
@@ -158,8 +172,17 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         // rejected sale changes nothing at all — not stock, not a
         // sales record — same as every other rejection in this loop.
         if unit_price < unit_cost {
+            // Format for the human reading this error — `unit_price`/
+            // `unit_cost` themselves stay raw integer cents everywhere
+            // else in this function; this is purely a display
+            // conversion at the point of surfacing the message, same
+            // as every other user-facing money string in the app goes
+            // through money::format_money / lib/money.ts's formatMoney
+            // rather than printing cents directly.
+            let price_display = crate::money::format_money(unit_price, &business_currency);
+            let cost_display = crate::money::format_money(unit_cost, &business_currency);
             return Err(anyhow!(
-                "cannot sell '{name}': priced at {unit_price} but costs {unit_cost} — this would \
+                "cannot sell '{name}': priced at {price_display} but costs {cost_display} — this would \
                  sell at a loss. Raise the price in Inventory first."
             ));
         }
