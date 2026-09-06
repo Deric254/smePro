@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -26,6 +26,18 @@ pub fn moving_average_forecast(
     bucket: &str,
     window: usize,
 ) -> Result<ForecastResult> {
+    // THE BUG THIS FIXES: window=0 used to slice `recent` down to an
+    // empty window and then divide its sum by its own (zero) length —
+    // a silent 0.0/0.0 = NaN that serde_json then serializes as a
+    // bare `null` in the API response, with no error anywhere in the
+    // chain. A caller reading `forecast_next: null` has no way to
+    // tell that from "no data yet" vs. "you asked for a nonsensical
+    // window." Rejected up front instead, before any division
+    // happens, so the response is always either a real number or an
+    // explicit error — never a silently-degenerate null.
+    if window == 0 {
+        return Err(anyhow!("'window' must be at least 1"));
+    }
     let time_bucket = report::parse_time_bucket(bucket)?;
     let history = report::run(
         conn,
@@ -69,6 +81,23 @@ pub fn exponential_smoothing_forecast(
     bucket: &str,
     alpha: f64,
 ) -> Result<ForecastResult> {
+    // Same class of fix as moving_average_forecast's window==0 guard
+    // just above: `alpha` reaches here straight from a query-string
+    // `.parse::<f64>()`, which happily accepts "nan" and "inf" as
+    // valid floats, and would otherwise accept 0 or a negative value
+    // as "valid" input too. None of those are numerically nonsensical
+    // in a way `s * v + (1.0 - s) * s` would ever surface as an
+    // error — a NaN alpha poisons every future period once it enters
+    // the running `s`, silently turning into another `null` in the
+    // response (see the window==0 comment for why serde_json's
+    // NaN-to-null behavior makes that failure mode particularly easy
+    // to miss); alpha<=0 or >1 stays numerically well-defined but no
+    // longer matches this function's own contract (this file's doc
+    // comment: "alpha in (0,1]"), so it should be rejected rather
+    // than silently accepted.
+    if !alpha.is_finite() || alpha <= 0.0 || alpha > 1.0 {
+        return Err(anyhow!("'alpha' must be a finite number in (0, 1]"));
+    }
     let time_bucket = report::parse_time_bucket(bucket)?;
     let history = report::run(
         conn,
