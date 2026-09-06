@@ -101,6 +101,76 @@ pub fn require(conn: &Connection, user_id: &str, module_id: &str, action: &str) 
     }
 }
 
+/// What THIS signed-in user can actually see/do, as a single navigation-
+/// level summary — see api.ts's `getMyCapabilities` on the frontend for
+/// what it powers.
+///
+/// THE ACTUAL FIX Deric asked for: the sidebar used to show every
+/// enabled module, the entire Admin menu, Sell, and Stock Take
+/// unconditionally to every signed-in user, regardless of whether their
+/// role actually had any access to them at all. A Staff account with
+/// zero permissions on, say, Accounting or HR still saw it listed under
+/// Operations, clicked in, and hit a wall it could have been told about
+/// up front — not the "disable the button that would 403" fix
+/// ModuleView.tsx's own `my_permissions` already does WITHIN a module,
+/// but the same idea one level up, for whether to show the module (or
+/// Admin, or Sell) as a destination at all.
+///
+/// Built from the exact same `rbac::is_allowed`/`require_admin_tier`
+/// every other permission check in this app already goes through — no
+/// second, parallel notion of "can this person see X" that could drift
+/// out of sync with the real one. A business whose default roles (see
+/// each module's own `default_roles` map) grant Staff broad `read`
+/// access will still SHOW broad access here — this reports what a
+/// role can actually do, it does not itself decide what a role SHOULD
+/// be able to do; narrowing that is a Roles/Permissions decision an
+/// Owner makes in Admin, not something this function imposes.
+#[derive(Debug, serde::Serialize)]
+pub struct MyCapabilities {
+    pub is_admin_tier: bool,
+    pub can_sell: bool,
+    pub can_stocktake: bool,
+    pub readable_modules: Vec<String>,
+}
+
+pub fn my_capabilities(conn: &Connection, business_id: &str, user_id: &str) -> anyhow::Result<MyCapabilities> {
+    // THE ACTUAL FIX Deric asked for: performance. `is_allowed()` looks
+    // up this user's `role_id` fresh on every single call (it has to —
+    // it's the one choke point every OTHER caller in this app reaches
+    // with just a user_id, no role_id in hand yet), and this function
+    // used to call it 2 + (one per enabled module) times in a row for
+    // the exact same user — same role_id, refetched from `users` every
+    // time for no reason. Resolved once here instead, then checked
+    // directly against the `permissions` table (still the exact same
+    // query `is_allowed` itself runs, just without repeating the user
+    // lookup that led to it) — same result, same real permission data,
+    // fewer redundant round trips for a sidebar load that already does
+    // one query per enabled module by nature.
+    let role_id: String = conn
+        .query_row("SELECT role_id FROM users WHERE id = ?1 AND active = 1", [user_id], |r| r.get(0))
+        .map_err(|_| anyhow::anyhow!("user not found or inactive"))?;
+    let allowed_for_role = |module_id: &str, action: &str| -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM permissions WHERE role_id = ?1 AND module_id = ?2 AND action = ?3",
+            rusqlite::params![role_id, module_id, action],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false)
+    };
+
+    let is_admin_tier = require_admin_tier(conn, user_id).is_ok();
+    let can_sell = allowed_for_role("inventory", "sell");
+    let can_stocktake = allowed_for_role("inventory", "stocktake");
+    let readable_modules: Vec<String> = crate::business_panel::list_modules(conn, business_id)?
+        .into_iter()
+        .filter(|m| m.enabled)
+        .filter(|m| allowed_for_role(&m.id, "read"))
+        .map(|m| m.id)
+        .collect();
+    Ok(MyCapabilities { is_admin_tier, can_sell, can_stocktake, readable_modules })
+}
+
 /// Seeds the default roles + permissions for a module, using the
 /// `default_roles` map baked into its JSON definition. Called once when a
 /// module is first enabled for a business.

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 17;
+const CURRENT_VERSION: i32 = 19;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -37,7 +37,9 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 15 { v15_inventory_name_lookup_index(conn)?; }
     if current < 16 { v16_add_debt_credit_entry_number(conn)?; }
     if current < 17 { v17_sales_cost_at_sale(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 17, "bump this alongside the last `if current < N` check above");
+    if current < 18 { v18_inventory_unique_name(conn)?; }
+    if current < 19 { v19_refunds_sale_id_index(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 19, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -1208,6 +1210,137 @@ fn v17_sales_cost_at_sale(conn: &mut Connection) -> Result<()> {
     }
 
     tx.execute("INSERT INTO _schema_version (version) VALUES (17)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// THE ACTUAL FIX Deric asked for: "we can't have duplicate item name
+/// even if sku is different." Upgrades v15's plain (non-unique)
+/// `idx_module_inventory_name_lookup` into a genuine UNIQUE index on
+/// the exact same `LOWER(TRIM(name))` expression — same case- and
+/// whitespace-insensitive matching `find_inventory_id_by_name` already
+/// uses, same `WHERE deleted_at IS NULL` scoping every other query
+/// against this table already holds itself to (a soft-deleted "Rice"
+/// must not permanently block a real, later "Rice"). See
+/// module.rs::create_table's matching comment for the full reasoning;
+/// this migration exists only to give that same protection to
+/// businesses whose Inventory table was already created before this
+/// change landed — `create_table` itself only ever runs once, at the
+/// moment a module is first enabled, so an already-enabled business
+/// never sees a change made there on its own.
+///
+/// The real complication, and the reason this isn't just "run the same
+/// CREATE UNIQUE INDEX everywhere": every business's inventory rows
+/// live in the SAME physical `module_inventory` table (see
+/// `business_scoped_unique_constraints`'s own doc comment on why), so
+/// this single index either succeeds for every business at once or
+/// fails for every business at once — there is no way to add it for
+/// one business without touching the others. If ANY business anywhere
+/// on this install already has two inventory items sharing a name
+/// (case/whitespace-insensitively), attempting the index would fail
+/// outright, which — run unconditionally at every app startup, as all
+/// migrations here are — would mean the app refuses to start at all
+/// for EVERY business until that one business's data is manually
+/// cleaned up. That would be a far worse outcome than the gap this
+/// migration closes, so: check for existing collisions FIRST, and only
+/// create the index if there are none. A business with no pre-existing
+/// duplicates gets the real protection immediately; if any duplicates
+/// exist anywhere, the index is skipped for now (logged below, not
+/// silently), and the app starts normally — a data problem someone
+/// needs to go clean up, not something that should be able to lock
+/// everyone out of the app the moment this update ships.
+///
+/// Being a normal versioned migration (`if current < 18` in `run()`
+/// above), this only ever RUNS once per install — if it's skipped here
+/// because of an existing collision, it stays skipped forever, even
+/// after that collision is fixed, since nothing re-checks a migration
+/// whose version has already been recorded as applied. Resolving the
+/// duplicate afterward does not retroactively add the protection on
+/// its own; that needs a later migration version to actually pick it
+/// back up.
+fn v18_inventory_unique_name(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_inventory'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists == 1 {
+        let duplicate_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT business_id, LOWER(TRIM(name)) AS n
+                FROM module_inventory
+                WHERE deleted_at IS NULL
+                GROUP BY business_id, n
+                HAVING COUNT(*) > 1
+             )",
+            [],
+            |r| r.get(0),
+        )?;
+        if duplicate_count == 0 {
+            tx.execute(
+                "DROP INDEX IF EXISTS idx_module_inventory_name_lookup;",
+                [],
+            )?;
+            tx.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_module_inventory_unique_name
+                 ON module_inventory(business_id, LOWER(TRIM(name)))
+                 WHERE deleted_at IS NULL;",
+                [],
+            )?;
+        } else {
+            eprintln!(
+                "[migration v18] skipping the new inventory unique-name index: {duplicate_count} \
+                 existing (business, name) pair(s) already collide case/whitespace-insensitively. \
+                 This migration will NOT retry automatically once resolved — it only runs once per \
+                 install. Resolve the duplicate item names, then a later app update will need to \
+                 pick this back up."
+            );
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (18)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// THE ACTUAL FIX Deric asked for: performance, not correctness — a
+/// refund now runs TWO lookups filtered by `sale_id` (the pre-existing
+/// SUM(quantity_refunded), plus SUM(cost_reversed) added alongside
+/// gross profit tracking — see refund.rs's own doc comment), and
+/// nothing in this table was ever indexed on that column. A business
+/// with a long refund history would have every refund from here on
+/// scan its ENTIRE refund table twice, every time, to find prior
+/// refunds against one sale. See module.rs::create_table's matching
+/// comment for the full reasoning; this migration exists only to give
+/// that same index to businesses whose Refunds table was already
+/// created before this fix landed — `create_table` itself only ever
+/// runs once, at the moment a module is first enabled, so an
+/// already-enabled business never sees a change made there on its own.
+///
+/// Unlike v18's inventory-name index, this one is plain (not UNIQUE) —
+/// there is no possible pre-existing data that could make adding it
+/// fail, so unlike v18 there's no detect-and-skip dance needed here:
+/// it either applies immediately, every time, or the table simply
+/// doesn't exist yet (module never enabled on this install), in which
+/// case `create_table` will build it correctly whenever it first is.
+fn v19_refunds_sale_id_index(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_refunds'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists == 1 {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_module_refunds_sale_id ON module_refunds(business_id, sale_id);",
+            [],
+        )?;
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (19)", [])?;
     tx.commit()?;
     Ok(())
 }

@@ -4,6 +4,30 @@ use serde_json::{json, Value};
 
 use crate::ai_context;
 
+/// THE ACTUAL FIX Deric asked for: the previous default and fallback
+/// were the exact same model id, so once NVIDIA retired it (the
+/// screenshot this fix was written against shows the API's own 410
+/// "end of life" response), EVERY business on default settings had no
+/// working fallback at all — `model != fallback_model` was always
+/// false, so the fallback branch in `ask_nvidia_nim` below could never
+/// actually run.
+///
+/// IMPORTANT — NEEDS VERIFICATION: these two model ids are this app's
+/// best information as of its last update, not a live-checked current
+/// catalog — NVIDIA periodically retires models the same way it just
+/// retired the previous default, and I have no way to confirm from
+/// here whether either of these two is still live today. If the AI
+/// assistant still doesn't work after this fix, the real, current
+/// answer is whatever's listed at https://build.nvidia.com/models
+/// right now — set it under Admin → AI Settings, which always
+/// overrides both of these without needing a code change.
+const DEFAULT_NVIDIA_MODEL: &str = "meta/llama-3.1-70b-instruct";
+/// Deliberately a different model FROM A DIFFERENT VENDOR than the
+/// default above, not just a different Llama version — reduces the
+/// odds that whatever event retires one also takes down the other at
+/// the same time.
+const FALLBACK_NVIDIA_MODEL: &str = "mistralai/mixtral-8x7b-instruct-v0.1";
+
 /// Which AI backend to call. NVIDIA NIM is the default because it's
 /// genuinely free (no credit card, ~40 requests/min) and OpenAI-
 /// compatible, which keeps its request/response shape simple. Gemini,
@@ -161,8 +185,19 @@ fn openai_style_messages(system_prompt: &str, question: &str, history: &[Turn]) 
 /// NVIDIA NIM — free tier, OpenAI-compatible chat completions API.
 fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
     let api_key = resolve_key(conn, business_id, "nvidia", "NVIDIA_API_KEY", Some("https://build.nvidia.com"))?;
-    let model = model_for(conn, business_id, "nvidia", "meta/llama-3.3-70b-instruct");
-    let fallback_model = "meta/llama-3.3-70b-instruct";
+    let model = model_for(conn, business_id, "nvidia", DEFAULT_NVIDIA_MODEL);
+    // THE BUG THIS FIXES: this used to be the exact same string as
+    // `DEFAULT_NVIDIA_MODEL` above, which meant the fallback attempt
+    // below could never actually run for anyone using the default (i.e.
+    // everyone who hasn't set `ai_nvidia_model` explicitly) — `model !=
+    // fallback_model` was always false, so a dead default model's 410
+    // just propagated straight through with no real fallback ever
+    // attempted, exactly what the screenshot this fix was written
+    // against shows. Deliberately a DIFFERENT, separately-maintained
+    // model id, so the fallback path is real: if whichever one is
+    // configured as the primary reaches end of life, the other one
+    // still has a chance of being live.
+    let fallback_model = FALLBACK_NVIDIA_MODEL;
     let agent = tls_agent()?;
     let request = |model_name: &str| -> Result<String> {
         let body = json!({
@@ -193,7 +228,11 @@ fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, que
     match request(&model) {
         Err(error) if model != fallback_model && error.to_string().contains("returned 410") => {
             request(fallback_model).map_err(|fallback_error| {
-                anyhow!("NVIDIA NIM model '{}' is no longer available; fallback failed: {}", model, fallback_error)
+                anyhow!(
+                    "NVIDIA NIM model '{model}' is no longer available, and the fallback model '{fallback_model}' \
+                     also failed: {fallback_error}. NVIDIA periodically retires older models — pick a current one \
+                     from https://build.nvidia.com/models and set it under Admin → AI Settings."
+                )
             })
         }
         result => result,

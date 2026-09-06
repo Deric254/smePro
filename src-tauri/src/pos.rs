@@ -147,6 +147,23 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             return Err(anyhow!("product not found: {}", item.inventory_record_id));
         };
 
+        // THE ACTUAL FIX Deric asked for: "the system must ensure no
+        // possibility of selling at a loss." Every write that can SET
+        // an item's cost or price (crud::create, crud::update, repack,
+        // receiving) already refuses to leave price under cost — this
+        // is the same rule held at the one place "selling" actually
+        // happens, as the last line of defense rather than trusting
+        // those upstream guards alone to have kept every item in a
+        // valid state forever. Checked before any write below, so a
+        // rejected sale changes nothing at all — not stock, not a
+        // sales record — same as every other rejection in this loop.
+        if unit_price < unit_cost {
+            return Err(anyhow!(
+                "cannot sell '{name}': priced at {unit_price} but costs {unit_cost} — this would \
+                 sell at a loss. Raise the price in Inventory first."
+            ));
+        }
+
         if current_qty < item.quantity && !req.allow_oversell {
             return Err(anyhow!(
                 "not enough stock for '{name}': {current_qty} available, {} requested",

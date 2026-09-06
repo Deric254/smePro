@@ -1,4 +1,5 @@
 use super::common::*;
+use serde_json::json;
 
 fn test_food_business(conn: &mut rusqlite::Connection) -> String {
     let id = crate::business_panel::create_business(conn, "Test Food Biz", "USD", "UTC").expect("create business");
@@ -57,7 +58,10 @@ fn test_first_receipt_on_zero_stock_takes_the_new_cost_exactly() {
     let (uid, _) = test_owner(&mut conn, &biz);
 
     // Zero on hand -- a brand new item, or one that was fully sold out.
-    let inv_id = make_inventory_item(&conn, &biz, "RICE-002", "Basmati Rice", 0, 0, 0);
+    // Priced comfortably above the incoming cost so this test proves
+    // what it's named for (a clean, undistorted first-cost receipt),
+    // not the separate "can't receive above the current price" guard.
+    let inv_id = make_inventory_item(&conn, &biz, "RICE-002", "Basmati Rice", 0, 0, 6000);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Basmati Rice", 40, 4550);
 
     let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
@@ -162,4 +166,35 @@ fn test_purchase_order_without_inventory_link_is_rejected() {
 
     let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
     assert!(crate::receiving::receive(&mut conn, &biz, &uid, req).is_err());
+}
+
+#[test]
+fn test_receiving_rejects_a_delivery_that_would_price_the_item_below_cost() {
+    // THE ACTUAL FIX Deric asked for: a supplier price increase must
+    // not be able to silently push an item's cost above what it's
+    // still priced to sell at. This is very likely the single most
+    // common real way an item would actually end up costing more than
+    // it sells for — supplier prices change constantly; repacking
+    // something is comparatively rare.
+    let mut conn = test_db();
+    let biz = test_food_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    // Priced at 3000, already costing 2000 -- a delivery at 5000/unit
+    // would push the blended cost well above the current price.
+    let inv_id = make_inventory_item(&conn, &biz, "SUGAR-002", "Sugar", 10, 2000, 3000);
+    let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Sugar", 10, 5000);
+
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None };
+    let result = crate::receiving::receive(&mut conn, &biz, &uid, req);
+    assert!(result.is_err(), "must reject a receipt that would price the item below its own cost");
+
+    // Nothing should have moved — a rejected receive must not
+    // partially apply.
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(list[0]["quantity"].as_i64().unwrap(), 10, "stock must be untouched by a rejected receive");
+    assert_eq!(list[0]["unit_cost"].as_i64().unwrap(), 2000, "cost must be untouched by a rejected receive");
+    let po_list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let po = po_list.iter().find(|r| r["id"] == json!(po_id)).unwrap();
+    assert_eq!(po["received"], json!(false), "the purchase order must still be unreceived, not partially processed");
 }

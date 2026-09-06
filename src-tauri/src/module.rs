@@ -255,17 +255,61 @@ impl ModuleDef {
         // those. Without this, that lookup is a full scan of every
         // inventory row this business has, for every single row of
         // every Purchasing import — fine at a handful of SKUs,
-        // genuinely slow at the thousands a real catalog reaches. A
-        // SQLite expression index, built on the exact same expression
-        // the lookup's WHERE clause uses, lets that query hit the
-        // index directly instead. Special-cased here rather than made
-        // generic (a `unique`-style flag in the JSON schema, say)
-        // because this is the one lookup in the whole codebase shaped
-        // like this — see the `unique` field for the general case.
+        // genuinely slow at the thousands a real catalog reaches.
+        //
+        // THE ACTUAL FIX Deric asked for: this index used to just be a
+        // plain (non-unique) lookup accelerator — it made the lookup
+        // above fast, but did nothing to stop two DIFFERENT SKUs from
+        // sharing the same item name, which is real, confusing
+        // duplication a shop owner never wants (two "Rice" rows with
+        // different SKUs is a data-entry mistake almost every time, not
+        // a legitimate distinct product). Making it a genuine UNIQUE
+        // index — on the exact same `LOWER(TRIM(name))` expression the
+        // lookup query above already uses, so it still serves that
+        // lookup exactly as fast as the plain index did — closes that
+        // gap at the one place it can never be forgotten or bypassed:
+        // the database itself, covering create, update, AND import
+        // alike, not just whichever single code path remembered to
+        // check first.
+        //
+        // `WHERE deleted_at IS NULL` is deliberate, not decorative: a
+        // soft-deleted "Rice" must not permanently block a real, later
+        // "Rice" from ever being added again — every other query
+        // against this table already treats a soft-deleted row as
+        // gone (see idx_..._business above, crud::list, etc.); this
+        // index holds itself to the same standard. Deliberately
+        // case- and whitespace-insensitive (`LOWER(TRIM(...))`) for
+        // the same reason `find_inventory_id_by_name` already resolves
+        // names that way: "Rice", "rice", and " Rice " are the same
+        // real-world item to a cashier typing fast, and treating them
+        // as three different products would be its own kind of
+        // inconsistency.
         if self.id == "inventory" {
             tx.execute(
-                "CREATE INDEX IF NOT EXISTS idx_module_inventory_name_lookup
-                 ON module_inventory(business_id, LOWER(TRIM(name)));",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_module_inventory_unique_name
+                 ON module_inventory(business_id, LOWER(TRIM(name)))
+                 WHERE deleted_at IS NULL;",
+                [],
+            )?;
+        }
+
+        // Refunds-specific: refund.rs looks up "everything already
+        // refunded against this sale" TWICE per refund now (a
+        // SUM(quantity_refunded) that already existed, and a
+        // SUM(cost_reversed) added alongside gross profit tracking —
+        // see refund.rs's own doc comment on why that second lookup
+        // exists), both filtered on `sale_id` — a column the
+        // business-wide `idx_..._business` index above does nothing
+        // for, since it only covers `business_id`/`deleted_at`.
+        // Without this, refunding a sale on a business with a long
+        // refund history means scanning every refund that business has
+        // ever recorded, twice, on every single refund going forward —
+        // exactly the kind of thing that's invisible on a fresh install
+        // and only starts to bite once real data has piled up.
+        if self.id == "refunds" {
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS idx_module_refunds_sale_id
+                 ON module_refunds(business_id, sale_id);",
                 [],
             )?;
         }

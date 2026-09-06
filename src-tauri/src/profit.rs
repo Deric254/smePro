@@ -36,15 +36,19 @@ pub struct GrossProfitSummary {
     /// missing comparison period.
     pub margin_pct: Option<f64>,
     pub sales_count: i64,
-    /// True once at least one sale exists with `cost_at_sale > 0` —
-    /// lets the frontend distinguish "this business has made sales,
-    /// but every one of them predates cost tracking" (see
-    /// db_migrations.rs's v17 doc comment: historical sales are
-    /// permanently stuck at cost_at_sale = 0) from "this business
-    /// genuinely has zero cost of goods", so a brand-new install
-    /// doesn't get a misleading "100% margin" reading it might
-    /// mistake for a real result.
-    pub has_cost_data: bool,
+    /// THE ACTUAL FIX Deric asked for: this used to be a single `bool`
+    /// — true the moment even ONE sale anywhere had real cost data,
+    /// which could make a business with, say, 2 real-cost sales out of
+    /// 50 look exactly as trustworthy as one where all 50 do. A margin
+    /// computed mostly from cost-blind sales (see db_migrations.rs's
+    /// v17 doc comment — hand-created sales, and anything sold before
+    /// this feature existed, are permanently stuck at cost_at_sale =
+    /// 0) is not a lie exactly, but it IS a number built on incomplete
+    /// information the person reading it has no way to see. This is
+    /// the real count, so the frontend can say "42 of 50 sales have
+    /// real cost data" — or, just as importantly, "2 of 50" — instead
+    /// of a flag that treats both situations identically.
+    pub cost_bearing_sales_count: i64,
 }
 
 /// All-time totals — same scope `DebtSummary`'s KPI-card numbers use,
@@ -56,7 +60,7 @@ pub fn summary(conn: &Connection, business_id: &str, user_id: &str) -> Result<Gr
         .map_err(|_| anyhow!("the Sales module isn't enabled for this business"))?;
     let table = sales_module.table_name();
 
-    let (revenue_cents, cost_cents, sales_count, cost_bearing_count): (i64, i64, i64, i64) = conn.query_row(
+    let (revenue_cents, cost_cents, sales_count, cost_bearing_sales_count): (i64, i64, i64, i64) = conn.query_row(
         &format!(
             "SELECT COALESCE(SUM(revenue), 0), COALESCE(SUM(cost_at_sale), 0), COUNT(*),
                     COALESCE(SUM(CASE WHEN cost_at_sale > 0 THEN 1 ELSE 0 END), 0)
@@ -79,6 +83,6 @@ pub fn summary(conn: &Connection, business_id: &str, user_id: &str) -> Result<Gr
         profit_cents,
         margin_pct,
         sales_count,
-        has_cost_data: cost_bearing_count > 0,
+        cost_bearing_sales_count,
     })
 }

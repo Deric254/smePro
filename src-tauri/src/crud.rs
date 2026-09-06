@@ -12,22 +12,43 @@ use crate::{audit, rbac};
 /// `crud_error()` and into the JSON response the frontend shows the
 /// user verbatim — e.g. "UNIQUE constraint failed:
 /// module_inventory.business_id, module_inventory.sku" for something
-/// as ordinary as typing a SKU that's already in use. Every module has
-/// at most one field marked `unique: true` (see
-/// `module.rs::business_scoped_unique_constraints`), so there's no
-/// need to parse the DB's column list back out of the message at
-/// all — if the failure was a UNIQUE violation, it can only be that
-/// field, and the actual value the caller typed for it is right there
-/// in `record`. Any other kind of DB error (there shouldn't be one,
-/// since `module.validate()` and `validate_field_references()` already
-/// ran before either caller reaches this) is passed through unchanged
+/// as ordinary as typing a SKU that's already in use.
+///
+/// Two different shapes of UNIQUE violation get translated here, and
+/// they need different handling because they look different in
+/// SQLite's own error text:
+/// - A field marked `unique: true` (sku, po_number, entry_number) is a
+///   plain table-level `UNIQUE(business_id, field)` constraint — at
+///   most one such field per module (see
+///   `module.rs::business_scoped_unique_constraints`), so there's no
+///   need to parse anything out of the message: if it's this shape of
+///   violation, it can only be that field.
+/// - Inventory's `name` uniqueness (see module.rs::create_table's own
+///   doc comment) is a partial UNIQUE INDEX over an EXPRESSION
+///   (`LOWER(TRIM(name))`), not a plain field. SQLite has no column
+///   list to report for an expression index, so it falls back to
+///   naming the INDEX itself in the error instead — a completely
+///   different shape that has to be checked for explicitly, by name,
+///   before falling through to the field-based case above.
+///
+/// Any other kind of DB error (there shouldn't be one, since
+/// `module.validate()` and `validate_field_references()` already ran
+/// before either caller reaches this) is passed through unchanged
 /// rather than papered over.
 fn friendly_write_error(
     e: rusqlite::Error,
     module: &ModuleDef,
     record: &std::collections::HashMap<String, Value>,
 ) -> anyhow::Error {
-    if e.to_string().to_uppercase().contains("UNIQUE") {
+    let msg = e.to_string();
+    if msg.to_uppercase().contains("UNIQUE") {
+        if module.id == "inventory" && msg.contains("idx_module_inventory_unique_name") {
+            let value = record.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            return anyhow!(
+                "this name is already in use: '{value}' — item names must be unique \
+                 (capitalization and extra spacing don't count as a different name)"
+            );
+        }
         if let Some(f) = module.fields.iter().find(|f| f.unique) {
             let value = record.get(&f.name).and_then(|v| v.as_str()).unwrap_or("").to_string();
             return anyhow!("this {} is already in use: '{value}' — {} must be unique", f.name, f.name);

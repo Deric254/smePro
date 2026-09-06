@@ -162,3 +162,218 @@ fn test_v13_migration_is_idempotent_and_leaves_already_fixed_tables_alone() {
     )
     .expect("fix must still hold after running migrations twice");
 }
+
+#[test]
+fn test_inventory_unique_name_is_enforced_case_and_whitespace_insensitively() {
+    // THE ACTUAL FIX Deric asked for: two DIFFERENT skus must not be
+    // able to share the same item name — case and whitespace
+    // differences don't count as "different" (see
+    // module.rs::create_table's own doc comment on why). This exercises
+    // the constraint as a brand-new business would actually get it —
+    // straight from create_table() at module-enable time, since
+    // test_business() enables Inventory fresh — which is the same
+    // end state v18 backfills onto an already-existing table; see
+    // test_v18_migration_backfills_the_index_for_a_pre_existing_table
+    // below for the migration path specifically.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'RICE-001', 'Rice', 10, 500, 900, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    )
+    .unwrap();
+
+    let collision = conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'RICE-002', '  rice  ', 5, 400, 800, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    );
+    assert!(collision.is_err(), "a different SKU with the same name (different case/spacing) must still be rejected");
+
+    // A genuinely different name, for the same business, must still
+    // work — the fix must not have blocked inventory creation outright.
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'BEANS-001', 'Beans', 5, 400, 800, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    )
+    .expect("a genuinely different name must still be allowed");
+
+    // A DIFFERENT business must still be able to use the exact same
+    // name — this is business-scoped, not global, same as sku.
+    let other_biz = test_business(&mut conn);
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'RICE-001', 'Rice', 10, 500, 900, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), other_biz],
+    )
+    .expect("an unrelated business must be able to use the same item name");
+}
+
+#[test]
+fn test_v18_migration_backfills_the_index_for_a_pre_existing_table() {
+    // Unlike the test above (a brand-new business, which gets the
+    // index straight from create_table()'s own already-current logic),
+    // this reproduces an install whose Inventory table was created
+    // BEFORE this feature existed — the only case v18 itself actually
+    // needs to do anything for.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+
+    // Simulate the pre-fix table shape: the index this migration adds
+    // simply isn't there yet, same as any table created before this
+    // code changed.
+    conn.execute("DROP INDEX IF EXISTS idx_module_inventory_unique_name", []).unwrap();
+
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'RICE-001', 'Rice', 10, 500, 900, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    )
+    .unwrap();
+    // Confirm the index is really gone before the migration runs —
+    // otherwise this test would trivially pass for the wrong reason.
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'RICE-002', 'rice', 5, 400, 800, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    )
+    .expect("with the index dropped, a colliding name must be insertable — proves the drop above really worked");
+    // ...and remove that duplicate again — the migration below detects
+    // EXISTING collisions and skips rather than failing, so this test
+    // needs a genuinely clean table to prove the ADD path specifically,
+    // not the skip path (that's the test right after this one).
+    conn.execute("DELETE FROM module_inventory WHERE sku = 'RICE-002'", []).unwrap();
+
+    conn.execute("DELETE FROM _schema_version WHERE version >= 18", []).unwrap();
+    crate::db_migrations::run(&mut conn).expect("v18 migration");
+
+    let collision = conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'RICE-003', 'RICE', 5, 400, 800, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    );
+    assert!(collision.is_err(), "v18 must have backfilled real enforcement onto the pre-existing table");
+}
+
+#[test]
+fn test_v18_migration_lets_a_soft_deleted_name_be_reused() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'OLD-001', 'Discontinued Item', 0, 100, 200, datetime('now'), datetime('now'))",
+        rusqlite::params![id, biz],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE module_inventory SET deleted_at = datetime('now') WHERE id = ?1",
+        rusqlite::params![id],
+    )
+    .unwrap();
+
+    // A soft-deleted item's name must not permanently squat on that
+    // name — every other query against this table already treats a
+    // soft-deleted row as gone, and this index holds itself to the
+    // same standard (see its own `WHERE deleted_at IS NULL`).
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'NEW-001', 'Discontinued Item', 10, 100, 200, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    )
+    .expect("a soft-deleted item's name must be reusable by a new item");
+}
+
+#[test]
+fn test_v18_migration_skips_gracefully_when_a_collision_already_exists() {
+    // THE REAL CONSTRAINT this migration has to respect: every business
+    // shares the same physical module_inventory table, so the unique
+    // index either applies to everyone or (safely) to no one — it
+    // can never single out just the business with the pre-existing
+    // duplicate. Reproduces exactly that: a business that already has
+    // two different SKUs sharing a name BEFORE v18 gets a chance to
+    // run, proving the migration detects it and skips instead of
+    // failing the whole migration run (which would otherwise refuse to
+    // start the app for every business on the install, not just this
+    // one).
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'DUP-001', 'Duplicate Name', 10, 500, 900, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    )
+    .unwrap();
+    // Force this in directly, bypassing whatever index already exists
+    // from the normal migration run inside test_db() — reproducing
+    // the pre-v18 state where this was still possible.
+    conn.execute("DROP INDEX IF EXISTS idx_module_inventory_unique_name", []).unwrap();
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'DUP-002', 'duplicate name', 5, 400, 800, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    )
+    .expect("the collision must be reproducible with the index gone, or this test proves nothing");
+
+    conn.execute("DELETE FROM _schema_version WHERE version >= 18", []).unwrap();
+    crate::db_migrations::run(&mut conn).expect("v18 must not fail the whole migration run just because one business has a collision");
+
+    // The index must genuinely not have been created — a third,
+    // unrelated duplicate must still be able to sneak in, proving the
+    // skip was real and not just this test's assertion being wrong.
+    conn.execute(
+        "INSERT INTO module_inventory (id, business_id, sku, name, quantity, unit_cost, unit_price, created_at, updated_at)
+         VALUES (?1, ?2, 'DUP-003', 'DUPLICATE NAME', 3, 300, 700, datetime('now'), datetime('now'))",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), biz],
+    )
+    .expect("the unique index must genuinely be absent while a collision exists, not silently still enforcing");
+}
+
+fn has_index(conn: &rusqlite::Connection, index_name: &str) -> bool {
+    conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?1",
+        rusqlite::params![index_name],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap()
+        > 0
+}
+
+#[test]
+fn test_refunds_table_gets_a_sale_id_index_on_a_fresh_business() {
+    // THE ACTUAL FIX Deric asked for: performance. A fresh business
+    // enabling Refunds goes through create_table() directly, which
+    // should already build this index — see module.rs::create_table's
+    // own comment on why refund.rs needs it (two SUM(...) WHERE
+    // sale_id = ?1 lookups per refund, previously with nothing to
+    // index on).
+    let mut conn = test_db();
+    let _biz = test_business(&mut conn);
+    assert!(has_index(&conn, "idx_module_refunds_sale_id"), "a fresh Refunds table must already have the sale_id index from create_table()");
+}
+
+#[test]
+fn test_v19_migration_backfills_the_refunds_sale_id_index() {
+    // Unlike the test above (a brand-new business, which gets the
+    // index straight from create_table()'s own already-current logic),
+    // this reproduces an install whose Refunds table was created
+    // BEFORE this fix existed — the only case v19 itself actually
+    // needs to do anything for. Unlike v18's inventory-name index,
+    // there's no "existing collision" case to worry about here (this
+    // is a plain, not UNIQUE, index) — it should just always get added.
+    let mut conn = test_db();
+    let _biz = test_business(&mut conn);
+
+    conn.execute("DROP INDEX IF EXISTS idx_module_refunds_sale_id", []).unwrap();
+    assert!(!has_index(&conn, "idx_module_refunds_sale_id"), "sanity check — the index must really be gone before the migration runs");
+
+    conn.execute("DELETE FROM _schema_version WHERE version >= 19", []).unwrap();
+    crate::db_migrations::run(&mut conn).expect("v19 migration");
+
+    assert!(has_index(&conn, "idx_module_refunds_sale_id"), "v19 must have backfilled the index onto the pre-existing table");
+}

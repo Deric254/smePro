@@ -66,9 +66,9 @@ export default function Reports() {
               Revenue {formatMoney(grossProfit.revenue_cents, currency)} − Cost {formatMoney(grossProfit.cost_cents, currency)}
               {grossProfit.margin_pct !== null ? ` · ${grossProfit.margin_pct.toFixed(1)}% margin` : ''}
             </div>
-            {!grossProfit.has_cost_data && grossProfit.sales_count > 0 && (
+            {grossProfit.cost_bearing_sales_count < grossProfit.sales_count && (
               <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)', marginTop: '0.35rem' }}>
-                No cost data recorded yet on these sales — margin will fill in as new sales happen.
+                Only {grossProfit.cost_bearing_sales_count} of {grossProfit.sales_count} sales have real cost data recorded — this margin is based on those only, not the full sales count.
               </div>
             )}
           </div>

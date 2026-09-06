@@ -152,6 +152,18 @@ export interface CurrentUser {
 // role (see the matching comment on the backend route).
 export const getCurrentUser = (): Promise<CurrentUser> => request('/auth/me');
 
+export interface MyCapabilities {
+  is_admin_tier: boolean;
+  can_sell: boolean;
+  can_stocktake: boolean;
+  readable_modules: string[];
+}
+// Powers the sidebar's own visibility decisions (see Sidebar.tsx) —
+// separate from a module's own `my_permissions` (which governs
+// buttons WITHIN a module you've already opened), this is "should this
+// destination be offered as a place to go at all."
+export const getMyCapabilities = (): Promise<MyCapabilities> => request('/auth/me/capabilities');
+
 export const login = (username: string, password: string, biz: string) =>
   fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
@@ -380,7 +392,7 @@ export interface GrossProfitSummary {
   profit_cents: number;
   margin_pct: number | null;
   sales_count: number;
-  has_cost_data: boolean;
+  cost_bearing_sales_count: number;
 }
 export const getGrossProfitSummary = (): Promise<GrossProfitSummary> => request('/sales/profit-summary');
 export const getModuleSchema = (moduleId: string) => request(`/modules/${moduleId}/schema`);

@@ -31,7 +31,7 @@ fn test_gross_profit_summary_matches_revenue_minus_cost_across_multiple_sales() 
     assert_eq!(summary.cost_cents, 25000 + 6000);
     assert_eq!(summary.profit_cents, (37500 + 10500) - (25000 + 6000));
     assert_eq!(summary.sales_count, 2);
-    assert!(summary.has_cost_data);
+    assert_eq!(summary.cost_bearing_sales_count, 2, "both sales went through checkout() and have real cost data");
     assert!(summary.margin_pct.is_some());
 }
 
@@ -80,17 +80,48 @@ fn test_gross_profit_summary_with_no_sales_degrades_honestly() {
     assert_eq!(summary.cost_cents, 0);
     assert_eq!(summary.profit_cents, 0);
     assert_eq!(summary.sales_count, 0);
-    assert!(!summary.has_cost_data);
+    assert_eq!(summary.cost_bearing_sales_count, 0);
     assert!(summary.margin_pct.is_none(), "a margin percentage against zero revenue is undefined, not 0%");
+}
+
+#[test]
+fn test_gross_profit_summary_counts_cost_bearing_sales_separately_from_total() {
+    // THE ACTUAL FIX Deric asked for: a single business can easily
+    // have a MIX of real-cost sales (through checkout()) and cost-
+    // blind ones (hand-created, or predating this feature) — the old
+    // boolean `has_cost_data` would say the exact same "true" whether
+    // 1 of 50 sales had real cost data or all 50 did. This proves the
+    // real count distinguishes them: 2 real sales plus 1 hand-created
+    // one must report sales_count = 3, cost_bearing_sales_count = 2 —
+    // not collapsed into a flag that hides how thin that 2-out-of-3
+    // actually is.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let inv_id = seed_inventory_item(&conn, &biz, "SALT-001", "Salt", 50, 500, 900);
+    checkout_one(&mut conn, &biz, &uid, &inv_id, 2);
+    checkout_one(&mut conn, &biz, &uid, &inv_id, 1);
+
+    let mut record = serde_json::Map::new();
+    record.insert("item_name".into(), json!("Hand-entered sale"));
+    record.insert("quantity".into(), json!(1));
+    record.insert("revenue".into(), json!(2000));
+    crate::crud::create(&conn, &biz, &uid, "sales", &record).unwrap();
+
+    let summary = crate::profit::summary(&conn, &biz, &uid).unwrap();
+    assert_eq!(summary.sales_count, 3);
+    assert_eq!(summary.cost_bearing_sales_count, 2, "exactly the 2 real checkouts, not the 1 hand-created sale");
 }
 
 #[test]
 fn test_gross_profit_summary_flags_missing_historical_cost_data() {
     // A sale hand-created directly (not through checkout()) has no
     // real cost data behind it — cost_at_sale is forced to 0 (see
-    // crud.rs's own "if module_id == sales" block), and has_cost_data
-    // must reflect that honestly rather than implying a suspiciously
-    // perfect 100% margin is a real result.
+    // crud.rs's own "if module_id == sales" block), and
+    // cost_bearing_sales_count must reflect that honestly (0, not 1)
+    // rather than implying a suspiciously perfect 100% margin is a
+    // real result.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -104,5 +135,5 @@ fn test_gross_profit_summary_flags_missing_historical_cost_data() {
     let summary = crate::profit::summary(&conn, &biz, &uid).unwrap();
     assert_eq!(summary.revenue_cents, 5000);
     assert_eq!(summary.cost_cents, 0);
-    assert!(!summary.has_cost_data, "cost_at_sale forced to 0 on a hand-created sale must not be mistaken for a real zero-cost result");
+    assert_eq!(summary.cost_bearing_sales_count, 0, "cost_at_sale forced to 0 on a hand-created sale must not be counted as real cost data");
 }

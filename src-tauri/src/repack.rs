@@ -109,16 +109,16 @@
 //! consistent rather than having two subtly different ways to arrive
 //! at "the cost of this item."
 //!
-//! NOTE ON PRICE VS. COST: repacking an EXISTING target can change its
-//! cost (the whole point of the weighted average) without ever
-//! touching its selling price, which can leave an item priced below
-//! its own cost if an expensive source got broken into it. Unlike
-//! `crud::create`/`receiving::receive` — which refuse a caller-typed
-//! price under a caller-typed cost — repack does not block on this:
-//! the cost here is computed, not typed, and a real business needs to
-//! see that outcome (and re-price the target) rather than have the
-//! whole repack silently refused. The frontend's confirmation message
-//! surfaces this as a "Profit reduction" rather than hiding it.
+//! CONSISTENCY CHECK: repacking an EXISTING target can change its cost
+//! (the whole point of the weighted average) without ever touching its
+//! selling price — which, unchecked, could silently leave an item
+//! priced below its own cost if an expensive source got broken into
+//! it. Every other path in this app that can set or change a cost
+//! (`crud::create`, `crud::update`, `receiving::receive`) already
+//! refuses to leave price under cost; repack is held to the same
+//! standard, checked once against the final computed cost, whether the
+//! target is brand-new or already existed. See the check itself,
+//! right before the two UPDATEs it guards, for the full reasoning.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -376,17 +376,25 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
     let stored_target_value = target_new_qty * target_new_unit_cost;
     let rounding_adjustment_cents = numerator - stored_target_value;
 
-    // Unlike `crud::create`/`receiving::receive` (which refuse to leave
-    // a caller-typed price under a caller-typed cost), repack computes
-    // its cost from what was actually consumed rather than accepting
-    // one — the whole point of breaking bulk. Blocking the write here
-    // would leave the source decremented in the caller's head but not
-    // on disk (nothing to repack into instead), and would hide the
-    // exact number a shopkeeper needs to see to re-price the target:
-    // if the target's current selling price doesn't cover the real
-    // cost of what was just produced, that's real information, not an
-    // error condition — see the frontend's "Profit reduction" line,
-    // which surfaces this outcome rather than treating it as invalid.
+    // THE ACTUAL FIX Deric asked for (restored): the very same "never
+    // sell at a loss" rule `crud::create()`/`crud::update()` already
+    // hold every other cost-affecting write to. This was deliberately
+    // NOT enforced here for a time, on the reasoning that repack's
+    // cost is computed rather than typed, so blocking the write would
+    // hide the number a shopkeeper needs to see to re-price the
+    // target — but the explicit, current instruction is the opposite:
+    // the system must guarantee no item can ever end up priced below
+    // its own cost, full stop, repack included. Checked BEFORE either
+    // UPDATE below runs, so a rejected repack changes nothing at all —
+    // not even the source's stock — rather than leaving the source
+    // decremented with no matching target increase.
+    if target_unit_price < target_new_unit_cost {
+        return Err(anyhow!(
+            "this repack would leave '{target_name}' costing {target_new_unit_cost} per unit \
+             while it's still priced at {target_unit_price} — raise the target's price to at \
+             least {target_new_unit_cost}, or adjust the repack quantities, before continuing"
+        ));
+    }
 
     tx.execute(
         &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),

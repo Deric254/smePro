@@ -182,14 +182,14 @@ pub(crate) fn receive_in_tx(
         return Err(anyhow!("quantity received must be greater than zero"));
     }
 
-    let inv_row: Option<(String, i64, i64)> = tx
+    let inv_row: Option<(String, i64, i64, i64)> = tx
         .query_row(
-            &format!("SELECT name, quantity, unit_cost FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+            &format!("SELECT name, quantity, unit_cost, unit_price FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
             params![inventory_record_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((inventory_name, current_qty, current_unit_cost)) = inv_row else {
+    let Some((inventory_name, current_qty, current_unit_cost, current_unit_price)) = inv_row else {
         return Err(anyhow!("linked inventory item not found: {inventory_record_id}"));
     };
 
@@ -212,6 +212,29 @@ pub(crate) fn receive_in_tx(
     // point in this calculation.
     let numerator = current_qty * current_unit_cost + quantity_received * po_unit_cost;
     let new_unit_cost = (numerator + new_qty / 2) / new_qty;
+
+    // THE ACTUAL FIX Deric asked for: this receive can raise an item's
+    // weighted-average cost (a supplier price increase, most commonly)
+    // without ever touching its selling price — nothing here used to
+    // stop that from silently pushing the item's cost above what it's
+    // still priced to sell at. Every other cost-affecting write in the
+    // app (crud::create, crud::update, repack) already refuses to
+    // leave price under cost; this is likely the single MOST common
+    // real way an item would actually end up in that state (supplier
+    // prices change far more often than someone repacks something),
+    // so it needs the exact same guarantee. Checked before any write
+    // below, so a rejected receive changes nothing at all — the
+    // purchase order stays unreceived, exactly as if this had never
+    // been attempted, rather than leaving stock partially updated with
+    // no matching price fix.
+    if current_unit_price < new_unit_cost {
+        return Err(anyhow!(
+            "receiving this would leave '{inventory_name}' costing {new_unit_cost} per unit while \
+             it's still priced at {current_unit_price} — raise the item's price to at least \
+             {new_unit_cost} in Inventory first, then receive this order"
+        ));
+    }
+
     tx.execute(
         &format!("UPDATE {inventory_table} SET quantity = ?1, unit_cost = ?2, updated_at = datetime('now') WHERE id = ?3 AND business_id = ?4"),
         params![new_qty, new_unit_cost, inventory_record_id, business_id],

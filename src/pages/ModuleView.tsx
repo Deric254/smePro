@@ -133,6 +133,24 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
   const [formValues, setFormValues] = useState<Record<string, string>>({});
+  // THE ACTUAL FIX Deric asked for: an edit used to always resend
+  // EVERY field's current value, not just the one(s) actually
+  // changed — startEdit seeds the whole form from the record, and the
+  // old submit loop sent every non-empty field regardless of whether
+  // it matched what startEdit seeded it with. That's not a real PATCH,
+  // it's a full resubmission that happens to skip blank boxes — and
+  // for inventory specifically, it meant editing a completely
+  // unrelated field (the name, a typo, anything) silently re-sent the
+  // item's existing unit_cost and unit_price too, which re-triggers
+  // crud::update's own "never sell at a loss" check against whatever
+  // was ALREADY stored — so an item that had ended up with a price
+  // below its cost for any reason became permanently un-editable for
+  // ANY reason, with an error about a price the person never touched.
+  // Tracked here as the values startEdit seeded the form with, so
+  // submit can compare against them and only send what actually
+  // changed — the same real-PATCH behavior the backend (crud::update)
+  // already provides, that this form just wasn't taking advantage of.
+  const [originalFormValues, setOriginalFormValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'records' | 'report'>('records');
   const [loading, setLoading] = useState(true);
@@ -445,25 +463,24 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     e.preventDefault();
     setError(null);
     try {
-      // Editing sends only the fields actually present in formValues
-      // (a real PATCH — see updateRecord/crud::update), which
-      // naturally happens here too: startEdit only seeds formValues
-      // with the record's existing values, so an edit payload already
-      // contains every field, same as create's "every non-empty field"
-      // behavior. The one difference that matters: on edit, a field
-      // the person cleared to empty should still be sent (so they can
-      // actually blank out an optional field), whereas on create an
-      // empty field just means "not set yet, use the default" — so
-      // only create skips empty strings.
-      // Same rule for both create and edit: only fields with an
-      // actual typed value are sent. This deliberately means editing
-      // can't blank out an optional field back to empty through this
-      // form (only change it to something else) — the alternative,
-      // treating an empty box as "clear this", breaks per field type
-      // (an empty numeric input becomes NaN, which JSON serializes as
-      // null, which then fails backend validation with a confusing
-      // error) rather than doing anything useful, so it's not
-      // supported rather than half-supported.
+      // An empty box means "not set yet, use the default" and is
+      // never sent, on either create or edit — this deliberately means
+      // editing can't blank out an optional field back to empty
+      // through this form (only change it to something else). The
+      // alternative, treating an empty box as "clear this", breaks per
+      // field type (an empty numeric input becomes NaN, which JSON
+      // serializes as null, which then fails backend validation with a
+      // confusing error) rather than doing anything useful, so it's
+      // not supported rather than half-supported.
+      //
+      // Create sends every non-empty field, same as before. Editing
+      // additionally skips any field whose value is IDENTICAL to what
+      // startEdit originally seeded it with — see originalFormValues'
+      // own comment for why this is the fix, not just a nicety. Money
+      // fields are compared as their parsed cents, not their raw typed
+      // string, so "19.99" and "19.990" (or a locale that displays a
+      // trailing zero differently) don't look like a change when they
+      // aren't one.
       const payload: Record<string, unknown> = {};
       for (const f of schema!.fields) {
         const raw = formValues[f.name];
@@ -474,9 +491,16 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             setError(`"${f.name.replace(/_/g, ' ')}" is not a valid amount.`);
             return;
           }
+          if (editingId !== null) {
+            const originalCents = originalFormValues[f.name] !== undefined && originalFormValues[f.name] !== ''
+              ? parseMoneyInput(originalFormValues[f.name], businessCurrency)
+              : null;
+            if (originalCents === cents) continue;
+          }
           payload[f.name] = cents;
           continue;
         }
+        if (editingId !== null && raw === originalFormValues[f.name]) continue;
         payload[f.name] = f.type === 'integer' ? parseInt(raw, 10)
           : f.type === 'real' ? parseFloat(raw)
           : f.type === 'boolean' ? raw === 'true'
@@ -509,12 +533,14 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       seeded[f.name] = f.type === 'money' ? formatMoney(v as number, businessCurrency) : String(v);
     }
     setFormValues(seeded);
+    setOriginalFormValues(seeded);
     setEditingId(record.id);
     setShowForm(true);
   }
 
   function cancelForm() {
     setFormValues({});
+    setOriginalFormValues({});
     setEditingId(null);
     setShowForm(false);
   }

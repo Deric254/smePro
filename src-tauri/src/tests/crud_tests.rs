@@ -113,6 +113,94 @@ fn test_update_to_a_duplicate_unique_value_is_a_friendly_error() {
 }
 
 #[test]
+fn test_duplicate_inventory_name_with_a_different_sku_is_a_friendly_error() {
+    // THE ACTUAL FIX Deric asked for: "we can't have duplicate item
+    // name even if sku is different." Different SKUs deliberately
+    // don't exempt a duplicate name — that's the exact case this test
+    // is named for, and the exact case a bare `unique: true` on `name`
+    // wouldn't have been enough to catch consistently anyway, since it
+    // wouldn't have accounted for the case/whitespace differences a
+    // real cashier's typing produces (see module.rs::create_table's
+    // own comment on the case-insensitive index this uses instead).
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut record_a = serde_json::Map::new();
+    record_a.insert("sku".into(), json!("RICE-001"));
+    record_a.insert("name".into(), json!("Rice"));
+    record_a.insert("unit_cost".into(), json!(100));
+    record_a.insert("unit_price".into(), json!(200));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &record_a).unwrap();
+
+    let mut record_b = serde_json::Map::new();
+    record_b.insert("sku".into(), json!("RICE-002")); // genuinely different SKU
+    record_b.insert("name".into(), json!("  rice  ")); // same name, different case and spacing
+    record_b.insert("unit_cost".into(), json!(150));
+    record_b.insert("unit_price".into(), json!(250));
+    let result = crate::crud::create(&conn, &biz, &uid, "inventory", &record_b);
+    assert!(result.is_err(), "a different SKU must not exempt an otherwise-duplicate name");
+
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("name"), "got: {msg}");
+    assert!(!msg.to_uppercase().contains("CONSTRAINT") && !msg.contains("module_inventory") && !msg.contains("idx_"), "must not leak raw SQL or internal index names: {msg}");
+}
+
+#[test]
+fn test_renaming_an_item_to_collide_with_another_is_rejected() {
+    // Same rule, the other write path: renaming an EXISTING item onto
+    // a name another item already has must be rejected too, not just
+    // blocked at creation time.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut record_a = serde_json::Map::new();
+    record_a.insert("sku".into(), json!("OIL-001"));
+    record_a.insert("name".into(), json!("Cooking Oil"));
+    record_a.insert("unit_cost".into(), json!(100));
+    record_a.insert("unit_price".into(), json!(200));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &record_a).unwrap();
+
+    let mut record_b = serde_json::Map::new();
+    record_b.insert("sku".into(), json!("OIL-002"));
+    record_b.insert("name".into(), json!("Vegetable Oil"));
+    record_b.insert("unit_cost".into(), json!(120));
+    record_b.insert("unit_price".into(), json!(220));
+    let id_b = crate::crud::create(&conn, &biz, &uid, "inventory", &record_b).unwrap();
+
+    let mut body = serde_json::Map::new();
+    body.insert("name".into(), json!("Cooking Oil")); // already taken by the other item
+    let result = crate::crud::update(&conn, &biz, &uid, "inventory", &id_b, &body, false);
+    assert!(result.is_err(), "must not silently rename onto another item's name");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("name"), "got: {msg}");
+}
+
+#[test]
+fn test_a_soft_deleted_items_name_can_be_reused_by_crud() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut record = serde_json::Map::new();
+    record.insert("sku".into(), json!("DISC-001"));
+    record.insert("name".into(), json!("Discontinued Widget"));
+    record.insert("unit_cost".into(), json!(100));
+    record.insert("unit_price".into(), json!(200));
+    let id = crate::crud::create(&conn, &biz, &uid, "inventory", &record).unwrap();
+    crate::crud::delete(&conn, &biz, &uid, "inventory", &id).unwrap();
+
+    let mut new_record = serde_json::Map::new();
+    new_record.insert("sku".into(), json!("NEW-001"));
+    new_record.insert("name".into(), json!("Discontinued Widget"));
+    new_record.insert("unit_cost".into(), json!(150));
+    new_record.insert("unit_price".into(), json!(250));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &new_record)
+        .expect("a soft-deleted item's name must be reusable by a brand-new item");
+}
+
+#[test]
 fn test_crud_update_applies_partial_patch() {
     let mut conn = test_db();
     let biz = test_business(&mut conn);

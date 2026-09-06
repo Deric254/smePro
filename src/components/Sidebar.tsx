@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ModuleListItem } from '../types';
+import type { MyCapabilities } from '../api';
 import type { Tab as AdminTab } from '../pages/AdminPanel';
 import { ADMIN_TABS } from '../pages/AdminPanel';
 import AccountMenu from './AccountMenu';
@@ -13,6 +14,7 @@ function initials(name: string) {
 
 export default function Sidebar({
   modules,
+  capabilities,
   selected,
   onSelect,
   businessName,
@@ -24,6 +26,7 @@ export default function Sidebar({
   onOpenAi,
 }: {
   modules: ModuleListItem[];
+  capabilities: MyCapabilities | null;
   selected: string | null;
   onSelect: (id: string) => void;
   businessName: string;
@@ -78,8 +81,26 @@ export default function Sidebar({
     onCloseMobile?.();
   }
 
-  const enabledModules = modules.filter((m) => m.enabled);
+  // THE ACTUAL FIX Deric asked for: `enabledModules` used to be every
+  // module the BUSINESS has turned on, shown to every signed-in user
+  // regardless of their own role's actual access to it — a Staff
+  // account with zero permissions on Accounting still saw it listed
+  // here. Narrowed to the ones `capabilities.readable_modules` (a real
+  // `rbac::is_allowed(..., "read")` check per module, computed
+  // server-side — see api.ts's own comment on getMyCapabilities) says
+  // this specific person can actually open.
+  //
+  // `capabilities === null` — not yet loaded, or the fetch failed —
+  // means treat every gated item below as NOT permitted, not as
+  // permitted-by-default: a permission check that hasn't run yet must
+  // never fail open into showing something it hasn't actually cleared.
+  const readableModuleIds = new Set(capabilities?.readable_modules ?? []);
+  const enabledModules = modules.filter((m) => m.enabled && readableModuleIds.has(m.id));
   const inventoryEnabled = modules.some((m) => m.id === 'inventory' && m.enabled);
+  const canSell = capabilities?.can_sell ?? false;
+  const canStocktake = inventoryEnabled && (capabilities?.can_stocktake ?? false);
+  const canSeeReports = enabledModules.length > 0;
+  const canSeeAdmin = capabilities?.is_admin_tier ?? false;
   // Collapsing a group no longer forces its active child to stay
   // visible (see Sidebar changelog) — so the header itself carries
   // the "something in here is active" signal instead, via bold/color,
@@ -111,21 +132,23 @@ export default function Sidebar({
           <span>Home</span>
         </button>
 
-        <button
-          onClick={() => select('__pos__')}
-          style={{ ...styles.item, ...(selected === '__pos__' ? styles.itemActive : {}) }}
-        >
-          <span
-            className="stamp-badge"
-            style={{
-              width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
-              color: selected === '__pos__' ? 'var(--stamp)' : 'var(--ink-faint)',
-            }}
+        {canSell && (
+          <button
+            onClick={() => select('__pos__')}
+            style={{ ...styles.item, ...(selected === '__pos__' ? styles.itemActive : {}) }}
           >
-            $
-          </span>
-          <span>Sell</span>
-        </button>
+            <span
+              className="stamp-badge"
+              style={{
+                width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
+                color: selected === '__pos__' ? 'var(--stamp)' : 'var(--ink-faint)',
+              }}
+            >
+              $
+            </span>
+            <span>Sell</span>
+          </button>
+        )}
 
         <button
           onClick={() => select('__customers__')}
@@ -143,7 +166,7 @@ export default function Sidebar({
           <span>Customers</span>
         </button>
 
-        {inventoryEnabled && (
+        {canStocktake && (
           <button
             onClick={() => select('__stocktake__')}
             style={{ ...styles.item, ...(selected === '__stocktake__' ? styles.itemActive : {}) }}
@@ -161,21 +184,23 @@ export default function Sidebar({
           </button>
         )}
 
-        <button
-          onClick={() => select('__reports__')}
-          style={{ ...styles.item, ...(selected === '__reports__' ? styles.itemActive : {}) }}
-        >
-          <span
-            className="stamp-badge"
-            style={{
-              width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
-              color: selected === '__reports__' ? 'var(--stamp)' : 'var(--ink-faint)',
-            }}
+        {canSeeReports && (
+          <button
+            onClick={() => select('__reports__')}
+            style={{ ...styles.item, ...(selected === '__reports__' ? styles.itemActive : {}) }}
           >
-            %
-          </span>
-          <span>Reports</span>
-        </button>
+            <span
+              className="stamp-badge"
+              style={{
+                width: '1.9rem', height: '1.9rem', fontSize: '0.72rem',
+                color: selected === '__reports__' ? 'var(--stamp)' : 'var(--ink-faint)',
+              }}
+            >
+              %
+            </span>
+            <span>Reports</span>
+          </button>
+        )}
 
         <button
           onClick={() => { onOpenAi(); onCloseMobile?.(); }}
@@ -218,29 +243,33 @@ export default function Sidebar({
           </>
         )}
 
-        <button onClick={toggleAdmin} style={{ ...styles.groupHeader, ...(adminHasActive ? styles.groupHeaderActive : {}) }}>
-          <span style={{ transform: adminOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s ease', display: 'inline-block', fontSize: '0.7rem' }}>▶</span>
-          <span>Admin</span>
-        </button>
+        {canSeeAdmin && (
+          <>
+            <button onClick={toggleAdmin} style={{ ...styles.groupHeader, ...(adminHasActive ? styles.groupHeaderActive : {}) }}>
+              <span style={{ transform: adminOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s ease', display: 'inline-block', fontSize: '0.7rem' }}>▶</span>
+              <span>Admin</span>
+            </button>
 
-        {adminOpen && ADMIN_TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => selectAdminTab(t.id)}
-            style={{ ...styles.item, ...styles.subItem, ...(selected === '__admin__' && adminTab === t.id ? styles.itemActive : {}) }}
-          >
-            <span
-              className="stamp-badge"
-              style={{
-                width: '1.7rem', height: '1.7rem', fontSize: '0.65rem',
-                color: selected === '__admin__' && adminTab === t.id ? 'var(--stamp)' : 'var(--ink-faint)',
-              }}
-            >
-              {initials(t.label)}
-            </span>
-            <span>{t.label}</span>
-          </button>
-        ))}
+            {adminOpen && ADMIN_TABS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => selectAdminTab(t.id)}
+                style={{ ...styles.item, ...styles.subItem, ...(selected === '__admin__' && adminTab === t.id ? styles.itemActive : {}) }}
+              >
+                <span
+                  className="stamp-badge"
+                  style={{
+                    width: '1.7rem', height: '1.7rem', fontSize: '0.65rem',
+                    color: selected === '__admin__' && adminTab === t.id ? 'var(--stamp)' : 'var(--ink-faint)',
+                  }}
+                >
+                  {initials(t.label)}
+                </span>
+                <span>{t.label}</span>
+              </button>
+            ))}
+          </>
+        )}
       </div>
 
       <div style={styles.footer}>

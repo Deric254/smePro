@@ -194,16 +194,17 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
 // Gross profit KPI — same "one card, distilled to the single figure
 // that matters most" shape as DebtStandingKpi just below.
 //
-// `has_cost_data` gets its own explicit warning banner rather than
-// just showing "100% margin" silently: a business that's only ever
-// made sales predating this feature (see db_migrations.rs's v17 doc
-// comment — cost_at_sale is permanently 0 on those) would otherwise
-// see a margin number that LOOKS like a real, great result but is
-// actually just "no cost was ever recorded for any of this," which is
-// exactly the kind of confidently-wrong number this whole feature
-// exists to not produce.
+// THE ACTUAL FIX Deric asked for: this used to hide behind a single
+// boolean (`has_cost_data`) that only ever warned when cost data was
+// COMPLETELY absent — a business with, say, 2 real-cost sales out of
+// 50 got no warning at all, because "some" was enough to satisfy a
+// flag that couldn't distinguish "some" from "all". Now it always
+// shows the real fraction whenever coverage isn't complete, so an
+// 87.5% margin sitting on top of 4 out of 50 real-cost sales is
+// visibly what it is, not a number that looks fully earned.
 function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; currency: string; onOpen: () => void }) {
   const isProfit = data.profit_cents >= 0;
+  const missingCostCount = data.sales_count - data.cost_bearing_sales_count;
   return (
     <button
       className="card"
@@ -227,9 +228,9 @@ function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; 
             : `${data.margin_pct.toFixed(1)}% margin, across ${data.sales_count} sale${data.sales_count === 1 ? '' : 's'}`}
         </div>
       </div>
-      {!data.has_cost_data && data.sales_count > 0 ? (
-        <div style={{ textAlign: 'right', flexShrink: 0, fontSize: '0.78rem', color: 'var(--ink-soft)', maxWidth: '9rem' }}>
-          No cost data yet — margin will fill in as new sales happen
+      {missingCostCount > 0 ? (
+        <div style={{ textAlign: 'right', flexShrink: 0, fontSize: '0.78rem', color: 'var(--ink-soft)', maxWidth: '10rem' }}>
+          Only {data.cost_bearing_sales_count} of {data.sales_count} sales have real cost data — margin is based on those only
         </div>
       ) : null}
     </button>

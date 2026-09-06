@@ -27,7 +27,7 @@ fn test_repack_a_dozen_eggs_into_singles_produces_the_exact_correct_cost() {
     let (uid, _) = test_owner(&mut conn, &biz);
 
     let dozen_id = make_inventory_item(&conn, &biz, "EGGS-DOZEN", "Eggs (dozen)", 5, 300, 400);
-    let single_id = make_inventory_item(&conn, &biz, "EGGS-SINGLE", "Eggs (single)", 0, 0, 20);
+    let single_id = make_inventory_item(&conn, &biz, "EGGS-SINGLE", "Eggs (single)", 0, 0, 35);
 
     let req = crate::repack::RepackRequest {
         source_record_id: dozen_id.clone(),
@@ -49,10 +49,7 @@ fn test_repack_a_dozen_eggs_into_singles_produces_the_exact_correct_cost() {
     let single = get_item(&conn, &biz, &uid, &single_id);
     assert_eq!(single["quantity"].as_i64().unwrap(), 12);
     assert_eq!(single["unit_cost"].as_i64().unwrap(), 25);
-    // Selling each at 20 against a cost of 25 would be a real loss —
-    // exactly the kind of thing correct cost tracking is supposed to
-    // let a shopkeeper actually notice, rather than hide.
-    assert!(single["unit_price"].as_i64().unwrap() < single["unit_cost"].as_i64().unwrap());
+    assert_eq!(single["unit_price"].as_i64().unwrap(), 35, "price untouched by repack — it was already comfortably above the real cost");
 }
 
 #[test]
@@ -112,6 +109,43 @@ fn test_repack_cannot_consume_more_than_available_stock() {
     // partially apply.
     let dozen = get_item(&conn, &biz, &uid, &dozen_id);
     assert_eq!(dozen["quantity"].as_i64().unwrap(), 2);
+}
+
+#[test]
+fn test_repack_rejects_a_result_that_would_price_the_target_below_cost() {
+    // THE ACTUAL FIX Deric asked for (restored — see repack.rs's own
+    // doc comment on why this was briefly not enforced, and why it is
+    // again now): a repack that would leave the target costing more
+    // than it currently sells for must be rejected outright, not
+    // silently applied.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    // 300 consumed / 12 produced = 25 per single egg — priced at only
+    // 20, which would be a real loss.
+    let dozen_id = make_inventory_item(&conn, &biz, "EGGS-D3", "Eggs (dozen)", 5, 300, 400);
+    let single_id = make_inventory_item(&conn, &biz, "EGGS-S3", "Eggs (single)", 0, 0, 20);
+
+    let req = crate::repack::RepackRequest {
+        source_record_id: dozen_id.clone(),
+        source_quantity: 1,
+        target_record_id: Some(single_id.clone()),
+        target_quantity_produced: 12,
+        new_target_name: None,
+        new_target_unit_price: None,
+        notes: None,
+    };
+    let result = crate::repack::repack(&mut conn, &biz, &uid, req);
+    assert!(result.is_err(), "a repack that would price the target below its own cost must be rejected");
+
+    // Nothing should have moved — a rejected repack must not
+    // partially apply, exactly like the stock-insufficiency case above.
+    let dozen = get_item(&conn, &biz, &uid, &dozen_id);
+    assert_eq!(dozen["quantity"].as_i64().unwrap(), 5, "source stock must be untouched by a rejected repack");
+    let single = get_item(&conn, &biz, &uid, &single_id);
+    assert_eq!(single["quantity"].as_i64().unwrap(), 0, "target stock must be untouched by a rejected repack");
+    assert_eq!(single["unit_cost"].as_i64().unwrap(), 0, "target cost must be untouched by a rejected repack");
 }
 
 #[test]

@@ -113,6 +113,200 @@ fn test_checkout_of_a_repacked_item_costs_the_sale_correctly() {
 }
 
 #[test]
+fn test_checkout_of_a_blended_repack_costs_the_sale_at_the_true_weighted_average() {
+    // Same proof as the test above, for the harder case: the target
+    // already had its own stock at its own cost BEFORE the repack (see
+    // repack_tests.rs's test_repack_blends_with_existing_target_stock_
+    // at_a_different_cost, which this reuses the exact numbers from).
+    // A sale after a blended repack must cost at the real blended
+    // figure — not the pre-repack cost, and not the source's own cost
+    // either.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let sack_id = seed_inventory_item(&conn, &biz, "RICE-SACK-2", "Rice (10kg sack)", 3, 1000, 1500);
+    let loose_id = seed_inventory_item(&conn, &biz, "RICE-LOOSE-2", "Rice (loose kg)", 5, 90, 120);
+
+    let repack_req = crate::repack::RepackRequest {
+        source_record_id: sack_id,
+        source_quantity: 1,
+        target_record_id: Some(loose_id.clone()),
+        target_quantity_produced: 10,
+        new_target_name: None,
+        new_target_unit_price: None,
+        notes: None,
+    };
+    crate::repack::repack(&mut conn, &biz, &uid, repack_req).unwrap();
+
+    // (5*90 + 1*1000) / 15 = 96.67 -> 97 rounded, same as repack_tests.rs.
+    let inv_after = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let loose_after = inv_after.iter().find(|r| r["id"] == json!(loose_id)).unwrap();
+    assert_eq!(loose_after["unit_cost"], json!(97));
+
+    let req = crate::pos::CheckoutRequest {
+        items: vec![crate::pos::CartItem { inventory_record_id: loose_id, quantity: 3 }],
+        payment_method: Some("Cash".into()),
+        customer: None,
+        customer_phone: None,
+        allow_oversell: false,
+        on_credit: false,
+        due_date: None,
+    };
+    crate::pos::checkout(&mut conn, &biz, &uid, req).unwrap();
+
+    let sales = crate::crud::list(&conn, &biz, &uid, "sales", None, 50, 0).unwrap();
+    let sale = sales.iter().find(|r| r["item_name"] == json!("Rice (loose kg)")).unwrap();
+    assert_eq!(sale["cost_at_sale"], json!(97 * 3), "must use the real blended cost, not the pre-repack 90 or the source's 1000");
+}
+
+#[test]
+fn test_checkout_after_a_two_level_repack_chain_costs_correctly() {
+    // Deric's exact worry, pushed one level further: repack A into B,
+    // then repack B into C, then sell C. The cost basis must survive
+    // BOTH hops intact — nothing lost, nothing invented, at either
+    // step — with zero special-casing for "this source was itself
+    // repacked" anywhere in checkout() or repack() (there isn't any;
+    // this test is what proves that's actually safe).
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    // 1kg bag, bought for 500 cents.
+    let bag_id = seed_inventory_item(&conn, &biz, "SUGAR-1KG", "Sugar (1kg)", 1, 500, 800);
+    // Repacked into 10 x 100g bags.
+    let bag100_id = seed_inventory_item(&conn, &biz, "SUGAR-100G", "Sugar (100g)", 0, 0, 90);
+    // Then repacked AGAIN, one of those 100g bags split into 4 sachets.
+    let sachet_id = seed_inventory_item(&conn, &biz, "SUGAR-SACHET", "Sugar (sachet)", 0, 0, 30);
+
+    crate::repack::repack(&mut conn, &biz, &uid, crate::repack::RepackRequest {
+        source_record_id: bag_id,
+        source_quantity: 1,
+        target_record_id: Some(bag100_id.clone()),
+        target_quantity_produced: 10,
+        new_target_name: None,
+        new_target_unit_price: None,
+        notes: None,
+    }).unwrap();
+    // 500 / 10 = 50 per 100g bag.
+    let inv_1 = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(inv_1.iter().find(|r| r["id"] == json!(bag100_id)).unwrap()["unit_cost"], json!(50));
+
+    crate::repack::repack(&mut conn, &biz, &uid, crate::repack::RepackRequest {
+        source_record_id: bag100_id,
+        source_quantity: 1,
+        target_record_id: Some(sachet_id.clone()),
+        target_quantity_produced: 4,
+        new_target_name: None,
+        new_target_unit_price: None,
+        notes: None,
+    }).unwrap();
+    // 50 / 4 = 12.5 -> rounds to 13 (repack.rs rounds up, per its own
+    // "never silently lose value" rule) or 12 depending on rounding
+    // direction — read the real value back rather than assume, then
+    // assert the sale matches THAT, since the point of this test is
+    // the sale matching Inventory, not re-deriving repack's own
+    // rounding rule a second time.
+    let inv_2 = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let sachet_cost = inv_2.iter().find(|r| r["id"] == json!(sachet_id)).unwrap()["unit_cost"].as_i64().unwrap();
+    assert!(sachet_cost > 0, "the cost basis must have survived two repack hops, not landed on 0");
+
+    let req = crate::pos::CheckoutRequest {
+        items: vec![crate::pos::CartItem { inventory_record_id: sachet_id, quantity: 1 }],
+        payment_method: Some("Cash".into()),
+        customer: None,
+        customer_phone: None,
+        allow_oversell: false,
+        on_credit: false,
+        due_date: None,
+    };
+    crate::pos::checkout(&mut conn, &biz, &uid, req).unwrap();
+
+    let sales = crate::crud::list(&conn, &biz, &uid, "sales", None, 50, 0).unwrap();
+    let sale = sales.iter().find(|r| r["item_name"] == json!("Sugar (sachet)")).unwrap();
+    assert_eq!(sale["cost_at_sale"], json!(sachet_cost), "must cost the sale at exactly what two repack hops actually produced");
+}
+
+#[test]
+fn test_repacking_to_a_loss_is_rejected_so_no_such_sale_can_ever_happen() {
+    // THE ACTUAL FIX Deric asked for (restored — see repack.rs's own
+    // doc comment): a repack that would leave the target costing more
+    // than it currently sells for is now rejected outright, closing
+    // off what used to be a real way an item could end up sellable at
+    // a loss. This replaces an earlier version of this test that
+    // proved the opposite (that such a sale would correctly show a
+    // loss) — that scenario can no longer occur through this path at
+    // all, so there's nothing left to observe downstream in Sales.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    // Expensive source, priced-too-low target — 500 consumed, split
+    // into 4, so cost would land at 125 each, above the 100 selling
+    // price already set on the target.
+    let source_id = seed_inventory_item(&conn, &biz, "SPICE-BULK", "Spice (bulk)", 1, 500, 700);
+    let target_id = seed_inventory_item(&conn, &biz, "SPICE-PACK", "Spice (small pack)", 0, 0, 100);
+
+    let result = crate::repack::repack(&mut conn, &biz, &uid, crate::repack::RepackRequest {
+        source_record_id: source_id,
+        source_quantity: 1,
+        target_record_id: Some(target_id.clone()),
+        target_quantity_produced: 4,
+        new_target_name: None,
+        new_target_unit_price: None,
+        notes: None,
+    });
+    assert!(result.is_err(), "must reject a repack that would price the target below its own cost");
+
+    // Nothing moved — the target is still exactly as it was, so it
+    // can't be sold at the (never-applied) loss cost either.
+    let inv = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let target = inv.iter().find(|r| r["id"] == json!(target_id)).unwrap();
+    assert_eq!(target["unit_cost"], json!(0));
+    assert_eq!(target["quantity"], json!(0));
+}
+
+#[test]
+fn test_checkout_rejects_selling_an_item_below_its_own_cost() {
+    // THE ACTUAL FIX Deric asked for: "the system must ensure no
+    // possibility of selling at a loss." Every write that can SET an
+    // item's cost or price (crud::create, crud::update, repack,
+    // receiving) already refuses to leave price under cost — but
+    // checkout is the literal moment "selling" happens, so it holds
+    // itself to the same rule directly too, as the last line of
+    // defense rather than relying only on those upstream guards having
+    // done their job. Constructed via seed_inventory_item(), which
+    // (unlike crud::create()) bypasses the create-time guard on
+    // purpose — the point here is proving checkout() ALSO catches this
+    // on its own, not just proving the normal write paths prevent it
+    // from happening in the first place.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let inv_id = seed_inventory_item(&conn, &biz, "MISPRICED-001", "Misprized Item", 10, 500, 300);
+
+    let req = crate::pos::CheckoutRequest {
+        items: vec![crate::pos::CartItem { inventory_record_id: inv_id.clone(), quantity: 1 }],
+        payment_method: Some("Cash".into()),
+        customer: None,
+        customer_phone: None,
+        allow_oversell: false,
+        on_credit: false,
+        due_date: None,
+    };
+    let result = crate::pos::checkout(&mut conn, &biz, &uid, req);
+    assert!(result.is_err(), "checkout must refuse to sell an item priced below its own cost");
+
+    // Nothing should have moved — stock untouched, no sale recorded.
+    let inv = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let item = inv.iter().find(|r| r["id"] == json!(inv_id)).unwrap();
+    assert_eq!(item["quantity"], json!(10), "stock must be untouched by a rejected sale");
+    let sales = crate::crud::list(&conn, &biz, &uid, "sales", None, 50, 0).unwrap();
+    assert_eq!(sales.len(), 0, "no sale record must be created for a rejected checkout");
+}
+
+#[test]
 fn test_checkout_auto_generates_invoice() {
     // THE BEHAVIOR THIS GUARDS: every completed order gets a real
     // invoice automatically (see invoice::create_invoice_for_order),

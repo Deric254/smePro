@@ -14,7 +14,8 @@ import Sidebar from './components/Sidebar';
 import AiFloatingButton from './components/AiFloatingButton';
 import UpdateChecker from './components/UpdateChecker';
 import AndroidUpdateChecker from './components/AndroidUpdateChecker';
-import { hasSession, listModules, clearSession, getSetupStatus, getBusinessInfo, getSettings, logout } from './api';
+import { hasSession, listModules, clearSession, getSetupStatus, getBusinessInfo, getSettings, logout, getMyCapabilities } from './api';
+import type { MyCapabilities } from './api';
 import type { ModuleListItem } from './types';
 import { retryOnConnectionFailure } from './lib/retry';
 
@@ -23,6 +24,12 @@ export default function App() {
   const [needsSetup, setNeedsSetup] = useState(false);
   const [loggedIn, setLoggedIn] = useState(hasSession());
   const [modules, setModules] = useState<ModuleListItem[]>([]);
+  // What THIS signed-in user can actually see/do, not what the
+  // business has enabled overall — see Sidebar.tsx for what this
+  // gates. Starts `null` (not yet known) rather than a default of "no
+  // access to anything," so the sidebar doesn't flash every nav item
+  // away and back again on every login while this is still loading.
+  const [capabilities, setCapabilities] = useState<MyCapabilities | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [businessName, setBusinessName] = useState('');
@@ -70,6 +77,12 @@ export default function App() {
       getSettings().then((s) => {
         document.documentElement.dataset.theme = s.theme && s.theme !== 'ledger' ? s.theme : '';
       }).catch(() => {}); // purely cosmetic (custom theme vs the default) — not worth retrying against the startup race the other three calls above guard against
+      retryOnConnectionFailure(() => getMyCapabilities()).then(setCapabilities).catch(() => {
+        // If this genuinely can't be loaded, Sidebar's own `capabilities
+        // === null` fallback (see its own comment) keeps every gated
+        // item hidden rather than guessing — a failed permission check
+        // must never fail open.
+      });
     }
   }, [loggedIn, loadModules]);
 
@@ -85,6 +98,7 @@ export default function App() {
     setLoggedIn(false);
     setSelected(null);
     setModules([]);
+    setCapabilities(null);
     document.documentElement.dataset.theme = '';
   }
 
@@ -116,6 +130,7 @@ export default function App() {
     <div style={{ display: 'flex' }}>
       <Sidebar
         modules={modules}
+        capabilities={capabilities}
         selected={selected}
         onSelect={setSelected}
         businessName={businessName || '…'}

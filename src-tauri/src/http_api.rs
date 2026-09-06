@@ -563,6 +563,14 @@ fn route(
             Err(e) => json_err(500, &e.to_string()),
         };
     }
+    // GET /auth/me/capabilities — see rbac::my_capabilities for the
+    // reasoning; this route is just that function, serialized.
+    if parts.as_slice() == ["auth", "me", "capabilities"] && *method == Method::Get {
+        return match rbac::my_capabilities(conn, &business_id, &user_id) {
+            Ok(caps) => ApiResponse::Json(200, json!(caps)),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
     // ---- Backup & restore — Owner-only, real disaster recovery. ----
     if parts.as_slice() == ["admin", "backup"] && *method == Method::Post {
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
