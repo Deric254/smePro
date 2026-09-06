@@ -88,6 +88,13 @@ fn test_readable_modules_excludes_a_module_the_business_has_disabled() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
+    // test_business seeds the "retail" preset, which doesn't include
+    // "hr" (see onboarding::preset_modules) — enable it first so
+    // there's actually a row to disable; the point of this test is the
+    // disabled-vs-readable interaction, not which module id is used.
+    let hr_json = crate::module_json("hr").expect("hr module definition must be embedded");
+    crate::business_panel::enable_module(&mut conn, &biz, hr_json).unwrap();
+
     crate::business_panel::disable_module(&conn, &biz, "hr").unwrap();
 
     let caps = crate::rbac::my_capabilities(&conn, &biz, &uid).unwrap();

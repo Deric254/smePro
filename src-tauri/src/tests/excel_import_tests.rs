@@ -492,7 +492,12 @@ fn test_purchasing_import_creates_every_row_even_when_supplier_repeats() {
         inv_record.insert("name".into(), json!(name));
         inv_record.insert("quantity".into(), json!(0));
         inv_record.insert("unit_cost".into(), json!(500));
-        inv_record.insert("unit_price".into(), json!(800));
+        // Priced above the 1000-cent cost every receive below (prior
+        // order and the 3-row import alike) brings in — this test is
+        // about every row creating its own order, not about the
+        // separate "never receive below cost" guard in receiving.rs,
+        // so the fixture price just needs to clear that bar.
+        inv_record.insert("unit_price".into(), json!(1200));
         crate::crud::create(&conn, &biz, &uid, "inventory", &inv_record).unwrap();
     }
 
@@ -566,7 +571,14 @@ fn test_purchasing_po_number_generated_sequentially_and_usable_for_correction() 
         inv_record.insert("name".into(), json!(name));
         inv_record.insert("quantity".into(), json!(0));
         inv_record.insert("unit_cost".into(), json!(400));
-        inv_record.insert("unit_price".into(), json!(600));
+        // Priced above the highest per-unit cost either item is
+        // actually received at below (gadget tops out at 120000 cents
+        // — see the "1200" cell and the corrected-value assertion
+        // later in this test) — this test exercises po_number
+        // sequencing/correction, not receiving.rs's separate "never
+        // receive below cost" guard, so the fixture price just needs
+        // to clear that bar.
+        inv_record.insert("unit_price".into(), json!(150000));
         crate::crud::create(&conn, &biz, &uid, "inventory", &inv_record).unwrap();
     }
 
