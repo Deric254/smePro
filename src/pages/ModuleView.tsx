@@ -572,8 +572,23 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // wall of `{"description":...}` text, and — being far longer than
   // every other column — is also what was forcing this table into
   // horizontal scroll on an otherwise perfectly ordinary-width screen.
+  // Invoice-only column collapse: customer_email/customer_phone fold into
+  // the existing `customer` cell, and tax_rate folds into the existing
+  // `tax_amount` cell (rendered as "rate% · amount"). No field is dropped
+  // or renamed in the schema/data — see the `customer`/`tax_amount` cases
+  // in the table body below, which render the combined content. This is
+  // scoped to moduleId === 'invoice' only, so every other module's table
+  // (and this module's own create/edit form, which still lists every
+  // field via schema.fields directly) is untouched.
   const columns = useMemo(
-    () => schema?.fields.map((f) => f.name).filter((n) => n !== 'source_order_id' && !(moduleId === 'invoice' && n === 'items_json')) ?? [],
+    () =>
+      schema?.fields
+        .map((f) => f.name)
+        .filter(
+          (n) =>
+            n !== 'source_order_id' &&
+            !(moduleId === 'invoice' && (n === 'items_json' || n === 'customer_email' || n === 'customer_phone' || n === 'tax_rate'))
+        ) ?? [],
     [schema, moduleId]
   );
   const canDelete = schema?.my_permissions.includes('delete');
@@ -683,7 +698,11 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             <table style={styles.table}>
               <thead>
                 <tr>
-                  {columns.map((c) => <th key={c} style={styles.th}>{c.replace(/_/g, ' ')}</th>)}
+                  {columns.map((c) => (
+                    <th key={c} style={styles.th}>
+                      {moduleId === 'invoice' && c === 'tax_amount' ? 'tax' : c.replace(/_/g, ' ')}
+                    </th>
+                  ))}
                   {(canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || (moduleId === 'inventory' && inventoryCanRepack) || canSettle) && moduleId !== 'invoice' && <th style={styles.th} />}
                 </tr>
               </thead>
@@ -695,7 +714,11 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                   <tr key={r.id}>
                     {columns.map((c) => (
                       <td key={c} className={typeof r[c] === 'number' ? 'mono' : ''} style={styles.td}>
-                        {formatCell(r[c], schema!.fields.find((f) => f.name === c)?.type, businessCurrency)}
+                        {moduleId === 'invoice' && c === 'customer'
+                          ? renderInvoiceCustomerCell(r)
+                          : moduleId === 'invoice' && c === 'tax_amount'
+                          ? renderInvoiceTaxCell(r, businessCurrency)
+                          : formatCell(r[c], schema!.fields.find((f) => f.name === c)?.type, businessCurrency)}
                       </td>
                     ))}
                     {moduleId === 'invoice' && (
@@ -1036,6 +1059,35 @@ function formatCell(v: unknown, fieldType?: string, currency?: string) {
   if (v === null || v === undefined) return <span style={{ color: 'var(--ink-faint)' }}>—</span>;
   if (fieldType === 'money' && typeof v === 'number') return formatMoney(v, currency ?? 'USD');
   return String(v);
+}
+
+// Invoice records table only: combines customer + customer_email +
+// customer_phone into one cell. All three values are still exactly what's
+// stored on the record — nothing is dropped, just laid out compactly
+// (name on top, contact details smaller underneath, each only if present).
+function renderInvoiceCustomerCell(r: Record_) {
+  const name = r.customer;
+  const email = typeof r.customer_email === 'string' ? r.customer_email : '';
+  const phone = typeof r.customer_phone === 'string' ? r.customer_phone : '';
+  const contact = [email, phone].filter(Boolean).join(' · ');
+  return (
+    <div>
+      <div>{name === null || name === undefined || name === '' ? <span style={{ color: 'var(--ink-faint)' }}>—</span> : String(name)}</div>
+      {contact && <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>{contact}</div>}
+    </div>
+  );
+}
+
+// Invoice records table only: combines tax_rate + tax_amount into one
+// cell ("rate% · amount"). Same underlying values as the two separate
+// fields would have shown — just one column instead of two.
+function renderInvoiceTaxCell(r: Record_, currency: string) {
+  const rate = typeof r.tax_rate === 'number' ? r.tax_rate : null;
+  const amount = typeof r.tax_amount === 'number' ? r.tax_amount : null;
+  if (rate === null && amount === null) return <span style={{ color: 'var(--ink-faint)' }}>—</span>;
+  const rateText = rate !== null ? `${rate}%` : null;
+  const amountText = amount !== null ? formatMoney(amount, currency ?? 'USD') : null;
+  return <span>{[rateText, amountText].filter(Boolean).join(' · ')}</span>;
 }
 
 function PurchaseItemSelector({ items, value, required, onChange }: { items: Record_[]; value: string; required?: boolean; onChange: (id: string, name: string) => void }) {
