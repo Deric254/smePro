@@ -389,10 +389,22 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
     // not even the source's stock — rather than leaving the source
     // decremented with no matching target increase.
     if target_unit_price < target_new_unit_cost {
+        // Format for the human reading this error — same fix as
+        // pos.rs's "cannot sell" message: `target_new_unit_cost`/
+        // `target_unit_price` stay raw integer cents everywhere else
+        // in this function, but printing those raw cents straight
+        // into the message (e.g. "11000" instead of "110.00") was
+        // exactly the bug — this message just never went through
+        // money::format_money like the others already did.
+        let business_currency: String = tx
+            .query_row("SELECT currency FROM businesses WHERE id = ?1", params![business_id], |r| r.get(0))
+            .unwrap_or_else(|_| "USD".to_string());
+        let cost_display = crate::money::format_money(target_new_unit_cost, &business_currency);
+        let price_display = crate::money::format_money(target_unit_price, &business_currency);
         return Err(anyhow!(
-            "this repack would leave '{target_name}' costing {target_new_unit_cost} per unit \
-             while it's still priced at {target_unit_price} — raise the target's price to at \
-             least {target_new_unit_cost}, or adjust the repack quantities, before continuing"
+            "this repack would leave '{target_name}' costing {cost_display} per unit \
+             while it's still priced at {price_display} — raise the target's price to at \
+             least {cost_display}, or adjust the repack quantities, before continuing"
         ));
     }
 

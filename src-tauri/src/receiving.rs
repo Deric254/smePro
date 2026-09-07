@@ -228,10 +228,21 @@ pub(crate) fn receive_in_tx(
     // been attempted, rather than leaving stock partially updated with
     // no matching price fix.
     if current_unit_price < new_unit_cost {
+        // Format for the human reading this error — same fix as
+        // pos.rs's "cannot sell" message: `current_unit_price`/
+        // `new_unit_cost` stay raw integer cents everywhere else in
+        // this function, but printing those raw cents straight into
+        // the message (previously "11000" instead of "110.00") was
+        // exactly this bug, just in Receiving instead of Repack.
+        let business_currency: String = tx
+            .query_row("SELECT currency FROM businesses WHERE id = ?1", params![business_id], |r| r.get(0))
+            .unwrap_or_else(|_| "USD".to_string());
+        let cost_display = crate::money::format_money(new_unit_cost, &business_currency);
+        let price_display = crate::money::format_money(current_unit_price, &business_currency);
         return Err(anyhow!(
-            "receiving this would leave '{inventory_name}' costing {new_unit_cost} per unit while \
-             it's still priced at {current_unit_price} — raise the item's price to at least \
-             {new_unit_cost} in Inventory first, then receive this order"
+            "receiving this would leave '{inventory_name}' costing {cost_display} per unit while \
+             it's still priced at {price_display} — raise the item's price to at least \
+             {cost_display} in Inventory first, then receive this order"
         ));
     }
 
