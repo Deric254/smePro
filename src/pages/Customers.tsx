@@ -105,10 +105,6 @@ export default function Customers() {
   return (
     <div>
       <h1>Customers</h1>
-      <p style={{ color: 'var(--ink-soft)', fontSize: '0.85rem', marginTop: '-0.6rem' }}>
-        Anyone who gave a name or phone at checkout — sorted by how much they've spent with you.
-        Sales where nobody offered their details stay anonymous, same as always.
-      </p>
 
       {customers.length > 0 && (
         <div className="card" style={{ marginBottom: '1rem', padding: '0.9rem 1rem', display: 'inline-block' }}>

@@ -230,6 +230,19 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         record.insert("unit_price".into(), json!(unit_price));
         record.insert("order_id".into(), json!(order_id));
         record.insert("cost_at_sale".into(), json!(cost_total));
+        // THE BUG THIS FIXES: `sale_date` is a real, declared field on
+        // the Sales schema (sales.json) that nothing ever actually
+        // wrote to — not checkout, not service_sale.rs, not Excel
+        // import. Every sale ever made through checkout had it
+        // silently blank. `created_at` (set automatically by
+        // crud::insert_validated_record below) already records exactly
+        // when this happened, but it's a full timestamp, not the same
+        // thing as this field's own documented purpose — a plain date
+        // the business can show, filter, or edit directly without
+        // pulling apart a timestamp. Same `today` computation
+        // http_api.rs and debt_settlement.rs already use elsewhere in
+        // this codebase.
+        record.insert("sale_date".into(), json!(chrono::Utc::now().date_naive().to_string()));
         if let Some(c) = &req.customer {
             record.insert("customer".into(), json!(c));
         }
@@ -501,6 +514,8 @@ pub fn create_service_sale(conn: &mut Connection, business_id: &str, user_id: &s
         record.insert("revenue".into(), json!(line_total));
         record.insert("unit_price".into(), json!(line.unit_price));
         record.insert("order_id".into(), json!(order_id));
+        // Same fix as checkout()'s own record above — see its comment.
+        record.insert("sale_date".into(), json!(chrono::Utc::now().date_naive().to_string()));
         if let Some(c) = &req.customer {
             record.insert("customer".into(), json!(c));
         }

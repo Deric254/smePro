@@ -37,10 +37,6 @@ export default function ConnectToHost({ onConnected }: { onConnected: (address: 
     <div style={styles.wrap}>
       <div className="card" style={styles.card}>
         <h2 style={{ marginTop: 0 }}>Connect to your business</h2>
-        <p style={{ color: 'var(--ink-soft)', fontSize: '0.9rem' }}>
-          This device is set to connect to another device on your network instead of running its own copy.
-          On the host device, open Admin → Network to see the address to enter here.
-        </p>
         <form onSubmit={handleConnect}>
           <label>Host address</label>
           <input

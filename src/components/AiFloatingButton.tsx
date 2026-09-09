@@ -225,7 +225,7 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
           <div ref={bodyRef} style={styles.body}>
             {messages.length === 0 && (
               <div style={styles.hint}>
-                Ask things like "what's low on stock?" or "how were sales this month?" — answers are grounded in your actual data.
+                Ask a question about your business.
               </div>
             )}
             {messages.map((m, i) => (

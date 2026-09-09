@@ -109,8 +109,7 @@ export default function StockTakePage() {
         <>
           <div className="card" style={{ marginBottom: '1rem' }}>
             <p style={{ marginTop: 0, color: 'var(--ink-soft)', fontSize: '0.9rem' }}>
-              Start a count to reconcile physical stock against what the system has on record. You can count as
-              many or as few items as you have time for — anything left uncounted is untouched when you close.
+              Uncounted items stay untouched when you close.
             </p>
             <button className="btn btn-stamp" onClick={handleStart} disabled={starting}>
               {starting ? 'Starting…' : 'Start Stock Take'}

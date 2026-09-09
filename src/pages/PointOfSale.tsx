@@ -546,8 +546,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
           </div>
           {(customer.trim() || customerPhone.trim()) && (
             <div style={{ fontSize: '0.75rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
-              Saved to your customer list — see their full purchase history under Admin → Customers.
-              {!customerPhone.trim() && ' (Matched by name only, since no phone was given — less reliable than phone if another customer shares this name.)'}
+              Saved to your customer list.
             </div>
           )}
 

@@ -77,9 +77,6 @@ export default function Reports() {
   return (
     <div>
       <h2 style={{ marginTop: 0 }}>Reports</h2>
-      <p style={{ color: 'var(--ink-soft)', marginTop: '-0.4rem' }}>
-        Every report in the system, in one place — pick a section below to slice it by date, item, or customer.
-      </p>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.9rem', marginBottom: '1.6rem' }}>
         {grossProfit && (

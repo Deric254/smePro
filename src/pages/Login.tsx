@@ -340,8 +340,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
           <div style={styles.form}>
             <div style={{ color: 'var(--ok)', fontWeight: 600 }}>Password reset successfully.</div>
             <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-              You can now sign in with your new password. For your security, every device
-              previously signed in to this account has been signed out.
+              All devices have been signed out.
             </p>
             <button type="button" className="btn btn-stamp" style={{ width: '100%', justifyContent: 'center' }} onClick={() => switchMode('login')}>
               Back to sign in

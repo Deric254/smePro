@@ -246,8 +246,7 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
                   Backup staged successfully.
                 </div>
                 <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-                  Restart the app now to complete the restore. You'll be able to log in with
-                  your existing account right after.
+                  Restart now to finish restoring.
                 </p>
                 <button className="btn btn-stamp" type="button" style={{ width: '100%', justifyContent: 'center' }} onClick={handleRestartAfterRestore}>
                   Restart now

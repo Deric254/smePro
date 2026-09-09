@@ -791,11 +791,6 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         <div style={styles.overlay} onClick={() => setReceivingId(null)}>
           <div className="card" style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>Receive stock</h3>
-            <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-              Marks this purchase order received and adds the stock to Inventory, recalculating its weighted-average
-              cost. Leave the quantity blank to receive everything that was ordered, or enter a smaller number for a
-              partial delivery.
-            </p>
             <label>Quantity received (optional)</label>
             <input
               type="text"
@@ -821,8 +816,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
           <div className="card" style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>Repack / break bulk</h3>
             <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-              Converts stock from "{String(records.find((r) => r.id === repackSourceId)?.name ?? 'this item')}" into a
-              different retail unit — e.g. breaking a sack into loose kilogram bags.
+              Converting stock from "{String(records.find((r) => r.id === repackSourceId)?.name ?? 'this item')}".
             </p>
             <label>Produces (target item)</label>
             <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.4rem', fontSize: '0.85rem' }}>
@@ -875,12 +869,6 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                 </div>
               </div>
             )}
-            {repackTargetMode === 'new' && (
-              <p style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
-                A SKU is generated automatically. Cost isn't asked for here — it's calculated from what this
-                repack actually consumes.
-              </p>
-            )}
             <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.6rem' }}>
               <div style={{ flex: 1 }}>
                 <label>Quantity consumed</label>
@@ -914,14 +902,10 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             <h3 style={{ marginTop: 0 }}>Settle debt/credit</h3>
             {(() => {
               const r = records.find((rec) => rec.id === settlingId);
-              const isIncome = r?.direction === 'owed_to_business';
               return (
                 <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-                  Marks "{String(r?.party_name ?? 'this record')}" as settled and posts{' '}
-                  {formatMoney(Number(r?.amount ?? 0), businessCurrency)} to Bookkeeping as{' '}
-                  {isIncome ? 'income (money received)' : 'an expense (money paid out)'}, if Bookkeeping is enabled.
-                  This can't be undone from here — settling again once done isn't possible, to avoid posting the
-                  same amount twice.
+                  Settles "{String(r?.party_name ?? 'this record')}" for{' '}
+                  {formatMoney(Number(r?.amount ?? 0), businessCurrency)}. Can't be undone.
                 </p>
               );
             })()}
@@ -948,29 +932,9 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         <div style={styles.overlay} onClick={() => setShowExcelImport(false)}>
           <div className="card" style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>Import from Excel</h3>
-            {moduleId === 'inventory' ? (
+            {moduleId === 'purchasing' && (
               <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-                Download the template below to add new items — it has no quantity column, since a new
-                item always starts at zero stock. To do a stock take instead, use "Export to Excel" on
-                existing records, correct the counted quantities in that file, then reimport it; a row
-                whose SKU already exists will be rejected if it comes from the blank template.
-              </p>
-            ) : moduleId === 'purchasing' ? (
-              <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-                Download the template below to place new orders — every row becomes a brand new
-                purchase order with its own PO number, and is received immediately: stock lands in
-                Inventory and its cost is recalculated right away, no separate "Receive" click needed.
-                To correct a mistake afterward, use "Export to Excel" instead, fix that row, and reimport
-                it — matching is done by PO number, so the correction lands on the right order (note:
-                once an order has been received this way, its quantity and cost can no longer be changed
-                by reimporting, since Inventory has already been updated from the original figures — use
-                Repack or an Inventory stock take to adjust from there instead).
-              </p>
-            ) : (
-              <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-                Download the template below, fill it in (or export your existing records and edit them),
-                then upload it back here. Matching rows update the existing record instead of creating a
-                duplicate.
+                Received orders can't be corrected by reimporting — use Repack or a stock take instead.
               </p>
             )}
             <button className="btn btn-outline" onClick={handleDownloadTemplate} disabled={templateDownloading} style={{ marginBottom: '0.4rem' }}>
@@ -1471,7 +1435,6 @@ function NewInvoiceForm({ onCreated, onCancel }: { onCreated: () => void; onCanc
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem', paddingTop: '0.8rem', borderTop: '1px solid var(--paper-line)' }}>
         <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>
           Subtotal: <span className="mono">{formatMoney(subtotal, currency)}</span>
-          <span style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--ink-soft)', marginLeft: '0.5rem' }}>(tax applied automatically at your business's rate)</span>
         </div>
         <div style={{ display: 'flex', gap: '0.6rem' }}>
           <button type="button" className="btn btn-outline" onClick={onCancel}>Cancel</button>
@@ -1509,10 +1472,6 @@ function ForecastPanel({ moduleId, numericFields, businessCurrency }: { moduleId
   return (
     <div className="card" style={{ marginTop: '1rem' }}>
       <h3 style={{ marginTop: 0 }}>Forecast next period</h3>
-      <p style={{ fontSize: '0.82rem', color: 'var(--ink-soft)', marginTop: '-0.4rem' }}>
-        A plain-arithmetic projection from your own history — not a guess, not AI-invented. Needs a
-        few periods of real data behind it to mean anything.
-      </p>
       <div style={styles.reportControls}>
         <div>
           <label>Of</label>

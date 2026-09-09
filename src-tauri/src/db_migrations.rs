@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 21;
+const CURRENT_VERSION: i32 = 22;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -41,7 +41,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 19 { v19_refunds_sale_id_index(conn)?; }
     if current < 20 { v20_sales_order_id_index(conn)?; }
     if current < 21 { v21_add_can_view_reports(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 21, "bump this alongside the last `if current < N` check above");
+    if current < 22 { v22_backfill_sale_date(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 22, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -1412,6 +1413,37 @@ fn v21_add_can_view_reports(conn: &mut Connection) -> Result<()> {
         tx.execute("ALTER TABLE roles ADD COLUMN can_view_reports INTEGER NOT NULL DEFAULT 0", [])?;
     }
     tx.execute("INSERT INTO _schema_version (version) VALUES (21)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+// THE BUG THIS FIXES: `sale_date` (sales.json) was a real, declared
+// field that nothing ever wrote to — not checkout, not service sales,
+// not Excel import (see pos.rs's own fix, added alongside this
+// migration). Every sale made before that fix has it sitting blank.
+// This backfills it from `created_at`, which was always recorded
+// correctly — taking just the date portion of a real timestamp that
+// already exists is recovering a known fact, not guessing or
+// fabricating one; it's the exact same value checkout() would have
+// written at the time if the field had been wired up from the start.
+// Naturally idempotent with no extra guard needed: the WHERE clause
+// only ever matches rows that still need it, so running this twice
+// (e.g. via the schema-version-rollback pattern several tests use)
+// does nothing the second time.
+fn v22_backfill_sale_date(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    let table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_sales'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists == 1 {
+        tx.execute(
+            "UPDATE module_sales SET sale_date = date(created_at) WHERE sale_date IS NULL OR sale_date = ''",
+            [],
+        )?;
+    }
+    tx.execute("INSERT INTO _schema_version (version) VALUES (22)", [])?;
     tx.commit()?;
     Ok(())
 }

@@ -904,10 +904,6 @@ function BusinessTab({ onModulesChanged }: { onModulesChanged?: () => void }) {
 
       <div className="card" style={{ marginTop: '1.2rem' }}>
         <h3 style={{ marginTop: 0 }}>Additional modules</h3>
-        <p style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
-          Your business type enables a sensible starting set — any of these can be turned on
-          individually too, whether or not your type's preset included them.
-        </p>
         {loading ? (
           <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>Loading…</div>
         ) : (
@@ -1024,11 +1020,6 @@ function SettingsTab() {
 
       <div className="card" style={{ marginBottom: '1rem' }}>
         <h3 style={{ marginTop: 0 }}>Business type</h3>
-        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
-          Changes the sensible starting set of modules enabled for a business like this.
-          Doesn't remove or hide anything already in use — only adds modules that make
-          sense for the new type and aren't already on.
-        </p>
         <ErrorBox error={typeError} />
         {typeChangedModules && (
           <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.7rem' }}>
@@ -1053,10 +1044,6 @@ function SettingsTab() {
 
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Software updates</h3>
-        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
-          The app checks for updates automatically each time it starts. Use this if you want
-          to check right now instead of waiting for the next launch.
-        </p>
         <button className="btn btn-outline" onClick={checkForUpdates} disabled={updateStatus === 'checking'}>
           {updateStatus === 'checking' ? 'Checking…' : 'Check for updates now'}
         </button>
@@ -1174,21 +1161,13 @@ function BackupTab() {
     <div>
       <div className="card" style={{ marginBottom: '1rem' }}>
         <h3 style={{ marginTop: 0 }}>Back up your business</h3>
-        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
-          Downloads your entire business database — every record, every user, every setting —
-          as one file, still encrypted. Store it somewhere safe: a cloud drive, a USB stick,
-          anywhere other than only this computer. If this machine is ever lost, stolen, or its
-          disk fails, this file is how you get everything back.
-        </p>
         <ErrorBox error={error} />
         {downloaded && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.7rem' }}>Backup downloaded.</div>}
         <label style={{ display: 'block', marginBottom: '0.4rem' }}>
           Backup passphrase (at least 8 characters)
         </label>
         <p style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: 0, marginBottom: '0.5rem' }}>
-          Protects this specific file — not your login password. Anyone who ever gets hold of the
-          downloaded file cannot open it without this passphrase too. Write it down somewhere
-          separate from the file itself; there is no way to recover it if it's lost.
+          Can't be recovered if lost.
         </p>
         <input
           type="password"
@@ -1204,10 +1183,7 @@ function BackupTab() {
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Restore from a backup</h3>
         <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
-          <strong>This replaces everything currently in this app</strong> with what's in the
-          backup file — every record, every user, every setting reverts to exactly how it was
-          when that backup was made. Anything created since then is gone. Only do this if
-          that's really what you want.
+          <strong>This overwrites everything currently in this app.</strong>
         </p>
         <ErrorBox error={restoreError} />
 
@@ -1252,7 +1228,7 @@ function BackupTab() {
               Backup staged successfully.
             </div>
             <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-              The restore will finish the next time the app starts. Restart now to complete it.
+              Restart now to finish.
             </p>
             <button className="btn btn-stamp" onClick={handleRestartNow}>Restart now</button>
           </div>
@@ -1293,11 +1269,6 @@ function AuditLogTab() {
 
   return (
     <div>
-      <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', marginTop: 0 }}>
-        Every create, update, delete, and admin action anywhere in this app, automatically —
-        not something anyone has to remember to turn on. This is the full accountability
-        trail: who did what, and when.
-      </p>
       <div style={{ marginBottom: '0.8rem' }}>
         <label>Filter by module</label>
         <select value={moduleFilter} onChange={(e) => setModuleFilter(e.target.value)} style={{ width: 'auto', marginLeft: '0.6rem' }}>
@@ -1414,9 +1385,7 @@ function NotificationsTab() {
       <div className="card" style={{ marginBottom: '1rem' }}>
         <h3 style={{ marginTop: 0 }}>Send a message</h3>
         <p style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: 0 }}>
-          Sends a real WhatsApp or SMS message via this business's configured Twilio account.
-          Without one configured, messages are logged here but not actually delivered — ask
-          whoever set up this install whether that's connected yet.
+          Requires Twilio configured, or messages are only logged.
         </p>
         <ErrorBox error={error} />
         {sent && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.7rem' }}>Sent.</div>}
@@ -1444,11 +1413,6 @@ function NotificationsTab() {
 
       <div className="card" style={{ marginBottom: '1rem' }}>
         <h3 style={{ marginTop: 0 }}>Send low-stock alert</h3>
-        <p style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: 0 }}>
-          Sends a message to the recipient above listing every item currently at or below its reorder
-          level, across all your modules — the same data the Dashboard and AI assistant already use, so
-          there's nothing else to fill in beyond the channel and recipient above.
-        </p>
         {lowStockError && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginBottom: '0.6rem' }}>{lowStockError}</div>}
         {lowStockSent && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.6rem' }}>Sent.</div>}
         <button className="btn btn-outline" onClick={handleSendLowStock} disabled={sendingLowStock}>
@@ -1559,12 +1523,6 @@ function AiSettingsTab() {
     <div>
       <div className="card" style={{ marginBottom: '1rem' }}>
         <h3 style={{ marginTop: 0 }}>AI assistant</h3>
-        <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.5 }}>
-          The AI assistant answers questions grounded in this business's own real data — it sees
-          your actual inventory, sales, and records, not just a general description of the app.
-          Pick a provider below and add its key. NVIDIA and Google both offer genuinely free tiers,
-          no card required, if you want to try this at zero cost first.
-        </p>
         <ErrorBox error={error} />
 
         <label>Active provider</label>
@@ -1697,12 +1655,6 @@ function NetworkTab() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxWidth: 480 }}>
-      <p style={{ color: 'var(--ink-soft)', fontSize: '0.88rem' }}>
-        By default every device runs its own separate copy of this business, with no connection to any other device.
-        To have several devices on the same WiFi share one live, real-time copy instead, pick one device to be the host
-        (usually a desktop/laptop that's reliably on) and connect the rest to it as clients.
-      </p>
-
       <div className="card">
         <strong>Currently: {state.mode === 'standalone' ? 'Standalone (own copy)' : state.mode === 'host' ? 'Hosting for other devices' : `Connected to ${state.host_address}`}</strong>
       </div>
@@ -1718,10 +1670,6 @@ function NetworkTab() {
       {state.mode !== 'host' && (
         <div className="card">
           <strong style={{ display: 'block', marginBottom: '0.4rem' }}>Host this business</strong>
-          <p style={{ fontSize: '0.82rem', color: 'var(--ink-soft)' }}>
-            Other devices on this WiFi will connect to this one for live data. Keep this device on and connected
-            while others need real-time access.
-          </p>
           <button className="btn btn-stamp" onClick={() => applyMode('host')}>Make this device the host</button>
         </div>
       )}
@@ -1737,9 +1685,6 @@ function NetworkTab() {
       {state.mode !== 'client' && (
         <div className="card">
           <strong style={{ display: 'block', marginBottom: '0.4rem' }}>Connect to another device</strong>
-          <p style={{ fontSize: '0.82rem', color: 'var(--ink-soft)' }}>
-            Enter the host address shown on the device you want to connect to.
-          </p>
           <input
             value={hostInput}
             onChange={(e) => setHostInput(e.target.value)}

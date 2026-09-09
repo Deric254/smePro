@@ -106,10 +106,6 @@ export default function ServiceSale() {
   return (
     <div style={{ maxWidth: 640 }}>
       <h2 style={{ marginTop: 0 }}>Log a sale</h2>
-      <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-        For services and anything else that isn't tracked as stock — describe what was sold,
-        the price, and how many. No inventory item needed.
-      </p>
 
       {lines.map((l, i) => (
         <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.6rem', alignItems: 'flex-end' }}>
