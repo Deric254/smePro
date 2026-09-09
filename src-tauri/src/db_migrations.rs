@@ -1390,7 +1390,27 @@ fn v20_sales_order_id_index(conn: &mut Connection) -> Result<()> {
 // for `can_administer`.
 fn v21_add_can_view_reports(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    tx.execute("ALTER TABLE roles ADD COLUMN can_view_reports INTEGER NOT NULL DEFAULT 0", [])?;
+    // THE BUG THIS FIXES (caught by cargo test --lib, not by inspection):
+    // a bare ALTER TABLE ADD COLUMN with no existence check is not
+    // idempotent — several tests in this file legitimately roll
+    // `_schema_version` back to an older number and re-run `migrate()`
+    // to exercise a specific historical migration in isolation (see
+    // e.g. unique_constraint_migration_tests.rs), which replays every
+    // migration from that point forward, including this one, against
+    // a `roles` table that may already have gained this column from
+    // an earlier full migration pass in the same test's own setup.
+    // The first version of this function didn't guard against that
+    // and broke 8 unrelated tests with "duplicate column name:
+    // can_view_reports". Same `pragma_table_info` guard v17's own
+    // ALTER TABLE already uses, for the same reason.
+    let already_has_column: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('roles') WHERE name = 'can_view_reports'",
+        [],
+        |r| r.get(0),
+    )?;
+    if already_has_column == 0 {
+        tx.execute("ALTER TABLE roles ADD COLUMN can_view_reports INTEGER NOT NULL DEFAULT 0", [])?;
+    }
     tx.execute("INSERT INTO _schema_version (version) VALUES (21)", [])?;
     tx.commit()?;
     Ok(())
