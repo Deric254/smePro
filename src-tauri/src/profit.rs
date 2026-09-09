@@ -86,3 +86,70 @@ pub fn summary(conn: &Connection, business_id: &str, user_id: &str) -> Result<Gr
         cost_bearing_sales_count,
     })
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct ItemProfit {
+    pub item_name: String,
+    pub revenue_cents: i64,
+    pub cost_cents: i64,
+    pub profit_cents: i64,
+    /// Same "undefined, not zero" rule as GrossProfitSummary::margin_pct.
+    pub margin_pct: Option<f64>,
+    pub sales_count: i64,
+    /// Same per-row meaning as GrossProfitSummary's own field, just
+    /// scoped to this one item — an item's margin built on 1 of its 20
+    /// sales having real cost data is exactly the kind of thing that
+    /// should stay visible, not average away into a single blended
+    /// business-wide number.
+    pub cost_bearing_sales_count: i64,
+}
+
+/// Same all-time, same-table computation as summary() above — just
+/// GROUP BY item_name instead of collapsing straight to one row.
+/// Deliberately not a new query shape: same columns, same
+/// revenue-minus-cost arithmetic, same honest cost-coverage count,
+/// just sliced one dimension further. Ordered by profit (not
+/// revenue) descending — a high-revenue, thin-margin item and a
+/// low-revenue, fat-margin item both matter to an owner deciding what
+/// to push, and profit is the number that answers that question
+/// directly rather than revenue alone.
+pub fn by_item(conn: &Connection, business_id: &str, user_id: &str, limit: i64) -> Result<Vec<ItemProfit>> {
+    crate::rbac::require(conn, user_id, "sales", "read")?;
+    let sales_module = crate::crud::load_module(conn, business_id, "sales")
+        .map_err(|_| anyhow!("the Sales module isn't enabled for this business"))?;
+    let table = sales_module.table_name();
+    let limit = limit.clamp(1, 100);
+
+    let sql = format!(
+        "SELECT item_name, COALESCE(SUM(revenue), 0), COALESCE(SUM(cost_at_sale), 0), COUNT(*),
+                COALESCE(SUM(CASE WHEN cost_at_sale > 0 THEN 1 ELSE 0 END), 0)
+         FROM {table}
+         WHERE business_id = ?1 AND deleted_at IS NULL
+         GROUP BY item_name
+         ORDER BY (COALESCE(SUM(revenue), 0) - COALESCE(SUM(cost_at_sale), 0)) DESC
+         LIMIT ?2"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![business_id, limit], |r| {
+        let revenue_cents: i64 = r.get(1)?;
+        let cost_cents: i64 = r.get(2)?;
+        let profit_cents = revenue_cents - cost_cents;
+        let margin_pct = if revenue_cents > 0 {
+            Some(profit_cents as f64 / revenue_cents as f64 * 100.0)
+        } else {
+            None
+        };
+        Ok(ItemProfit {
+            item_name: r.get(0)?,
+            revenue_cents,
+            cost_cents,
+            profit_cents,
+            margin_pct,
+            sales_count: r.get(3)?,
+            cost_bearing_sales_count: r.get(4)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}

@@ -65,6 +65,33 @@ pub fn require_admin_tier(conn: &Connection, user_id: &str) -> Result<()> {
     }
 }
 
+/// Requires the user to be Owner OR hold a role with the
+/// `can_view_reports` capability flag set. Deliberately separate from
+/// (and additional to, not a substitute for) each report/analysis
+/// function's own per-module `rbac::require(..., "read")` check —
+/// this is the coarser "can this role see Reports/Dashboard analytics
+/// at all" gate; that finer one is "and does the specific data in
+/// this particular report actually belong to a module this role can
+/// read." A caller needs to clear both. See roles::set_reports_flag
+/// for why this exists as its own flag rather than being folded into
+/// per-module `read`.
+pub fn require_reports_access(conn: &Connection, user_id: &str) -> Result<()> {
+    let (role, is_system, can_view_reports): (String, i64, i64) = conn
+        .query_row(
+            "SELECT r.name, r.is_system, r.can_view_reports
+             FROM users u JOIN roles r ON r.id = u.role_id
+             WHERE u.id = ?1 AND u.active = 1",
+            [user_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| anyhow::anyhow!("user not found or inactive"))?;
+    if is_system == 1 || can_view_reports == 1 {
+        Ok(())
+    } else {
+        anyhow::bail!("this action requires Reports access, which your role ('{role}') doesn't have")
+    }
+}
+
 /// Checks whether the given user is allowed to perform `action` on `module_id`.
 /// This is the single choke point every module screen and API call must go
 /// through — no module should ever query the DB directly without this check
@@ -130,6 +157,7 @@ pub struct MyCapabilities {
     pub is_admin_tier: bool,
     pub can_sell: bool,
     pub can_stocktake: bool,
+    pub can_view_reports: bool,
     pub readable_modules: Vec<String>,
 }
 
@@ -160,6 +188,7 @@ pub fn my_capabilities(conn: &Connection, business_id: &str, user_id: &str) -> a
     };
 
     let is_admin_tier = require_admin_tier(conn, user_id).is_ok();
+    let can_view_reports = require_reports_access(conn, user_id).is_ok();
     let can_sell = allowed_for_role("inventory", "sell");
     let can_stocktake = allowed_for_role("inventory", "stocktake");
     let readable_modules: Vec<String> = crate::business_panel::list_modules(conn, business_id)?
@@ -168,7 +197,7 @@ pub fn my_capabilities(conn: &Connection, business_id: &str, user_id: &str) -> a
         .filter(|m| allowed_for_role(&m.id, "read"))
         .map(|m| m.id)
         .collect();
-    Ok(MyCapabilities { is_admin_tier, can_sell, can_stocktake, readable_modules })
+    Ok(MyCapabilities { is_admin_tier, can_sell, can_stocktake, can_view_reports, readable_modules })
 }
 
 /// Seeds the default roles + permissions for a module, using the
@@ -182,16 +211,18 @@ pub fn seed_default_roles(
     let tx = conn.transaction()?;
     for (role_name, actions) in &module.default_roles {
         // Ensure the role exists for this business (idempotent). A role
-        // literally named "Manager" gets the admin-tier flag by default
-        // here — purely a sensible starting point matching this app's
-        // prior behavior, NOT an authorization rule. Nothing downstream
-        // checks the name "Manager" anymore (see rbac::require_admin_tier);
-        // an Owner can revoke this flag, grant it to a differently-named
-        // role instead, or rename this role entirely, and every check
-        // still works correctly either way.
+        // literally named "Manager" gets the admin-tier AND
+        // reports-access flags by default here — purely a sensible
+        // starting point matching this app's prior behavior, NOT an
+        // authorization rule. Nothing downstream checks the name
+        // "Manager" anymore (see rbac::require_admin_tier and
+        // rbac::require_reports_access); an Owner can revoke either
+        // flag, grant it to a differently-named role instead, or
+        // rename this role entirely, and every check still works
+        // correctly either way.
         tx.execute(
-            "INSERT INTO roles (id, business_id, name, is_system, can_administer)
-             VALUES (lower(hex(randomblob(16))), ?1, ?2, 0, ?3)
+            "INSERT INTO roles (id, business_id, name, is_system, can_administer, can_view_reports)
+             VALUES (lower(hex(randomblob(16))), ?1, ?2, 0, ?3, ?3)
              ON CONFLICT(business_id, name) DO NOTHING",
             rusqlite::params![business_id, role_name, (role_name == "Manager") as i64],
         )?;

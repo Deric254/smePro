@@ -4,9 +4,10 @@ import {
   askAiInSession, getAiContext, ApiError,
   listAiSessions, createAiSession, getAiSessionMessages, clearAiSession, deleteAiSession, exportAiChatHistory,
 } from '../api';
-import type { AiChatSession, AiChatMessage, BusinessPulse } from '../api';
-import { decimalPlacesFor, formatMoney } from '../lib/money';
+import type { AiChatSession, AiChatMessage } from '../api';
+import { decimalPlacesFor } from '../lib/money';
 import { MarkdownLite } from '../lib/markdownLite';
+import BusinessPulseCard from './BusinessPulseCard';
 
 export default function AiFloatingButton({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [question, setQuestion] = useState('');
@@ -257,60 +258,6 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
   );
 }
 
-/**
- * The "how is my business doing" readout attached under every AI
- * answer — see business_pulse.rs's own doc comment on why every
- * number here is real, computed arithmetic from actual sales history,
- * never something the AI model narrated from memory. This card is
- * deliberately plain and compact: it's a standing feature that
- * appears after EVERY message (even "good morning"), so it can't be
- * visually loud or it would drown out the actual answer above it.
- */
-function BusinessPulseCard({ pulse }: { pulse: BusinessPulse }) {
-  if (!pulse.has_data) {
-    return (
-      <div style={pulseStyles.card}>
-        <div style={pulseStyles.label}>Business pulse</div>
-        <div style={pulseStyles.hint}>{pulse.recommendations[0]}</div>
-      </div>
-    );
-  }
-
-  const trendArrow = pulse.pct_change === null ? '' : pulse.pct_change >= 0 ? '↑' : '↓';
-  const trendColor = pulse.pct_change === null ? 'var(--ink-soft)' : pulse.pct_change >= 0 ? 'var(--ok, #2a7a3b)' : 'var(--stamp)';
-
-  return (
-    <div style={pulseStyles.card}>
-      <div style={pulseStyles.label}>Business pulse</div>
-      <div style={pulseStyles.statRow}>
-        <span>This month: <strong>{formatMoney(pulse.revenue_this_period_cents, pulse.currency)}</strong></span>
-        {pulse.pct_change !== null && (
-          <span style={{ color: trendColor, fontWeight: 600 }}>
-            {trendArrow} {Math.abs(pulse.pct_change).toFixed(0)}%
-          </span>
-        )}
-      </div>
-      <div style={pulseStyles.statRow}>
-        <span>Next month (estimate): <strong>{formatMoney(pulse.forecast_next_period_cents, pulse.currency)}</strong></span>
-      </div>
-      {pulse.recommendations.map((r, i) => (
-        <div key={i} style={pulseStyles.recommendation}>• {r}</div>
-      ))}
-    </div>
-  );
-}
-
-const pulseStyles: Record<string, React.CSSProperties> = {
-  card: {
-    marginTop: '0.35rem', padding: '0.55rem 0.7rem', background: 'var(--paper)',
-    border: '1px solid var(--paper-line)', borderRadius: 6, fontSize: '0.78rem', maxWidth: '85%',
-  },
-  label: { fontSize: '0.68rem', fontWeight: 700, color: 'var(--ink-faint)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.3rem' },
-  statRow: { display: 'flex', justifyContent: 'space-between', gap: '0.5rem', color: 'var(--ink)' },
-  recommendation: { marginTop: '0.3rem', color: 'var(--ink-soft)', lineHeight: 1.4 },
-  hint: { color: 'var(--ink-soft)' },
-};
-
 const styles: Record<string, React.CSSProperties> = {
   panel: {
     // Anchored bottom-right on desktop — a small card near where it
@@ -320,7 +267,7 @@ const styles: Record<string, React.CSSProperties> = {
     // slide-in pattern as .app-sidebar itself (see index.css), so
     // opening the assistant reads as "part of this app's navigation"
     // rather than a chat-widget bolted on from outside.
-    position: 'fixed', bottom: 'calc(1.6rem + env(safe-area-inset-bottom))', right: 'calc(1.6rem + env(safe-area-inset-right))', width: 340, maxWidth: 'calc(100vw - 2.5rem)',
+    position: 'fixed', bottom: 'calc(1.6rem + var(--safe-bottom))', right: 'calc(1.6rem + env(safe-area-inset-right))', width: 340, maxWidth: 'calc(100vw - 2.5rem)',
     height: 460, display: 'flex', flexDirection: 'column', padding: 0, zIndex: 40,
     boxShadow: '0 10px 30px rgba(32,20,15,0.2)',
   },
@@ -337,5 +284,9 @@ const styles: Record<string, React.CSSProperties> = {
   bubbleAi: { alignSelf: 'flex-start', background: 'var(--paper)', border: '1px solid var(--paper-line)', padding: '0.5em 0.75em', borderRadius: '10px 10px 10px 2px', fontSize: '0.85rem', maxWidth: '85%', lineHeight: 1.5 },
   actionRow: { display: 'flex', justifyContent: 'flex-end', padding: '0.3rem 0.9rem 0' },
   clearBtn: { background: 'none', border: 'none', fontSize: '0.72rem', color: 'var(--ink-soft)', cursor: 'pointer', textDecoration: 'underline', padding: '0.1rem 0' },
-  inputRow: { display: 'flex', gap: '0.5rem', padding: '0.7rem 0.9rem', borderTop: '1px solid var(--paper-line)' },
+  // Extra bottom clearance beyond the panel's own padding-bottom (see
+  // .ai-panel in mobile.css) — belt-and-suspenders specifically here,
+  // since this row (the actual input + Send button) is the element
+  // that was visibly sitting under the system nav bar on Android.
+  inputRow: { display: 'flex', gap: '0.5rem', padding: '0.7rem 0.9rem', paddingBottom: 'calc(0.7rem + var(--safe-bottom))', borderTop: '1px solid var(--paper-line)' },
 };

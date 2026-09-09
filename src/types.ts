@@ -44,6 +44,7 @@ export interface Role {
   name: string;
   is_system: boolean;
   can_administer: boolean;
+  can_view_reports: boolean;
 }
 
 export interface UserAccount {

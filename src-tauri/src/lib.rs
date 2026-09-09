@@ -5,6 +5,7 @@ pub mod android_service;
 pub mod audit;
 pub mod auth;
 pub mod backup;
+pub mod basket_analysis;
 pub mod business_branding;
 pub mod business_panel;
 pub mod business_pulse;
@@ -32,8 +33,10 @@ pub mod receipt;
 pub mod receiving;
 pub mod reference_data;
 pub mod refund;
+pub mod refund_analysis;
 pub mod repack;
 pub mod security;
+pub mod stock_health;
 pub mod stock_take;
 pub mod tax;
 #[cfg(test)]

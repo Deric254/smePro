@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react';
-import { listModules, getModuleSchema, getBusinessInfo, getDebtSummary, getGrossProfitSummary } from '../api';
-import type { DebtSummary, GrossProfitSummary } from '../api';
+import { listModules, getModuleSchema, getBusinessInfo, getDebtSummary, getGrossProfitSummary, getBasketAffinity, getProfitByItem, getDebtAging, getSlowMovers, getRefundRateByItem, runReport } from '../api';
+import type { DebtSummary, GrossProfitSummary, BasketPair, ItemProfit, DebtAgingSummary, SlowMover, RefundRate } from '../api';
 import type { ModuleListItem, ModuleSchema } from '../types';
 import { formatMoney } from '../lib/money';
 import { ReportPanel } from './ModuleView';
+import BasketAffinityCard from '../components/BasketAffinityCard';
+import ItemMarginCard from '../components/ItemMarginCard';
+import DebtAgingCard from '../components/DebtAgingCard';
+import SlowMoversCard from '../components/SlowMoversCard';
+import RefundRateCard from '../components/RefundRateCard';
+import TopCustomersCard from '../components/TopCustomersCard';
 
 // One screen for every report in the system, for decision-making —
 // before this, the only way to see a module's own report was to open
@@ -20,6 +26,16 @@ export default function Reports() {
   const [currency, setCurrency] = useState('USD');
   const [debtSummary, setDebtSummary] = useState<DebtSummary | null>(null);
   const [grossProfit, setGrossProfit] = useState<GrossProfitSummary | null>(null);
+  // null = not fetched yet / sales not enabled / no permission — same
+  // best-effort discipline as grossProfit/debtSummary above, the card
+  // just doesn't render if this stays null.
+  const [basketPairs, setBasketPairs] = useState<BasketPair[] | null>(null);
+  // Same best-effort discipline again.
+  const [itemMargins, setItemMargins] = useState<ItemProfit[] | null>(null);
+  const [debtAging, setDebtAging] = useState<DebtAgingSummary | null>(null);
+  const [slowMovers, setSlowMovers] = useState<SlowMover[] | null>(null);
+  const [refundRates, setRefundRates] = useState<RefundRate[] | null>(null);
+  const [topCustomers, setTopCustomers] = useState<{ label: string; value: number }[] | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -28,6 +44,18 @@ export default function Reports() {
     getBusinessInfo().then((b: any) => { if (!cancelled && b?.currency) setCurrency(b.currency); }).catch(() => {});
     getDebtSummary().then((d) => { if (!cancelled) setDebtSummary(d); }).catch(() => {});
     getGrossProfitSummary().then((p) => { if (!cancelled) setGrossProfit(p); }).catch(() => {});
+    getBasketAffinity({ limit: 10 }).then((r) => { if (!cancelled) setBasketPairs(r.pairs); }).catch(() => {});
+    getProfitByItem(10).then((r) => { if (!cancelled) setItemMargins(r.items); }).catch(() => {});
+    getDebtAging().then((a) => { if (!cancelled) setDebtAging(a); }).catch(() => {});
+    getSlowMovers(30, 10).then((r) => { if (!cancelled) setSlowMovers(r.items); }).catch(() => {});
+    getRefundRateByItem(10).then((r) => { if (!cancelled) setRefundRates(r.items); }).catch(() => {});
+    // No dedicated endpoint — same generic report engine
+    // AnalyticsSection.tsx already uses for top-selling items, grouped
+    // by customer instead of item_name. Already sorted DESC
+    // server-side; sliced to top 10 here purely for display.
+    runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'category', field: 'customer' })
+      .then((r) => { if (!cancelled) setTopCustomers((r.report ?? []).slice(0, 10)); })
+      .catch(() => {});
 
     listModules().then(async (res) => {
       const enabled: ModuleListItem[] = res.modules.filter((m: ModuleListItem) => m.enabled);
@@ -92,6 +120,17 @@ export default function Reports() {
           </div>
         )}
       </div>
+
+      {(basketPairs || itemMargins || debtAging || slowMovers || refundRates || topCustomers) && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '0.9rem', marginBottom: '1.6rem' }}>
+          {itemMargins && <ItemMarginCard items={itemMargins} currency={currency} />}
+          {basketPairs && <BasketAffinityCard pairs={basketPairs} currency={currency} />}
+          {topCustomers && <TopCustomersCard customers={topCustomers} currency={currency} />}
+          {debtAging && <DebtAgingCard aging={debtAging} currency={currency} />}
+          {slowMovers && <SlowMoversCard items={slowMovers} currency={currency} />}
+          {refundRates && <RefundRateCard items={refundRates} currency={currency} />}
+        </div>
+      )}
 
       {loading ? (
         <div style={{ color: 'var(--ink-soft)' }}>Loading…</div>

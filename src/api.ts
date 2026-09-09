@@ -156,6 +156,7 @@ export interface MyCapabilities {
   is_admin_tier: boolean;
   can_sell: boolean;
   can_stocktake: boolean;
+  can_view_reports: boolean;
   readable_modules: string[];
 }
 // Powers the sidebar's own visibility decisions (see Sidebar.tsx) —
@@ -395,6 +396,78 @@ export interface GrossProfitSummary {
   cost_bearing_sales_count: number;
 }
 export const getGrossProfitSummary = (): Promise<GrossProfitSummary> => request('/sales/profit-summary');
+
+// Item-level margin — same fields/semantics as GrossProfitSummary,
+// just one row per item_name. See profit::by_item.
+export interface ItemProfit {
+  item_name: string;
+  revenue_cents: number;
+  cost_cents: number;
+  profit_cents: number;
+  margin_pct: number | null;
+  sales_count: number;
+  cost_bearing_sales_count: number;
+}
+export const getProfitByItem = (limit = 20): Promise<{ items: ItemProfit[] }> =>
+  request(`/sales/profit-by-item?limit=${limit}`);
+
+// Debtor aging (30/60/90) — see debt_settlement::aging_buckets.
+export interface DebtAgingSummary {
+  bucket_1_30_amount: number;
+  bucket_1_30_count: number;
+  bucket_31_60_amount: number;
+  bucket_31_60_count: number;
+  bucket_61_90_amount: number;
+  bucket_61_90_count: number;
+  bucket_90_plus_amount: number;
+  bucket_90_plus_count: number;
+  total_overdue_amount: number;
+  total_overdue_count: number;
+}
+export const getDebtAging = (): Promise<DebtAgingSummary> => request('/debt_credit/aging');
+
+// Refund rate by item — see refund_analysis::by_item.
+export interface RefundRate {
+  item_name: string;
+  sold_quantity: number;
+  refunded_quantity: number;
+  refunded_amount_cents: number;
+  refund_count: number;
+  refund_rate_pct: number | null;
+}
+export const getRefundRateByItem = (limit = 20): Promise<{ items: RefundRate[] }> =>
+  request(`/sales/refund-rate?limit=${limit}`);
+
+// Slow-moving stock — see stock_health::slow_movers.
+export interface SlowMover {
+  item_name: string;
+  quantity: number;
+  value_at_risk_cents: number;
+  last_sale_at: string | null;
+  days_since_last_sale: number | null;
+}
+export const getSlowMovers = (days = 30, limit = 20): Promise<{ items: SlowMover[] }> =>
+  request(`/inventory/slow-movers?days=${days}&limit=${limit}`);
+
+// "Frequently bought together" — see basket_analysis.rs. Read-only
+// aggregation over data pos.rs already records (one order_id shared
+// across a checkout's line items); start/end are plain YYYY-MM-DD
+// date strings, same convention runReport already uses.
+export interface BasketPair {
+  item_a: string;
+  item_b: string;
+  order_count: number;
+  combined_revenue_cents: number;
+}
+export const getBasketAffinity = (params: { start?: string; end?: string; limit?: number } = {}): Promise<{ pairs: BasketPair[] }> => {
+  const qs = new URLSearchParams();
+  if (params.start) qs.set('start', params.start);
+  if (params.end) qs.set('end', params.end);
+  if (params.limit) qs.set('limit', String(params.limit));
+  const suffix = qs.toString();
+  return request(`/sales/basket-affinity${suffix ? `?${suffix}` : ''}`);
+};
+
 export const getModuleSchema = (moduleId: string) => request(`/modules/${moduleId}/schema`);
 export const listRecords = (moduleId: string, search?: string) =>
   request(`/modules/${moduleId}/records${search ? `?search=${encodeURIComponent(search)}` : ''}`);
@@ -461,6 +534,11 @@ export interface BusinessPulse {
 }
 export const askAi = (question: string): Promise<{ answer: string; business_pulse: BusinessPulse }> =>
   request('/ai/ask', { method: 'POST', body: JSON.stringify({ question }) });
+// Same computed readout askAi/askAiInSession attach to a chat answer,
+// fetched on its own so the Dashboard can show it without requiring a
+// chat question first. See business_pulse.rs — identical numbers,
+// identical RBAC, identical has_data:false degrade path.
+export const getBusinessPulse = (): Promise<{ business_pulse: BusinessPulse }> => request('/ai/pulse');
 export const getAiContext = () => request('/ai/context');
 
 // ---- AI chat history — see ai_chat.rs. Real, persisted sessions
@@ -514,6 +592,11 @@ export const deleteRole = (roleId: string) =>
   request(`/roles/${roleId}`, { method: 'DELETE' });
 export const setRoleAdminFlag = (roleId: string, canAdminister: boolean) =>
   request(`/roles/${roleId}/admin-flag`, { method: 'PUT', body: JSON.stringify({ can_administer: canAdminister }) });
+// Independent of admin-flag and of per-module `read` — see
+// rbac::require_reports_access for why this is its own toggle rather
+// than folded into either of those.
+export const setRoleReportsFlag = (roleId: string, canViewReports: boolean) =>
+  request(`/roles/${roleId}/reports-flag`, { method: 'PUT', body: JSON.stringify({ can_view_reports: canViewReports }) });
 export const getRolePermissions = (roleId: string) => request(`/roles/${roleId}/permissions`);
 export const setRolePermissions = (roleId: string, moduleId: string, actions: string[]) =>
   request(`/roles/${roleId}/permissions`, { method: 'PUT', body: JSON.stringify({ module_id: moduleId, actions }) });

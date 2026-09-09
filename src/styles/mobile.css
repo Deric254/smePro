@@ -57,7 +57,7 @@
      causes silent, confusing specificity bugs — not the !important
      itself. */
   .app-main-content {
-    padding-bottom: calc(1rem + var(--mobile-tabbar-height) + env(safe-area-inset-bottom)) !important;
+    padding-bottom: calc(1rem + var(--mobile-tabbar-height) + var(--safe-bottom)) !important;
   }
 
   /* POS checkout: two columns (products + cart) on desktop, one
@@ -102,7 +102,7 @@
        Without this, the last field in the cart card (the "allow
        oversell" checkbox, or an error banner) would render underneath
        that floating button instead of scrolling clear of it. */
-    padding-bottom: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom, 0) + 4.5rem) !important;
+    padding-bottom: calc(var(--mobile-tabbar-height) + var(--safe-bottom) + 4.5rem) !important;
   }
   /* The scrollable middle region (cart items + customer/payment
      fields) no longer needs its own internal scrollbar either, now
@@ -138,9 +138,21 @@
     right: 1rem;
     width: auto !important;
     margin-top: 0 !important;
-    bottom: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom, 0) + 0.75rem);
+    bottom: calc(var(--mobile-tabbar-height) + var(--safe-bottom) + 0.75rem);
     z-index: 36; /* above .app-bottom-tabbar's 35, below the drawer/backdrop/AI panel */
     box-shadow: 0 -4px 10px rgba(0,0,0,0.08);
+  }
+
+  /* Same reasoning as .pos-checkout-btn just above: both update
+     banners (UpdateChecker.tsx, AndroidUpdateChecker.tsx) are
+     `position: fixed` near the bottom of the screen, and on phone
+     widths the app's own bottom tab bar occupies that exact space.
+     Without this, either banner's action button ("Update" / "Install
+     & Restart") ends up sitting behind that bar — impossible to see
+     or tap. */
+  .update-banner {
+    bottom: calc(var(--mobile-tabbar-height) + var(--safe-bottom) + 0.75rem) !important;
+    z-index: 36 !important; /* above .app-bottom-tabbar's 35, same as .pos-checkout-btn */
   }
 
   /* The AI assistant panel (AiFloatingButton.tsx) becomes a
@@ -159,7 +171,7 @@
     max-width: 100vw !important;
     height: 100vh !important;
     padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: var(--safe-bottom);
     padding-right: env(safe-area-inset-right);
     border-radius: 0 !important;
   }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  listRoles, createRole, deleteRole, setRoleAdminFlag, getRolePermissions, setRolePermissions,
+  listRoles, createRole, deleteRole, setRoleAdminFlag, setRoleReportsFlag, getRolePermissions, setRolePermissions,
   listUsers, createUser, setUserRole, deactivateUser,
   listUnits, createUnit, deleteUnit,
   listCurrencies, createCurrency, deleteCurrency,
@@ -118,6 +118,16 @@ function RolesTab() {
     }
   }
 
+  async function toggleReports(role: Role) {
+    setError(null);
+    try {
+      await setRoleReportsFlag(role.id, !role.can_view_reports);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not update role');
+    }
+  }
+
   return (
     <div>
       <ErrorBox error={error} />
@@ -135,6 +145,7 @@ function RolesTab() {
             <tr>
               <th style={styles.th}>Role</th>
               <th style={styles.th}>Admin tier</th>
+              <th style={styles.th}>Reports</th>
               <th style={styles.th} />
             </tr>
           </thead>
@@ -148,6 +159,12 @@ function RolesTab() {
                   <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4em', textTransform: 'none', fontSize: '0.85rem' }}>
                     <input type="checkbox" checked={r.can_administer} disabled={r.is_system} onChange={() => toggleAdmin(r)} />
                     can manage settings/payments
+                  </label>
+                </td>
+                <td style={styles.td}>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4em', textTransform: 'none', fontSize: '0.85rem' }}>
+                    <input type="checkbox" checked={r.can_view_reports} disabled={r.is_system} onChange={() => toggleReports(r)} />
+                    can see Reports/analytics
                   </label>
                 </td>
                 <td style={styles.td}>

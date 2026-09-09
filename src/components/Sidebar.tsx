@@ -99,7 +99,7 @@ export default function Sidebar({
   const inventoryEnabled = modules.some((m) => m.id === 'inventory' && m.enabled);
   const canSell = capabilities?.can_sell ?? false;
   const canStocktake = inventoryEnabled && (capabilities?.can_stocktake ?? false);
-  const canSeeReports = enabledModules.length > 0;
+  const canSeeReports = enabledModules.length > 0 && (capabilities?.can_view_reports ?? false);
   const canSeeAdmin = capabilities?.is_admin_tier ?? false;
   // Collapsing a group no longer forces its active child to stay
   // visible (see Sidebar changelog) — so the header itself carries

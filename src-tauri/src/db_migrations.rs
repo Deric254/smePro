@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 19;
+const CURRENT_VERSION: i32 = 21;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -39,7 +39,9 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 17 { v17_sales_cost_at_sale(conn)?; }
     if current < 18 { v18_inventory_unique_name(conn)?; }
     if current < 19 { v19_refunds_sale_id_index(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 19, "bump this alongside the last `if current < N` check above");
+    if current < 20 { v20_sales_order_id_index(conn)?; }
+    if current < 21 { v21_add_can_view_reports(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 21, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -1344,3 +1346,53 @@ fn v19_refunds_sale_id_index(conn: &mut Connection) -> Result<()> {
     tx.commit()?;
     Ok(())
 }
+
+// Same pattern as v19 just above: a pure, additive index, never
+// touching existing rows or requiring downtime (see v15's own comment
+// on that). This is specifically what makes "frequently bought
+// together" (basket_analysis.rs) fast — that query self-joins
+// module_sales on order_id, and without this index that join would
+// have to scan the whole table for every business on every request
+// once a business has any real sales history.
+fn v20_sales_order_id_index(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_sales'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists == 1 {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_module_sales_order_id ON module_sales(business_id, order_id);",
+            [],
+        )?;
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (20)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+// THE GAP THIS CLOSES: a role's per-module `read` permission was the
+// only lever an Owner had, and it's too coarse for a real need — Staff
+// needs `inventory:read` just to browse the product catalog at
+// checkout (crud::list requires it — see pos.rs's own product-listing
+// path), but that exact same permission is also what currently lets
+// them see everything Reports.tsx and the Dashboard's analytics build
+// from that data. There was no way to grant one without the other.
+// `can_view_reports` is a second, independent flag — same shape as
+// `can_administer` (a plain boolean already on `roles` since its
+// original table definition), off by default for every existing
+// non-Owner role. Owner itself always passes regardless of this
+// column (see rbac::require_reports_access) — the same "is_system
+// bypasses the flag entirely" rule `require_admin_tier` already uses
+// for `can_administer`.
+fn v21_add_can_view_reports(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("ALTER TABLE roles ADD COLUMN can_view_reports INTEGER NOT NULL DEFAULT 0", [])?;
+    tx.execute("INSERT INTO _schema_version (version) VALUES (21)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+

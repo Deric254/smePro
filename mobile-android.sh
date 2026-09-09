@@ -133,6 +133,55 @@ if new_content != content:
     print("Added REQUEST_INSTALL_PACKAGES permission")
 PYEOF
     fi
+
+    c_cyan "Wiring in SmeProApplication (foreground service + edge-to-edge insets)"
+    # Same file, same wiring, same reasoning as the matching step in
+    # .github/workflows/release.yml — kept in sync here so a locally
+    # built dev/debug APK behaves the same as a CI-built release one,
+    # rather than only the release pipeline ever getting the
+    # foreground-service protection and the edge-to-edge inset fix
+    # (see SmeProApplication.kt's own doc comments for what each does
+    # and why it lives there instead of a patched MainActivity.kt).
+    JAVA_DIR="src-tauri/gen/android/app/src/main/java/com/smepro/app"
+    mkdir -p "$JAVA_DIR"
+    cp src-tauri/android/com/smepro/app/SmeProForegroundService.kt "$JAVA_DIR/"
+    cp src-tauri/android/com/smepro/app/SmeProApplication.kt "$JAVA_DIR/"
+
+    if [ -f "$MANIFEST" ]; then
+        python3 - "$MANIFEST" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+
+if 'FOREGROUND_SERVICE' not in content:
+    content = re.sub(
+        r'(<manifest\b[^>]*>)',
+        r'\1\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />'
+        r'\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />',
+        content, count=1,
+    )
+
+if 'android:name=".SmeProApplication"' not in content:
+    content = re.sub(
+        r'(<application\b)',
+        r'\1 android:name=".SmeProApplication"',
+        content, count=1,
+    )
+
+if 'SmeProForegroundService' not in content:
+    service_tag = (
+        '    <service android:name=".SmeProForegroundService" '
+        'android:enabled="true" android:exported="false" '
+        'android:foregroundServiceType="dataSync" />\n'
+        '</application>'
+    )
+    content = content.replace('</application>', service_tag, 1)
+
+with open(path, 'w') as f:
+    f.write(content)
+PYEOF
+    fi
 fi
 
 if [ "$MODE" = "--dev" ]; then

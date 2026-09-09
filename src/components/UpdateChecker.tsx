@@ -45,7 +45,7 @@ export default function UpdateChecker() {
   if (!available) return null;
 
   return (
-    <div style={styles.banner} className="card">
+    <div style={styles.banner} className="card update-banner">
       <div>
         <strong style={{ fontSize: '0.88rem' }}>Update available — v{available.version}</strong>
         {available.body && <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.2rem' }}>{available.body}</div>}
@@ -60,11 +60,13 @@ export default function UpdateChecker() {
 
 const styles: Record<string, React.CSSProperties> = {
   banner: {
-    // calc() with env(safe-area-inset-bottom) keeps this clear of
-    // Android's on-screen nav bar/gesture strip — see the matching
-    // comment in mobile.css for why this is needed at all. env()
-    // resolves to 0 on desktop, so this is a no-op there.
-    position: 'fixed', bottom: 'calc(1.6rem + env(safe-area-inset-bottom))', left: 'calc(1.6rem + env(safe-area-inset-left))', maxWidth: 360,
+    // Base (desktop / no in-app tab bar) position. On phone widths,
+    // .update-banner in mobile.css overrides `bottom` to also clear
+    // the app's own bottom tab bar — same split as .pos-checkout-btn
+    // uses for the same reason (unconditionally adding the tab bar's
+    // height here would wrongly push this banner up on desktop, where
+    // that bar is `display: none` and takes up no space at all).
+    position: 'fixed', bottom: 'calc(1.6rem + var(--safe-bottom))', left: 'calc(1.6rem + env(safe-area-inset-left))', maxWidth: 360,
     display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
     zIndex: 30, borderColor: 'var(--stamp)',
   },

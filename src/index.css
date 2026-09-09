@@ -32,6 +32,21 @@
      way three separately-hardcoded copies of "60px" eventually would. */
   --mobile-tabbar-height: 60px;
 
+  /* Floor under env(safe-area-inset-bottom), used everywhere that
+     env() is — not a fallback for browsers that don't support env()
+     at all (those get its own default via env()'s second argument
+     where that's used), but for the real, confirmed case of an
+     Android WebView reporting a genuine 0 when the system nav
+     bar/gesture strip still occupies real screen space (see
+     SmeProApplication.kt's EdgeToEdgeInsetForwarder for the actual
+     native-side fix for that). 16px is small enough to be
+     unnoticeable on platforms that already report a correct, larger
+     inset (iOS, desktop) or a correct 0 (no inset at all), while
+     guaranteeing every fixed-bottom element below still clears a
+     phone's own system chrome even if a future device/OS/WebView
+     combination reports insets inconsistently again. */
+  --safe-bottom: max(16px, env(safe-area-inset-bottom));
+
   color-scheme: light;
 }
 
@@ -348,7 +363,7 @@ label {
        rather than replacing it, so the AccountMenu footer in
        particular doesn't end up sitting under the system nav bar. */
     padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: var(--safe-bottom);
     padding-left: env(safe-area-inset-left);
   }
 
@@ -396,7 +411,7 @@ label {
        this file and also uses !important, so it wins outright at that
        narrower width) — kept here too for the 768–860px range that
        mobile.css's rule doesn't reach at all. */
-    padding-bottom: calc(1rem + var(--mobile-tabbar-height) + env(safe-area-inset-bottom)) !important;
+    padding-bottom: calc(1rem + var(--mobile-tabbar-height) + var(--safe-bottom)) !important;
     max-width: 100% !important;
   }
 
@@ -423,7 +438,7 @@ label {
     right: 0;
     bottom: 0;
     height: var(--mobile-tabbar-height);
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: var(--safe-bottom);
     background: var(--paper-card);
     border-top: 1px solid var(--paper-line);
     /* Deliberately below .ai-panel's z-index of 40 (see

@@ -129,7 +129,7 @@ export default function AndroidUpdateChecker() {
   if (!isAndroid || !release) return null;
 
   return (
-    <div style={styles.banner} className="card">
+    <div style={styles.banner} className="card update-banner">
       <div style={{ flex: 1 }}>
         <strong style={{ fontSize: '0.88rem' }}>Update available — {release.tag_name}</strong>
         {status === 'downloading' && (
@@ -153,10 +153,13 @@ export default function AndroidUpdateChecker() {
 
 const styles: Record<string, React.CSSProperties> = {
   banner: {
-    // This banner is Android-only (see the component name), so the
-    // safe-area bottom inset here is not a hypothetical edge case —
-    // it's THE case. See the matching comment in mobile.css.
-    position: 'fixed', bottom: 'calc(1.6rem + env(safe-area-inset-bottom))',
+    // Base (desktop / no in-app tab bar) position — see the matching
+    // comment in UpdateChecker.tsx. On phone widths, .update-banner in
+    // mobile.css overrides `bottom` to also clear the app's own bottom
+    // tab bar. This banner is Android-only (see the component name),
+    // so that phone-width override is not a hypothetical edge case —
+    // it's THE case, every time this actually renders.
+    position: 'fixed', bottom: 'calc(1.6rem + var(--safe-bottom))',
     left: 'calc(1.6rem + env(safe-area-inset-left))', right: 'calc(1.6rem + env(safe-area-inset-right))', maxWidth: 420,
     display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
     zIndex: 30, borderColor: 'var(--stamp)',

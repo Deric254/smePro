@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 pub fn list_roles(conn: &Connection, business_id: &str) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, is_system, can_administer FROM roles WHERE business_id = ?1 ORDER BY is_system DESC, name",
+        "SELECT id, name, is_system, can_administer, can_view_reports FROM roles WHERE business_id = ?1 ORDER BY is_system DESC, name",
     )?;
     let rows = stmt.query_map(params![business_id], |r| {
         Ok(json!({
@@ -29,6 +29,7 @@ pub fn list_roles(conn: &Connection, business_id: &str) -> Result<Vec<Value>> {
             "name": r.get::<_, String>(1)?,
             "is_system": r.get::<_, i64>(2)? == 1,
             "can_administer": r.get::<_, i64>(3)? == 1,
+            "can_view_reports": r.get::<_, i64>(4)? == 1,
         }))
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -115,6 +116,39 @@ pub fn set_admin_flag(conn: &Connection, business_id: &str, role_id: &str, can_a
     conn.execute(
         "UPDATE roles SET can_administer = ?1 WHERE id = ?2 AND business_id = ?3",
         params![can_administer as i64, role_id, business_id],
+    )?;
+    Ok(())
+}
+
+/// Grants or revokes the ability to see Reports/Dashboard analytics —
+/// deliberately independent of a role's per-module `read` permissions.
+/// `read` on a module still governs the module's own screens (and
+/// whether that module's data can factor into a report at all — see
+/// each report/analysis function's own `rbac::require(..., "read")`
+/// call); this flag governs the separate, coarser question of whether
+/// the role can see the Reports page and Dashboard analytics/Business
+/// Pulse AT ALL, on top of that. THE GAP THIS CLOSES: `read` on
+/// Inventory is also what lets Staff browse the product catalog at
+/// checkout (see crud::list) — before this flag existed, there was no
+/// way to grant that without also handing over every chart and report
+/// built from the same data. Same "can't change the Owner role"
+/// restriction as set_admin_flag, for the same reason: Owner's access
+/// isn't toggleable, it's unconditional (see
+/// rbac::require_reports_access).
+pub fn set_reports_flag(conn: &Connection, business_id: &str, role_id: &str, can_view_reports: bool) -> Result<()> {
+    let is_system: i64 = conn
+        .query_row(
+            "SELECT is_system FROM roles WHERE id = ?1 AND business_id = ?2",
+            params![role_id, business_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| anyhow!("role not found"))?;
+    if is_system == 1 {
+        return Err(anyhow!("the Owner role's privileges can't be changed — it always has full access"));
+    }
+    conn.execute(
+        "UPDATE roles SET can_view_reports = ?1 WHERE id = ?2 AND business_id = ?3",
+        params![can_view_reports as i64, role_id, business_id],
     )?;
     Ok(())
 }

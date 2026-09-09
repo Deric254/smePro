@@ -314,6 +314,26 @@ impl ModuleDef {
             )?;
         }
 
+        // Sales-specific: basket_analysis.rs's "frequently bought
+        // together" report self-joins this table on order_id (every
+        // POS/service-sale checkout writes one order_id across all its
+        // line items — see pos.rs) to find which items appear in the
+        // same order. Same reasoning as the refunds index just above:
+        // without a dedicated index on order_id, that self-join has
+        // nothing but the business-wide index to lean on and degrades
+        // to scanning the whole sales table on every request once a
+        // business has real history. Same pair on new installs (via
+        // this code path) and existing ones (via db_migrations.rs'
+        // v20) so behavior never depends on which path created the
+        // table.
+        if self.id == "sales" {
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS idx_module_sales_order_id
+                 ON module_sales(business_id, order_id);",
+                [],
+            )?;
+        }
+
         // Register (or update) this module against the business in the
         // core `modules` registry table.
         tx.execute(

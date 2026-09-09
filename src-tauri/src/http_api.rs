@@ -704,6 +704,19 @@ fn route(
             Err(e) => json_err(400, &e.to_string()),
         };
     }
+    if parts.len() == 3 && parts[0] == "roles" && parts[2] == "reports-flag" && *method == Method::Put {
+        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let role_id = parts[1];
+        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
+        let can_view_reports = obj.get("can_view_reports").and_then(Value::as_bool).unwrap_or(false);
+        return match roles::set_reports_flag(conn, &business_id, role_id, can_view_reports) {
+            Ok(()) => {
+                let _ = audit::log(conn, &business_id, Some(&user_id), "_roles", "set_reports_flag", Some(role_id), Some(&json!({"can_view_reports": can_view_reports})));
+                ApiResponse::Json(200, json!({"ok": true}))
+            }
+            Err(e) => json_err(400, &e.to_string()),
+        };
+    }
     if parts.len() == 3 && parts[0] == "roles" && parts[2] == "permissions" && *method == Method::Get {
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
         let role_id = parts[1];
@@ -1043,14 +1056,102 @@ fn route(
         };
     }
 
+    // ---- Debtor aging (30/60/90): how overdue what's owed to the
+    // business is, bucketed. See debt_settlement::aging_buckets — same
+    // overdue definition and `today` computation as the summary route
+    // just above.
+    // ---- Debtor aging (30/60/90): how overdue what's owed to the
+    // business is, bucketed. See debt_settlement::aging_buckets — same
+    // overdue definition and `today` computation as the summary route
+    // just above. Reports-gated (see rbac::require_reports_access) —
+    // this is analytics built on top of Debt & Credit data, not the
+    // day-to-day "who owes what" lookup DebtSummary.tsx uses
+    // elsewhere, which stays governed by plain module `read` only.
+    if parts.as_slice() == ["debt_credit", "aging"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let today = chrono::Utc::now().date_naive().to_string();
+        return match debt_settlement::aging_buckets(conn, &business_id, &user_id, &today) {
+            Ok(aging) => ApiResponse::Json(200, json!(aging)),
+            Err(e) => crud_error(&e),
+        };
+    }
+
     // ---- Gross profit widget for the main Dashboard — see profit.rs
     // for why this is one direct SQL query against Sales' own
     // `revenue`/`cost_at_sale` columns rather than a join across
-    // modules.
+    // modules. Reports-gated: only Dashboard.tsx and Reports.tsx ever
+    // call this — no operational screen depends on it.
     if parts.as_slice() == ["sales", "profit-summary"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
         return match crate::profit::summary(conn, &business_id, &user_id) {
             Ok(summary) => ApiResponse::Json(200, json!(summary)),
             Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Item-level margin: /sales/profit-by-item?limit= — same
+    // computation as profit-summary above, just grouped by item_name
+    // instead of collapsed to one row. See profit::by_item.
+    // Reports-gated, same reasoning as profit-summary above.
+    if parts.as_slice() == ["sales", "profit-by-item"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
+        return match crate::profit::by_item(conn, &business_id, &user_id, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Refund rate by item: /sales/refund-rate?limit= — see
+    // refund_analysis.rs. Requires read on both Sales and Refunds, AND
+    // (see rbac::require_reports_access) Reports access — this is a
+    // quality/analytics signal, not an operational refunds screen.
+    if parts.as_slice() == ["sales", "refund-rate"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
+        return match crate::refund_analysis::by_item(conn, &business_id, &user_id, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Slow-moving stock: /inventory/slow-movers?days=&limit= —
+    // see stock_health.rs. Requires read on both Inventory and Sales,
+    // AND Reports access — same reasoning as refund-rate above.
+    if parts.as_slice() == ["inventory", "slow-movers"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let days = q.get("days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
+        return match crate::stock_health::slow_movers(conn, &business_id, &user_id, &today, days, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- "Frequently bought together": /sales/basket-affinity?start=&end=&limit=
+    // Read-only aggregation over the same module_sales table and
+    // order_id field pos.rs already writes on every checkout — see
+    // basket_analysis.rs's own doc comment. `limit` is optional and
+    // clamped server-side (see top_pairs), so an invalid or missing
+    // value just falls back to the default rather than erroring.
+    // Reports-gated, same reasoning as the other analysis endpoints
+    // above.
+    if parts.as_slice() == ["sales", "basket-affinity"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let q = query_params(url);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(10);
+        return match crate::basket_analysis::top_pairs(
+            conn, &business_id, &user_id,
+            q.get("start").map(|s| s.as_str()),
+            q.get("end").map(|s| s.as_str()),
+            limit,
+        ) {
+            Ok(pairs) => ApiResponse::Json(200, json!({"pairs": pairs})),
+            Err(e) => json_err(400, &e.to_string()),
         };
     }
 
@@ -1312,6 +1413,28 @@ fn route(
             Ok(snapshot) => ApiResponse::Json(200, snapshot),
             Err(e) => json_err(400, &e.to_string()),
         };
+    }
+
+    // ---- GET /ai/pulse — the same real, computed "how is my business
+    // doing" readout normally attached to an AI chat answer (see
+    // business_pulse.rs's own doc comment on why every number in it is
+    // deterministic arithmetic over real sales/inventory data, never
+    // something narrated from memory). Exposed standalone so the
+    // Dashboard can show it without the owner first having to open the
+    // AI panel and ask a question — reuses compute() exactly as-is, so
+    // this is the same numbers, same RBAC (enforced inside compute()
+    // via report::run and ai_context::build_snapshot), same
+    // has_data:false degrade path. No new calculation logic here.
+    // Reports-gated on top of that (see rbac::require_reports_access) —
+    // this standalone Dashboard route only; NOT applied to /ai/ask or
+    // /ai/sessions/{id}/ask, which still attach business_pulse to a
+    // chat answer regardless of this flag. Narrowing that too was out
+    // of scope for this pass — worth a deliberate follow-up if the
+    // chat panel should respect the same boundary.
+    if parts.as_slice() == ["ai", "pulse"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let pulse = crate::business_pulse::compute(conn, &business_id, &user_id);
+        return ApiResponse::Json(200, json!({"business_pulse": pulse}));
     }
 
     // ---- AI floating assistant: POST /ai/ask {question} — legacy,

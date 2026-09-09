@@ -317,3 +317,76 @@ pub fn summary(conn: &Connection, business_id: &str, user_id: &str, today: &str)
         due_soon_count,
     })
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct DebtAgingSummary {
+    pub bucket_1_30_amount: i64,
+    pub bucket_1_30_count: i64,
+    pub bucket_31_60_amount: i64,
+    pub bucket_31_60_count: i64,
+    pub bucket_61_90_amount: i64,
+    pub bucket_61_90_count: i64,
+    pub bucket_90_plus_amount: i64,
+    pub bucket_90_plus_count: i64,
+    /// Sum of the four buckets above, computed here in Rust from the
+    /// same four numbers rather than as a fifth SQL aggregate — one
+    /// less place this total and its own buckets could ever disagree.
+    pub total_overdue_amount: i64,
+    pub total_overdue_count: i64,
+}
+
+/// Accounts-receivable aging — how overdue is what customers owe you,
+/// bucketed the standard 30/60/90 way. Scoped to `direction =
+/// 'owed_to_business'` only: aging is a receivables concept (chasing
+/// customers who owe you), not something that applies the same way to
+/// what you owe suppliers. Same overdue definition `summary()` above
+/// already uses (`due_date < today`, and a record with no due_date at
+/// all is excluded rather than guessed at — see that function's own
+/// query) — this is a further breakdown of the exact same overdue set,
+/// not a differently-defined one.
+pub fn aging_buckets(conn: &Connection, business_id: &str, user_id: &str, today: &str) -> Result<DebtAgingSummary> {
+    crate::rbac::require(conn, user_id, "debt_credit", "read")?;
+    let debt_module = crud::load_module(conn, business_id, "debt_credit")
+        .map_err(|_| anyhow!("the Debt & Credit module isn't enabled for this business"))?;
+    let table = debt_module.table_name();
+
+    let sql = format!(
+        "SELECT
+            COALESCE(SUM(CASE WHEN days_overdue <= 30 THEN amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN days_overdue <= 30 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN days_overdue > 30 AND days_overdue <= 60 THEN amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN days_overdue > 30 AND days_overdue <= 60 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN days_overdue > 60 AND days_overdue <= 90 THEN amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN days_overdue > 60 AND days_overdue <= 90 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN days_overdue > 90 THEN amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN days_overdue > 90 THEN 1 ELSE 0 END), 0)
+         FROM (
+            SELECT amount, CAST(julianday(?2) - julianday(due_date) AS INTEGER) AS days_overdue
+            FROM {table}
+            WHERE business_id = ?1 AND deleted_at IS NULL AND settled = 0
+              AND direction = 'owed_to_business'
+              AND due_date IS NOT NULL AND due_date != '' AND due_date < ?2
+         )"
+    );
+
+    let (b1_amt, b1_cnt, b2_amt, b2_cnt, b3_amt, b3_cnt, b4_amt, b4_cnt): (i64, i64, i64, i64, i64, i64, i64, i64) =
+        conn.query_row(&sql, params![business_id, today], |r| {
+            Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
+            ))
+        })?;
+
+    Ok(DebtAgingSummary {
+        bucket_1_30_amount: b1_amt,
+        bucket_1_30_count: b1_cnt,
+        bucket_31_60_amount: b2_amt,
+        bucket_31_60_count: b2_cnt,
+        bucket_61_90_amount: b3_amt,
+        bucket_61_90_count: b3_cnt,
+        bucket_90_plus_amount: b4_amt,
+        bucket_90_plus_count: b4_cnt,
+        total_overdue_amount: b1_amt + b2_amt + b3_amt + b4_amt,
+        total_overdue_count: b1_cnt + b2_cnt + b3_cnt + b4_cnt,
+    })
+}

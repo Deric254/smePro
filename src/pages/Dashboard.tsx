@@ -1,8 +1,9 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary } from '../api';
+import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary, getBusinessPulse } from '../api';
 import type { ModuleListItem } from '../types';
-import type { DebtSummary, GrossProfitSummary } from '../api';
+import type { DebtSummary, GrossProfitSummary, BusinessPulse } from '../api';
 import { formatMoney } from '../lib/money';
+import BusinessPulseCard from '../components/BusinessPulseCard';
 
 // Lazy-loaded specifically because it's the only thing in the app that
 // pulls in recharts, which roughly doubles the JS bundle on its own —
@@ -55,6 +56,11 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
   const [debtSummary, setDebtSummary] = useState<DebtSummary | null>(null);
   // Same null-until-real-data discipline as debtSummary above.
   const [grossProfit, setGrossProfit] = useState<GrossProfitSummary | null>(null);
+  // Same again — the previously AI-chat-only "business pulse" readout
+  // (trend, forecast, low-stock/overdue flags), now surfaced directly
+  // here so it doesn't require opening the AI panel and asking a
+  // question first. See getBusinessPulse in api.ts.
+  const [pulse, setPulse] = useState<BusinessPulse | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,6 +111,11 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
     // Same best-effort fetch, same reason — Sales not enabled, or no
     // "read" permission on it, and the card below just doesn't render.
     getGrossProfitSummary().then((p) => { if (!cancelled) setGrossProfit(p); }).catch(() => {});
+    // Same best-effort fetch, same reason. A `has_data: false` pulse
+    // still renders (its own honest "not enough history yet" state,
+    // set inside BusinessPulseCard) — only a hard fetch failure (e.g.
+    // no permission at all) leaves this null and skips the card.
+    getBusinessPulse().then((r) => { if (!cancelled) setPulse(r.business_pulse); }).catch(() => {});
 
     return () => { cancelled = true; };
   }, []);
@@ -127,6 +138,12 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
       {grossProfit && <GrossProfitKpi data={grossProfit} currency={currency} onOpen={() => onSelectModule('sales')} />}
 
       {debtSummary && <DebtStandingKpi data={debtSummary} currency={currency} onOpen={() => onSelectModule('debt_credit')} />}
+
+      {pulse && (
+        <div className="card" style={{ marginBottom: '0.9rem', padding: '0.8rem 1.1rem' }}>
+          <BusinessPulseCard pulse={pulse} compact />
+        </div>
+      )}
 
       {stats.some((s) => s.module.id === 'sales') && (
         <Suspense fallback={<div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem', marginBottom: '1.6rem' }}>Loading analytics…</div>}>
