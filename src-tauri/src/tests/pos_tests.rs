@@ -10,6 +10,7 @@ fn test_checkout_deducts_stock() {
     let inv_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 100, 5000, 7500);
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id.clone(), quantity: 5 }],
         payment_method: Some("Cash".into()),
         customer: None,
@@ -40,6 +41,7 @@ fn test_checkout_snapshots_cost_at_sale_from_current_inventory_cost() {
     let inv_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 100, 5000, 7500);
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 5 }],
         payment_method: Some("Cash".into()),
         customer: None,
@@ -96,6 +98,7 @@ fn test_checkout_of_a_repacked_item_costs_the_sale_correctly() {
     assert_eq!(target_after_repack["unit_cost"], json!(100));
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: target_id, quantity: 1 }],
         payment_method: Some("Cash".into()),
         customer: None,
@@ -145,6 +148,7 @@ fn test_checkout_of_a_blended_repack_costs_the_sale_at_the_true_weighted_average
     assert_eq!(loose_after["unit_cost"], json!(97));
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: loose_id, quantity: 3 }],
         payment_method: Some("Cash".into()),
         customer: None,
@@ -212,6 +216,7 @@ fn test_checkout_after_a_two_level_repack_chain_costs_correctly() {
     assert!(sachet_cost > 0, "the cost basis must have survived two repack hops, not landed on 0");
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: sachet_id, quantity: 1 }],
         payment_method: Some("Cash".into()),
         customer: None,
@@ -287,6 +292,7 @@ fn test_checkout_rejects_selling_an_item_below_its_own_cost() {
     let inv_id = seed_inventory_item(&conn, &biz, "MISPRICED-001", "Misprized Item", 10, 500, 300);
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id.clone(), quantity: 1 }],
         payment_method: Some("Cash".into()),
         customer: None,
@@ -321,6 +327,7 @@ fn test_checkout_auto_generates_invoice() {
 
     let inv_id = seed_inventory_item(&conn, &biz, "TEA-001", "Tea", 50, 2000, 3500);
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 3 }],
         payment_method: Some("Cash".into()),
         customer: Some("Amina Yusuf".into()),
@@ -352,6 +359,7 @@ fn test_checkout_on_credit_invoice_is_sent_not_paid() {
 
     let inv_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 50, 2000, 3500);
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 2 }],
         payment_method: None,
         customer: Some("Kofi Mensah".into()),
@@ -381,6 +389,7 @@ fn test_checkout_walk_in_customer_still_gets_invoice() {
 
     let inv_id = seed_inventory_item(&conn, &biz, "SOAP-001", "Soap", 50, 500, 1000);
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
         payment_method: Some("Cash".into()),
         customer: None,
@@ -403,6 +412,7 @@ fn test_two_checkouts_get_distinct_invoice_numbers() {
     let inv_id = seed_inventory_item(&conn, &biz, "EGGS-001", "Eggs", 50, 1000, 1500);
     for _ in 0..2 {
         let req = crate::pos::CheckoutRequest {
+            discount_pct: None,
             items: vec![crate::pos::CartItem { inventory_record_id: inv_id.clone(), quantity: 1 }],
             payment_method: Some("Cash".into()), customer: None, customer_phone: None,
             allow_oversell: false, on_credit: false, due_date: None,
@@ -426,6 +436,7 @@ fn test_checkout_oversell_blocked() {
     let inv_id = seed_inventory_item(&conn, &biz, "SUGAR-001", "Sugar", 2, 3000, 5000);
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 5 }],
         payment_method: None, customer: None, customer_phone: None,
         allow_oversell: false, on_credit: false, due_date: None,

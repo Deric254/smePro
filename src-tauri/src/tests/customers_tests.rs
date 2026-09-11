@@ -55,6 +55,7 @@ fn test_pos_checkout_customer_phone_matches_customers_table_for_ltv() {
     let inv_id = seed_inventory_item(&conn, &biz, "ITEM-001", "Widget", 10, 100, 500);
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 2 }],
         payment_method: Some("Cash".into()),
         customer: Some("Asha".into()),
@@ -125,6 +126,7 @@ fn test_pos_checkout_tracks_customer_by_name_only() {
     let inv_id = seed_inventory_item(&conn, &biz, "ITEM-002", "Gadget", 10, 100, 300);
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
         payment_method: Some("Cash".into()),
         customer: Some("Walk-in Dennis".into()),

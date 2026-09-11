@@ -27,6 +27,7 @@ fn test_receipt_carries_configured_logo_and_slogan() {
 
     let inv_id = seed_inventory_item(&conn, &biz, "BREAD-001", "Loaf of Bread", 10, 100, 200);
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
         payment_method: Some("Cash".into()),
         customer: None,
@@ -55,6 +56,7 @@ fn test_receipt_renders_cleanly_with_no_branding_configured() {
 
     let inv_id = seed_inventory_item(&conn, &biz, "PLAIN-001", "Plain Item", 5, 50, 100);
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
         payment_method: Some("Cash".into()),
         customer: None,

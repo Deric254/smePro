@@ -3,6 +3,7 @@ use serde_json::json;
 
 fn checkout_one(conn: &mut rusqlite::Connection, biz: &str, uid: &str, inv_id: &str, qty: i64) -> serde_json::Value {
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id.to_string(), quantity: qty }],
         payment_method: Some("Cash".into()),
         customer: None,

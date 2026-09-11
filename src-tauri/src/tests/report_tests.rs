@@ -18,6 +18,7 @@ fn test_category_report_does_not_error_on_a_null_grouping_field() {
 
     // Checkout with NO payment_method at all.
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 2 }],
         payment_method: None,
         customer: None,
@@ -61,6 +62,7 @@ fn test_category_report_groups_null_and_set_values_separately() {
     let inv_id = seed_inventory_item(&conn, &biz, "MIX-001", "Mixed Payment Item", 20, 100, 200);
 
     let with_cash = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id.clone(), quantity: 1 }],
         payment_method: Some("Cash".into()),
         customer: None,
@@ -72,6 +74,7 @@ fn test_category_report_groups_null_and_set_values_separately() {
     crate::pos::checkout(&mut conn, &biz, &uid, with_cash).unwrap();
 
     let without_method = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
         payment_method: None,
         customer: None,

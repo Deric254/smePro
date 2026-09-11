@@ -9,6 +9,7 @@ fn test_receipt_generation() {
     let inv_id = seed_inventory_item(&conn, &biz, "MILK-001", "Milk", 20, 4000, 5500);
 
     let req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 2 }],
         payment_method: Some("M-Pesa".into()),
         customer: Some("John Doe".into()),
@@ -59,6 +60,7 @@ fn test_receipt_stays_consistent_and_visible_after_refund() {
     let bread_id = seed_inventory_item(&conn, &biz, "BREAD-001", "Bread", 20, 2000, 3000);
 
     let checkout_req = crate::pos::CheckoutRequest {
+        discount_pct: None,
         items: vec![
             crate::pos::CartItem { inventory_record_id: milk_id, quantity: 2 },
             crate::pos::CartItem { inventory_record_id: bread_id, quantity: 1 },
