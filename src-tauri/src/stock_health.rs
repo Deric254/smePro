@@ -93,3 +93,85 @@ pub fn slow_movers(
 
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
+
+/// How many days of stock are left at recent selling pace — quantity
+/// on hand divided by average units sold per day over the lookback
+/// window. Answers "what do I need to reorder soon," which low-stock
+/// (a fixed reorder_level threshold) can't: a reorder_level of 5 means
+/// nothing if an item sells 50 units a day.
+#[derive(Debug, Serialize)]
+pub struct StockRunway {
+    pub item_name: String,
+    pub quantity: f64,
+    /// Units sold per day, averaged over the lookback window. 0 means
+    /// no sales recorded for this item in that window at all.
+    pub avg_daily_sales: f64,
+    /// None when avg_daily_sales is 0 — there is no rate to divide by,
+    /// so "days until stockout" is genuinely undefined here, not
+    /// infinite. Never fabricated as a large placeholder number.
+    pub days_of_stock_left: Option<f64>,
+}
+
+/// Same name-based Inventory/Sales link as slow_movers above, same
+/// limitation. `lookback_days` clamped to [7, 180] — under a week is
+/// too noisy to average meaningfully; over 180 days starts averaging
+/// in demand from long enough ago it may not reflect current pace.
+pub fn stock_runway(
+    conn: &Connection,
+    business_id: &str,
+    user_id: &str,
+    today: &str,
+    lookback_days: i64,
+    limit: i64,
+) -> Result<Vec<StockRunway>> {
+    crate::rbac::require(conn, user_id, "inventory", "read")?;
+    crate::rbac::require(conn, user_id, "sales", "read")?;
+    let inventory_module = crud::load_module(conn, business_id, "inventory")
+        .map_err(|_| anyhow!("the Inventory module isn't enabled for this business"))?;
+    let sales_module = crud::load_module(conn, business_id, "sales")
+        .map_err(|_| anyhow!("the Sales module isn't enabled for this business"))?;
+    let inv_table = inventory_module.table_name();
+    let sales_table = sales_module.table_name();
+
+    let lookback_days = lookback_days.clamp(7, 180);
+    let limit = limit.clamp(1, 100);
+
+    let sql = format!(
+        "SELECT i.name, i.quantity, COALESCE(s.qty_sold, 0)
+         FROM {inv_table} i
+         LEFT JOIN (
+             SELECT item_name, SUM(quantity) AS qty_sold
+             FROM {sales_table}
+             WHERE business_id = ?1 AND deleted_at IS NULL
+               AND created_at >= date(?2, '-' || ?3 || ' days')
+             GROUP BY item_name
+         ) s ON s.item_name = i.name
+         WHERE i.business_id = ?1 AND i.deleted_at IS NULL AND i.quantity > 0"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![business_id, today, lookback_days], |r| {
+        let quantity: f64 = r.get(1)?;
+        let qty_sold: f64 = r.get(2)?;
+        let avg_daily_sales = qty_sold / lookback_days as f64;
+        Ok(StockRunway {
+            item_name: r.get(0)?,
+            quantity,
+            avg_daily_sales,
+            days_of_stock_left: if avg_daily_sales > 0.0 { Some(quantity / avg_daily_sales) } else { None },
+        })
+    })?;
+
+    let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    // Soonest to run out first. An item with no recent sales at all
+    // isn't "safe" — it's "unknown" — so it sorts last, not first: a
+    // real, computable urgency always outranks an absence of data.
+    out.sort_by(|a, b| match (a.days_of_stock_left, b.days_of_stock_left) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    out.truncate(limit as usize);
+    Ok(out)
+}

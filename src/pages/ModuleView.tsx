@@ -695,7 +695,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
           )}
 
           <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-            <table style={styles.table}>
+            <table className="data-table" style={styles.table}>
               <thead>
                 <tr>
                   {columns.map((c) => (
@@ -708,12 +708,12 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               </thead>
               <tbody>
                 {records.length === 0 && (
-                  <tr><td colSpan={columns.length + 1} style={styles.empty}>No records yet — add the first one above.</td></tr>
+                  <tr><td colSpan={columns.length + 1} style={{ ...styles.empty, display: 'block', textAlign: 'center' }}>No records yet — add the first one above.</td></tr>
                 )}
                 {records.map((r) => (
                   <tr key={r.id}>
                     {columns.map((c) => (
-                      <td key={c} className={typeof r[c] === 'number' ? 'mono' : ''} style={styles.td}>
+                      <td key={c} className={typeof r[c] === 'number' ? 'mono' : ''} style={styles.td} data-label={moduleId === 'invoice' && c === 'tax_amount' ? 'tax' : c.replace(/_/g, ' ')}>
                         {moduleId === 'invoice' && c === 'customer'
                           ? renderInvoiceCustomerCell(r)
                           : moduleId === 'invoice' && c === 'tax_amount'

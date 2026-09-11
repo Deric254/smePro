@@ -140,7 +140,7 @@ function RolesTab() {
       </form>
 
       <div className="card" style={{ padding: 0, overflowX: 'auto', marginBottom: '1rem' }}>
-        <table style={styles.table}>
+        <table className="data-table" style={styles.table}>
           <thead>
             <tr>
               <th style={styles.th}>Role</th>
@@ -152,16 +152,16 @@ function RolesTab() {
           <tbody>
             {roles.map((r) => (
               <tr key={r.id}>
-                <td style={styles.td}>
+                <td style={styles.td} data-label="Role">
                   {r.name} {r.is_system && <span style={styles.badge}>protected</span>}
                 </td>
-                <td style={styles.td}>
+                <td style={styles.td} data-label="Admin tier">
                   <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4em', textTransform: 'none', fontSize: '0.85rem' }}>
                     <input type="checkbox" checked={r.can_administer} disabled={r.is_system} onChange={() => toggleAdmin(r)} />
                     can manage settings/payments
                   </label>
                 </td>
-                <td style={styles.td}>
+                <td style={styles.td} data-label="Reports">
                   <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4em', textTransform: 'none', fontSize: '0.85rem' }}>
                     <input type="checkbox" checked={r.can_view_reports} disabled={r.is_system} onChange={() => toggleReports(r)} />
                     can see Reports/analytics
@@ -350,7 +350,7 @@ function UsersTab() {
       )}
 
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-        <table style={styles.table}>
+        <table className="data-table" style={styles.table}>
           <thead>
             <tr>
               <th style={styles.th}>Username</th>
@@ -362,8 +362,8 @@ function UsersTab() {
           <tbody>
             {users.map((u) => (
               <tr key={u.id}>
-                <td style={styles.td}>{u.username}</td>
-                <td style={styles.td}>
+                <td style={styles.td} data-label="Username">{u.username}</td>
+                <td style={styles.td} data-label="Role">
                   <select
                     value={roles.find((r) => r.name === u.role)?.id ?? ''}
                     disabled={!u.active}
@@ -372,7 +372,7 @@ function UsersTab() {
                     {roles.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                   </select>
                 </td>
-                <td style={styles.td}>{u.active ? <span className="status-pill status-active">Active</span> : <span className="status-pill status-inactive">Deactivated</span>}</td>
+                <td style={styles.td} data-label="Status">{u.active ? <span className="status-pill status-active">Active</span> : <span className="status-pill status-inactive">Deactivated</span>}</td>
                 <td style={styles.td}>
                   {u.active && <button className="btn btn-outline" style={styles.smallBtn} onClick={() => handleDeactivate(u)}>Deactivate</button>}
                 </td>
@@ -434,13 +434,13 @@ function UnitsTab() {
       </form>
 
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-        <table style={styles.table}>
+        <table className="data-table" style={styles.table}>
           <thead><tr><th style={styles.th}>Name</th><th style={styles.th}>Abbreviation</th><th style={styles.th} /></tr></thead>
           <tbody>
             {units.map((u) => (
               <tr key={u.id}>
-                <td style={styles.td}>{u.name}</td>
-                <td className="mono" style={styles.td}>{u.abbreviation || '—'}</td>
+                <td style={styles.td} data-label="Name">{u.name}</td>
+                <td className="mono" style={styles.td} data-label="Abbreviation">{u.abbreviation || '—'}</td>
                 <td style={styles.td}><button className="btn btn-outline" style={styles.smallBtn} onClick={() => handleDelete(u)}>Delete</button></td>
               </tr>
             ))}
@@ -567,14 +567,14 @@ function CurrenciesTab() {
       </form>
 
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-        <table style={styles.table}>
+        <table className="data-table" style={styles.table}>
           <thead><tr><th style={styles.th}>Code</th><th style={styles.th}>Symbol</th><th style={styles.th}>Name</th><th style={styles.th} /></tr></thead>
           <tbody>
             {currencies.map((c) => (
               <tr key={c.id}>
-                <td className="mono" style={styles.td}>{c.code}</td>
-                <td style={styles.td}>{c.symbol || '—'}</td>
-                <td style={styles.td}>{c.name || '—'}</td>
+                <td className="mono" style={styles.td} data-label="Code">{c.code}</td>
+                <td style={styles.td} data-label="Symbol">{c.symbol || '—'}</td>
+                <td style={styles.td} data-label="Name">{c.name || '—'}</td>
                 <td style={styles.td}><button className="btn btn-outline" style={styles.smallBtn} onClick={() => handleDelete(c)}>Delete</button></td>
               </tr>
             ))}
@@ -602,19 +602,19 @@ function CurrenciesTab() {
         ) : rates.length === 0 ? (
           <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>No cached rates for {ratesBase} yet — try refreshing.</div>
         ) : (
-          <table style={styles.table}>
+          <table className="data-table" style={styles.table}>
             <thead><tr><th style={styles.th}>To</th><th style={styles.th}>Rate</th><th style={styles.th}>Fetched</th></tr></thead>
             <tbody>
               {rates.map((r) => (
                 <tr key={r.to_currency}>
-                  <td className="mono" style={styles.td}>{r.to_currency}</td>
-                  <td className="mono" style={styles.td}>{r.rate}</td>
+                  <td className="mono" style={styles.td} data-label="To">{r.to_currency}</td>
+                  <td className="mono" style={styles.td} data-label="Rate">{r.rate}</td>
                   {/* fetched_at is Unix epoch SECONDS from the backend
                       (currency.rs's SystemTime::…as_secs()) — JS Date
                       expects MILLISECONDS, so this was previously
                       rendering dates near January 1970 instead of the
                       real fetch time. */}
-                  <td style={styles.td}>{new Date(r.fetched_at * 1000).toLocaleString()}</td>
+                  <td style={styles.td} data-label="Fetched">{new Date(r.fetched_at * 1000).toLocaleString()}</td>
                 </tr>
               ))}
             </tbody>
@@ -754,14 +754,14 @@ function TaxRatesTab() {
           <button className="btn btn-stamp" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Set rate'}</button>
         </form>
         <ErrorBox error={error} />
-        <table style={styles.table}>
+        <table className="data-table" style={styles.table}>
           <thead><tr><th style={styles.th}>Category</th><th style={styles.th}>Rate</th></tr></thead>
           <tbody>
-            {rates.length === 0 && <tr><td colSpan={2} style={styles.td}>No category rates set yet.</td></tr>}
+            {rates.length === 0 && <tr><td colSpan={2} style={{ ...styles.td, display: 'block', textAlign: 'center' }}>No category rates set yet.</td></tr>}
             {rates.map((r) => (
               <tr key={r.category}>
-                <td style={styles.td}>{r.category}</td>
-                <td className="mono" style={styles.td}>{r.rate}%</td>
+                <td style={styles.td} data-label="Category">{r.category}</td>
+                <td className="mono" style={styles.td} data-label="Rate">{r.rate}%</td>
               </tr>
             ))}
           </tbody>
@@ -1278,7 +1278,7 @@ function AuditLogTab() {
       </div>
       <ErrorBox error={error} />
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-        <table style={styles.table}>
+        <table className="data-table" style={styles.table}>
           <thead>
             <tr>
               <th style={styles.th}>When</th>
@@ -1290,17 +1290,17 @@ function AuditLogTab() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td style={styles.td} colSpan={5}>Loading…</td></tr>
+              <tr><td style={{ ...styles.td, display: 'block', textAlign: 'center' }} colSpan={5}>Loading…</td></tr>
             ) : entries.length === 0 ? (
-              <tr><td style={styles.td} colSpan={5}>No activity recorded yet.</td></tr>
+              <tr><td style={{ ...styles.td, display: 'block', textAlign: 'center' }} colSpan={5}>No activity recorded yet.</td></tr>
             ) : (
               entries.map((e) => (
                 <tr key={e.id}>
-                  <td style={styles.td} className="mono">{parseBackendTimestamp(e.timestamp).toLocaleString()}</td>
-                  <td style={styles.td}>{e.user_id ? (users[e.user_id] ?? 'Unknown user') : 'System'}</td>
-                  <td style={styles.td}>{e.module_id}</td>
-                  <td style={styles.td}>{e.action}</td>
-                  <td style={styles.td} className="mono">
+                  <td style={styles.td} className="mono" data-label="When">{parseBackendTimestamp(e.timestamp).toLocaleString()}</td>
+                  <td style={styles.td} data-label="Who">{e.user_id ? (users[e.user_id] ?? 'Unknown user') : 'System'}</td>
+                  <td style={styles.td} data-label="Module">{e.module_id}</td>
+                  <td style={styles.td} data-label="Action">{e.action}</td>
+                  <td style={styles.td} className="mono" data-label="Details">
                     {e.details ? JSON.stringify(e.details).slice(0, 80) : e.record_id ? `record: ${e.record_id.slice(0, 8)}…` : '—'}
                   </td>
                 </tr>
@@ -1422,7 +1422,7 @@ function NotificationsTab() {
 
       <h3 style={{ margin: '1.2rem 0 0.8rem' }}>Recent messages</h3>
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-        <table style={styles.table}>
+        <table className="data-table" style={styles.table}>
           <thead>
             <tr>
               <th style={styles.th}>When</th>
@@ -1434,17 +1434,17 @@ function NotificationsTab() {
           </thead>
           <tbody>
             {loadingHistory ? (
-              <tr><td style={styles.td} colSpan={5}>Loading…</td></tr>
+              <tr><td style={{ ...styles.td, display: 'block', textAlign: 'center' }} colSpan={5}>Loading…</td></tr>
             ) : history.length === 0 ? (
-              <tr><td style={styles.td} colSpan={5}>No messages sent yet.</td></tr>
+              <tr><td style={{ ...styles.td, display: 'block', textAlign: 'center' }} colSpan={5}>No messages sent yet.</td></tr>
             ) : (
               history.map((n) => (
                 <tr key={n.id}>
-                  <td style={styles.td} className="mono">{parseBackendTimestamp(n.created_at).toLocaleString()}</td>
-                  <td style={styles.td}>{n.channel}</td>
-                  <td style={styles.td} className="mono">{n.recipient}</td>
-                  <td style={styles.td}>{n.message.length > 60 ? n.message.slice(0, 60) + '…' : n.message}</td>
-                  <td style={styles.td}>
+                  <td style={styles.td} className="mono" data-label="When">{parseBackendTimestamp(n.created_at).toLocaleString()}</td>
+                  <td style={styles.td} data-label="Channel">{n.channel}</td>
+                  <td style={styles.td} className="mono" data-label="To">{n.recipient}</td>
+                  <td style={styles.td} data-label="Message">{n.message.length > 60 ? n.message.slice(0, 60) + '…' : n.message}</td>
+                  <td style={styles.td} data-label="Status">
                     <span className={`status-pill ${n.status === 'sent' ? 'status-active' : ''}`}>{n.status}</span>
                   </td>
                 </tr>

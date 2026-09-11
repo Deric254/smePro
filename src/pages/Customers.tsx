@@ -74,7 +74,7 @@ export default function Customers() {
             </div>
 
             <h3>Purchase history</h3>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ borderBottom: '2px solid var(--ink)', fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--ink-soft)' }}>
                   <th style={{ textAlign: 'left', padding: '0.5rem' }}>Item</th>
@@ -86,10 +86,10 @@ export default function Customers() {
               <tbody>
                 {detail.purchases.map((p, i) => (
                   <tr key={i} style={{ borderBottom: '1px solid var(--paper-line)' }}>
-                    <td style={{ padding: '0.5rem' }}>{p.item_name}</td>
-                    <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{p.quantity}</td>
-                    <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{formatMoney(p.revenue, currency)}</td>
-                    <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>{formatBackendDateTime(p.date)}</td>
+                    <td style={{ padding: '0.5rem' }} data-label="Item">{p.item_name}</td>
+                    <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono" data-label="Qty">{p.quantity}</td>
+                    <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono" data-label="Amount">{formatMoney(p.revenue, currency)}</td>
+                    <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }} data-label="Date">{formatBackendDateTime(p.date)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -131,7 +131,7 @@ export default function Customers() {
             : 'No customers match that search.'}
         </div>
       ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr style={{ borderBottom: '2px solid var(--ink)', fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--ink-soft)' }}>
               <th style={{ textAlign: 'left', padding: '0.5rem' }}>Name</th>
@@ -150,11 +150,11 @@ export default function Customers() {
                 onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--stamp-wash)')}
                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
               >
-                <td style={{ padding: '0.5rem', fontWeight: 600 }}>{c.name || <span style={{ color: 'var(--ink-faint)', fontWeight: 400 }}>—</span>}</td>
-                <td style={{ padding: '0.5rem' }} className="mono">{c.phone || <span style={{ color: 'var(--ink-faint)', fontFamily: 'var(--font-body)' }}>—</span>}</td>
-                <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono">{c.order_count}</td>
-                <td style={{ textAlign: 'right', padding: '0.5rem', fontWeight: 600, color: 'var(--stamp)' }} className="mono">{formatMoney(c.lifetime_value, currency)}</td>
-                <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>
+                <td style={{ padding: '0.5rem', fontWeight: 600 }} data-label="Name">{c.name || <span style={{ color: 'var(--ink-faint)', fontWeight: 400 }}>—</span>}</td>
+                <td style={{ padding: '0.5rem' }} className="mono" data-label="Phone">{c.phone || <span style={{ color: 'var(--ink-faint)', fontFamily: 'var(--font-body)' }}>—</span>}</td>
+                <td style={{ textAlign: 'right', padding: '0.5rem' }} className="mono" data-label="Orders">{c.order_count}</td>
+                <td style={{ textAlign: 'right', padding: '0.5rem', fontWeight: 600, color: 'var(--stamp)' }} className="mono" data-label="Lifetime value">{formatMoney(c.lifetime_value, currency)}</td>
+                <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }} data-label="Last purchase">
                   {c.last_purchase_at ? formatBackendDate(c.last_purchase_at) : '—'}
                 </td>
               </tr>

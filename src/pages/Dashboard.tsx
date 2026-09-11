@@ -1,7 +1,7 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary, getBusinessPulse } from '../api';
+import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary, getBusinessPulse, getReportHighlights } from '../api';
 import type { ModuleListItem } from '../types';
-import type { DebtSummary, GrossProfitSummary, BusinessPulse } from '../api';
+import type { DebtSummary, GrossProfitSummary, BusinessPulse, ReportHighlights } from '../api';
 import { formatMoney } from '../lib/money';
 import BusinessPulseCard from '../components/BusinessPulseCard';
 
@@ -39,10 +39,11 @@ interface ModuleStat {
   metricIsMoney: boolean;
 }
 
-export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }: {
+export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, canViewReports }: {
   businessName: string;
   onSelectModule: (id: string) => void;
   onOpenAdmin: () => void;
+  canViewReports: boolean;
 }) {
   const [stats, setStats] = useState<ModuleStat[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,6 +62,11 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
   // here so it doesn't require opening the AI panel and asking a
   // question first. See getBusinessPulse in api.ts.
   const [pulse, setPulse] = useState<BusinessPulse | null>(null);
+  // One-line teasers pointing into the fuller Stock health / Sales
+  // patterns sections on the Reports page — see report_highlights.rs.
+  // Each field independently null when there's nothing worth
+  // highlighting yet, same discipline as everything else here.
+  const [highlights, setHighlights] = useState<ReportHighlights | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -80,7 +86,16 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
           try {
             const schema = await getModuleSchema(module.id);
             const metric = schema.dashboard_metric;
-            if (metric) {
+            // THE BUG THIS FIXES: this metric (e.g. Sales' own
+            // "revenue this period") came from the exact same generic
+            // report engine Reports.tsx and AnalyticsSection use, but
+            // this call had no reports-access gate at all — any role
+            // with plain `read` on a module got its business metric
+            // shown on the Dashboard regardless of can_view_reports,
+            // which defeats the entire point of that flag existing.
+            // Skip the fetch outright rather than fetch-then-hide, so
+            // a role without reports access never even asks for it.
+            if (metric && canViewReports) {
               const report = await runReport(module.id, {
                 agg: metric.aggregation,
                 measure: metric.measure ?? '',
@@ -103,22 +118,31 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
     // and that's fine, the dashboard just quietly shows less.
     listUsers().then((r) => { if (!cancelled) setUserCount(r.users.filter((u: { active: boolean }) => u.active).length); }).catch(() => {});
     getSettings().then((s) => { if (!cancelled) setChecklistDismissed(s.onboarding_dismissed === 'true'); }).catch(() => { if (!cancelled) setChecklistDismissed(false); });
-    // Also best-effort: fails silently (module not enabled, or this
-    // role lacks "read" on it) and the KPI card below just doesn't
-    // render — same as every module tile already does when its own
-    // metric fetch fails.
-    getDebtSummary().then((d) => { if (!cancelled) setDebtSummary(d); }).catch(() => {});
-    // Same best-effort fetch, same reason — Sales not enabled, or no
-    // "read" permission on it, and the card below just doesn't render.
-    getGrossProfitSummary().then((p) => { if (!cancelled) setGrossProfit(p); }).catch(() => {});
-    // Same best-effort fetch, same reason. A `has_data: false` pulse
-    // still renders (its own honest "not enough history yet" state,
-    // set inside BusinessPulseCard) — only a hard fetch failure (e.g.
-    // no permission at all) leaves this null and skips the card.
-    getBusinessPulse().then((r) => { if (!cancelled) setPulse(r.business_pulse); }).catch(() => {});
+    // Same reasoning as the per-module metric fetch above: these are
+    // report/analytics-only widgets. Skipping the fetch entirely (not
+    // fetch-then-hide) when the role can't view reports, consistent
+    // with the dashboard_metric skip above — one rule, applied
+    // everywhere business-performance data could otherwise leak onto
+    // this screen regardless of what the backend itself enforces.
+    if (canViewReports) {
+      // Also best-effort: fails silently (module not enabled, or this
+      // role lacks "read" on it) and the KPI card below just doesn't
+      // render — same as every module tile already does when its own
+      // metric fetch fails.
+      getDebtSummary().then((d) => { if (!cancelled) setDebtSummary(d); }).catch(() => {});
+      // Same best-effort fetch, same reason — Sales not enabled, or no
+      // "read" permission on it, and the card below just doesn't render.
+      getGrossProfitSummary().then((p) => { if (!cancelled) setGrossProfit(p); }).catch(() => {});
+      // Same best-effort fetch, same reason. A `has_data: false` pulse
+      // still renders (its own honest "not enough history yet" state,
+      // set inside BusinessPulseCard) — only a hard fetch failure (e.g.
+      // no permission at all) leaves this null and skips the card.
+      getBusinessPulse().then((r) => { if (!cancelled) setPulse(r.business_pulse); }).catch(() => {});
+      getReportHighlights().then((r) => { if (!cancelled) setHighlights(r); }).catch(() => {});
+    }
 
     return () => { cancelled = true; };
-  }, []);
+  }, [canViewReports]);
 
   const hasAnyRecords = stats.some((s) => (s.recordCount ?? 0) > 0);
   const showChecklist = checklistDismissed === false;
@@ -145,7 +169,29 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin }:
         </div>
       )}
 
-      {stats.some((s) => s.module.id === 'sales') && (
+      {highlights && (highlights.most_urgent_item || highlights.busiest_day) && (
+        <div className="card" style={{ marginBottom: '0.9rem', padding: '0.7rem 1.1rem', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.9rem' }}>
+          {highlights.most_urgent_item && (
+            <span style={{ fontSize: '0.84rem' }}>
+              <span style={{ color: 'var(--stamp)', fontWeight: 600 }}>{Math.floor(highlights.most_urgent_item.days_of_stock_left)}d left</span>
+              {' '}on {highlights.most_urgent_item.item_name}
+            </span>
+          )}
+          {highlights.busiest_day && (
+            <span style={{ fontSize: '0.84rem', color: 'var(--ink-soft)' }}>
+              Busiest day: <span style={{ color: 'var(--ink)', fontWeight: 600 }}>{highlights.busiest_day.day_name}</span>
+            </span>
+          )}
+          <button
+            onClick={() => onSelectModule('__reports__')}
+            style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--stamp)', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', padding: 0 }}
+          >
+            Full reports →
+          </button>
+        </div>
+      )}
+
+      {canViewReports && stats.some((s) => s.module.id === 'sales') && (
         <Suspense fallback={<div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem', marginBottom: '1.6rem' }}>Loading analytics…</div>}>
           <AnalyticsSection />
         </Suspense>

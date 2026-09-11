@@ -93,7 +93,6 @@
       "stocktake"
     ],
     "Staff": [
-      "read",
       "sell"
     ]
   },

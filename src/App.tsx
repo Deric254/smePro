@@ -208,6 +208,7 @@ export default function App() {
             businessName={businessName}
             onSelectModule={setSelected}
             onOpenAdmin={() => setSelected('__admin__')}
+            canViewReports={capabilities?.can_view_reports ?? false}
           />
         )}
       </main>

@@ -60,6 +60,10 @@ pub struct ReceiptLine {
     /// How much money has been refunded against this exact sale line.
     /// Zero when nothing's been refunded.
     pub refunded_amount: i64,
+    /// The discount actually applied to this exact line at sale time
+    /// (see pos::checkout) — frozen the same way `line_total` is,
+    /// never touched by a later refund.
+    pub discount_amount: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,12 +79,21 @@ pub struct Receipt {
     /// Sum of every line's original, as-sold amount — what this order
     /// actually rang up at, unaffected by any later refund.
     pub subtotal: i64,
+    /// Sum of every line's discount_amount — shown as its own line on
+    /// the receipt, same "visible, not silently baked in" principle
+    /// this file already applies to refunds. 0 when no discount was
+    /// given.
+    pub discount_amount: i64,
     pub tax_rate: f64,
-    /// Tax on the original `subtotal` above — frozen at what was
-    /// actually charged at sale time, same "as it was" principle as
-    /// everything else on this receipt.
+    /// Tax on `subtotal - discount_amount` — the amount actually
+    /// charged after the discount, not the original pre-discount
+    /// subtotal. This is the one number on this receipt that a
+    /// discount changes the calculation of; everything else here
+    /// keeps the exact same "as it was originally rung up" meaning it
+    /// always had.
     pub tax_amount: i64,
-    /// `subtotal + tax_amount` — the original total as it was rung up.
+    /// `(subtotal - discount_amount) + tax_amount` — the original
+    /// total as it was rung up, discount already netted out.
     pub total: i64,
     /// Sum of every line's `refunded_amount` — 0 when nothing on this
     /// order has ever been refunded.
@@ -128,9 +141,14 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
     // as the line total anymore (see the module doc comment above) —
     // unit_price * quantity gives the true original, as-sold figure
     // directly and exactly, without depending on whatever refund.rs
-    // may have since subtracted from `revenue`.
+    // may have since subtracted from `revenue`. `discount_amount` is
+    // its own frozen, as-sold fact for the identical reason —
+    // deriving "how much was discounted" from unit_price and
+    // (refund-mutated) revenue would silently conflate a discount with
+    // a later refund; see pos::checkout's own comment on why this is
+    // a separate column instead.
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, item_name, quantity, unit_price \
+        "SELECT id, item_name, quantity, unit_price, discount_amount \
          FROM {table} WHERE business_id = ?1 AND order_id = ?2 AND deleted_at IS NULL ORDER BY created_at"
     ))?;
 
@@ -139,6 +157,7 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
         item_name: String,
         quantity: i64,
         unit_price: i64,
+        discount_amount: i64,
     }
 
     let rows = stmt.query_map(params![business_id, order_id], |r| {
@@ -150,6 +169,7 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
             },
             quantity: r.get(2)?,
             unit_price: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            discount_amount: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
         })
     })?;
 
@@ -196,13 +216,16 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
                 line_total: line.unit_price * line.quantity,
                 quantity_refunded,
                 refunded_amount,
+                discount_amount: line.discount_amount,
             }
         })
         .collect();
 
     let subtotal: i64 = items.iter().map(|i| i.line_total).sum();
-    let tax_amount = crate::money::apply_rate(subtotal, tax_rate / 100.0);
-    let total = subtotal + tax_amount;
+    let discount_amount: i64 = items.iter().map(|i| i.discount_amount).sum();
+    let taxable_amount = subtotal - discount_amount;
+    let tax_amount = crate::money::apply_rate(taxable_amount, tax_rate / 100.0);
+    let total = taxable_amount + tax_amount;
     let refunded_amount: i64 = items.iter().map(|i| i.refunded_amount).sum();
     // Clamped at 0 for the same reason refund.rs itself clamps —
     // a refund can never leave "what's owed" negative regardless of
@@ -232,6 +255,7 @@ pub fn generate(conn: &Connection, business_id: &str, user_id: &str, order_id: &
         date,
         items,
         subtotal,
+        discount_amount,
         tax_rate,
         tax_amount,
         total,

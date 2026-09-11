@@ -11,7 +11,23 @@
    left as unused scaffolding. */
 
 @media (max-width: 768px) {
-  /* Tables become cards */
+  /* Tables become cards — see this file's own opening comment on
+     dead code above for why this exists here at all: this rule
+     already existed, and so did MobileHelpers.tsx's MobileTable
+     component, but neither was ever actually wired up to any of the
+     app's real tables (ModuleView.tsx, AdminPanel.tsx, Customers.tsx,
+     StockTake.tsx) — every one of them rendered as a bare, non-
+     responsive <table>, which is what was actually causing horizontal
+     scrolling on a phone. This CSS mechanism is the lower-risk of the
+     two fixes available: it only needs a className on <table> and a
+     data-label attribute on each <td> (see each of those files' own
+     `styles.tdMobile` helper) — the existing table markup, column
+     logic, and every click handler stay completely untouched.
+     Colors switched from hardcoded hex to this app's own theme
+     variables while fixing this — the original hardcoded #fff/#e5e5e5/
+     #666 would have looked wrong (or broken outright) under the dark
+     or teal themes, since it never referenced the theming system at
+     all. */
   .data-table {
     display: block;
   }
@@ -23,23 +39,33 @@
   .data-table tr {
     margin-bottom: 12px;
     padding: 12px;
-    border: 1px solid #e5e5e5;
+    border: 1px solid var(--paper-line);
     border-radius: 8px;
-    background: #fff;
+    background: var(--paper-card);
   }
   .data-table td {
     padding: 6px 0;
     border: none;
     display: flex;
     justify-content: space-between;
+    gap: 0.6rem;
+    text-align: right;
   }
   .data-table td::before {
     content: attr(data-label);
     font-weight: 600;
     font-size: 12px;
-    color: #666;
+    color: var(--ink-faint);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    text-align: left;
+    flex-shrink: 0;
+  }
+  /* A cell with no data-label (an actions column, a lone button) has
+     nothing meaningful to put a label in front of — let it take the
+     full row width plain rather than showing an empty label gap. */
+  .data-table td:not([data-label]) {
+    justify-content: flex-end;
   }
 
   input, select, textarea {

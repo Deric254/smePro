@@ -58,6 +58,12 @@
       "type": "money",
       "required": true,
       "default": 0
+    },
+    {
+      "name": "discount_amount",
+      "type": "money",
+      "required": true,
+      "default": 0
     }
   ],
   "actions": [
@@ -87,7 +93,7 @@
     ],
     "Staff": [
       "create",
-      "read"
+      "refund"
     ]
   },
   "dashboard_metric": {

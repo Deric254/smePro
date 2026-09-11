@@ -910,6 +910,32 @@ fn route(
     // ---- Point of sale: the real link between Sales and Inventory —
     // see pos.rs for why this is its own module rather than going
     // through the generic create/update endpoints directly. ----
+    // ---- Product lookup for the POS screen: /pos/products?search=&limit=
+    // Deliberately not crud::list — see pos::lookup_products's own doc
+    // comment for why this needs only "sell" (which every cashier
+    // already has) rather than "read" (which also opens the door to
+    // the full Inventory module, its Reports tab, and Dashboard/
+    // Analytics built from that same data).
+    if parts.as_slice() == ["pos", "products"] && *method == Method::Get {
+        let q = query_params(url);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(100);
+        return match pos::lookup_products(conn, &business_id, &user_id, q.get("search").map(|s| s.as_str()), limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"records": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+    // ---- Low-stock list for the POS screen: /pos/low-stock?limit= —
+    // see pos::low_stock_items. Same "sell" permission as the product
+    // lookup above — a cashier's own restocking awareness, not a
+    // business report.
+    if parts.as_slice() == ["pos", "low-stock"] && *method == Method::Get {
+        let q = query_params(url);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
+        return match pos::low_stock_items(conn, &business_id, &user_id, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
     if parts.as_slice() == ["pos", "checkout"] && *method == Method::Post {
         let req: pos::CheckoutRequest = match serde_json::from_str(body) {
             Ok(r) => r,
@@ -1127,6 +1153,34 @@ fn route(
         let days = q.get("days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30);
         let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
         return match crate::stock_health::slow_movers(conn, &business_id, &user_id, &today, days, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Stock runway: /inventory/stock-runway?days=&limit= — days of
+    // stock left at recent selling pace. See stock_health::stock_runway.
+    // Reports-gated, same reasoning as slow-movers above.
+    if parts.as_slice() == ["inventory", "stock-runway"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let days = q.get("days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(15);
+        return match crate::stock_health::stock_runway(conn, &business_id, &user_id, &today, days, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Day-of-week sales pattern: /sales/day-of-week?days= — see
+    // sales_patterns::day_of_week_pattern. Reports-gated.
+    if parts.as_slice() == ["sales", "day-of-week"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let days = q.get("days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(90);
+        return match crate::sales_patterns::day_of_week_pattern(conn, &business_id, &user_id, &today, days) {
             Ok(items) => ApiResponse::Json(200, json!({"items": items})),
             Err(e) => crud_error(&e),
         };
@@ -1435,6 +1489,17 @@ fn route(
         if let Err(e) = rbac::require_reports_access(conn, &user_id) { return json_err(403, &e.to_string()); }
         let pulse = crate::business_pulse::compute(conn, &business_id, &user_id);
         return ApiResponse::Json(200, json!({"business_pulse": pulse}));
+    }
+
+    // ---- GET /reports/highlights — one-line Dashboard teasers for
+    // the fuller Stock Health and Sales Patterns sections in
+    // Reports.tsx. See report_highlights.rs. Reports-gated, same as
+    // everything else this feeds from.
+    if parts.as_slice() == ["reports", "highlights"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let today = chrono::Utc::now().date_naive().to_string();
+        let highlights = crate::report_highlights::compute(conn, &business_id, &user_id, &today);
+        return ApiResponse::Json(200, json!(highlights));
     }
 
     // ---- AI floating assistant: POST /ai/ask {question} — legacy,

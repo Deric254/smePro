@@ -14,6 +14,7 @@ interface ReceiptLine {
   line_total: number;
   quantity_refunded: number;
   refunded_amount: number;
+  discount_amount: number;
 }
 
 interface ReceiptData {
@@ -26,6 +27,7 @@ interface ReceiptData {
   date: string;
   items: ReceiptLine[];
   subtotal: number;
+  discount_amount: number;
   tax_rate: number;
   tax_amount: number;
   total: number;
@@ -74,6 +76,7 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
       '',
       ...lines,
       '',
+      receipt.discount_amount > 0 ? `Discount: -${receipt.business_currency} ${formatMoney(receipt.discount_amount, receipt.business_currency)}` : '',
       `Total: ${receipt.business_currency} ${formatMoney(receipt.total, receipt.business_currency)}`,
       receipt.is_refunded ? `Refunded: ${receipt.business_currency} ${formatMoney(receipt.refunded_amount, receipt.business_currency)}` : '',
       receipt.is_refunded ? `Net total: ${receipt.business_currency} ${formatMoney(receipt.net_total, receipt.business_currency)}` : '',
@@ -169,6 +172,12 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
 
         <div style={totals}>
           <div style={row}><span>Subtotal:</span><span>{receipt.business_currency} {formatMoney(receipt.subtotal, receipt.business_currency)}</span></div>
+          {receipt.discount_amount > 0 && (
+            <div style={{ ...row, color: '#c0392b' }}>
+              <span>Discount:</span>
+              <span>− {receipt.business_currency} {formatMoney(receipt.discount_amount, receipt.business_currency)}</span>
+            </div>
+          )}
           {receipt.tax_rate > 0 && (
             <div style={row}>
               <span>Tax ({receipt.tax_rate}%):</span>

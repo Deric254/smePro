@@ -35,6 +35,7 @@ pub mod reference_data;
 pub mod refund;
 pub mod refund_analysis;
 pub mod repack;
+pub mod sales_patterns;
 pub mod security;
 pub mod stock_health;
 pub mod stock_take;
@@ -136,6 +137,7 @@ pub fn module_json(module_id: &str) -> Option<&'static str> {
     MODULE_DEFS.iter().find(|(id, _)| *id == module_id).map(|(_, json)| *json)
 }
 pub mod report;
+pub mod report_highlights;
 pub mod roles;
 pub mod settings;
 pub mod users;

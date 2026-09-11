@@ -123,7 +123,7 @@ export default function StockTakePage() {
           {history.length > 0 && (
             <div className="card">
               <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>Past stock takes</div>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
                 <thead>
                   <tr style={{ textAlign: 'left', color: 'var(--ink-soft)' }}>
                     <th style={{ padding: '0.3rem 0.5rem' }}>Closed</th>
@@ -133,8 +133,8 @@ export default function StockTakePage() {
                 <tbody>
                   {history.map((h) => (
                     <tr key={h.id} style={{ borderTop: '1px solid var(--paper-line)' }}>
-                      <td style={{ padding: '0.3rem 0.5rem' }}>{h.closed_at ? formatBackendDateTime(h.closed_at) : '—'}</td>
-                      <td style={{ padding: '0.3rem 0.5rem' }}>{h.counted_count} of {h.item_count}</td>
+                      <td style={{ padding: '0.3rem 0.5rem' }} data-label="Closed">{h.closed_at ? formatBackendDateTime(h.closed_at) : '—'}</td>
+                      <td style={{ padding: '0.3rem 0.5rem' }} data-label="Items counted">{h.counted_count} of {h.item_count}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -154,7 +154,7 @@ export default function StockTakePage() {
           </div>
 
           <div className="card">
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+            <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
               <thead>
                 <tr style={{ textAlign: 'left', color: 'var(--ink-soft)' }}>
                   <th style={{ padding: '0.4rem 0.5rem' }}>Item</th>
@@ -166,9 +166,9 @@ export default function StockTakePage() {
               <tbody>
                 {open.items.map((item) => (
                   <tr key={item.id} style={{ borderTop: '1px solid var(--paper-line)' }}>
-                    <td style={{ padding: '0.4rem 0.5rem' }}>{item.item_name}</td>
-                    <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right', color: 'var(--ink-soft)' }}>{item.expected_qty}</td>
-                    <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>
+                    <td style={{ padding: '0.4rem 0.5rem' }} data-label="Item">{item.item_name}</td>
+                    <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right', color: 'var(--ink-soft)' }} data-label="Expected">{item.expected_qty}</td>
+                    <td style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }} data-label="Counted">
                       <input
                         type="number"
                         min={0}
@@ -214,7 +214,7 @@ function CloseSummary({ result, onDismiss }: { result: StockTakeCloseResult; onD
       {changed.length === 0 ? (
         <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>No discrepancies found.</div>
       ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+        <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
           <thead>
             <tr style={{ textAlign: 'left', color: 'var(--ink-soft)' }}>
               <th style={{ padding: '0.3rem 0.5rem' }}>Item</th>
@@ -226,10 +226,10 @@ function CloseSummary({ result, onDismiss }: { result: StockTakeCloseResult; onD
           <tbody>
             {changed.map((a) => (
               <tr key={a.inventory_record_id} style={{ borderTop: '1px solid var(--paper-line)' }}>
-                <td style={{ padding: '0.3rem 0.5rem' }}>{a.item_name}</td>
-                <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>{a.expected_qty}</td>
-                <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>{a.counted_qty}</td>
-                <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right', color: a.variance < 0 ? 'var(--stamp)' : 'inherit' }}>
+                <td style={{ padding: '0.3rem 0.5rem' }} data-label="Item">{a.item_name}</td>
+                <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }} data-label="Expected">{a.expected_qty}</td>
+                <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }} data-label="Counted">{a.counted_qty}</td>
+                <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right', color: a.variance < 0 ? 'var(--stamp)' : 'inherit' }} data-label="Variance">
                   {a.variance > 0 ? '+' : ''}{a.variance}
                 </td>
               </tr>

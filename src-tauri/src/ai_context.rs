@@ -3,6 +3,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use crate::module::ModuleDef;
+use crate::rbac;
 use crate::report::{self, Dimension};
 
 /// Builds a structured, bounded snapshot of a business's current state
@@ -13,6 +14,34 @@ use crate::report::{self, Dimension};
 /// engine as the report screens) and only sends summarized numbers.
 pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Result<Value> {
     let mut modules_summary = serde_json::Map::new();
+
+    // THE BUG THIS FIXES: every field below (record_count, low-stock
+    // alerts, operational_details) was built for EVERY enabled module
+    // regardless of whether the person asking the AI a question could
+    // read that module at all — `totals` was the only piece that
+    // happened to be safe, purely as a side effect of report::run
+    // enforcing rbac internally and this function silently swallowing
+    // its error. A cashier without Debt & Credit's own `read`
+    // permission could still ask the assistant a question and have it
+    // answer from that module's row count, low-stock list, or full
+    // item-level detail. Same standard as everywhere else in this
+    // app: no `read` on a module means that module doesn't exist for
+    // this request, full stop.
+    //
+    // `can_view_reports` is a second, coarser gate on top of that —
+    // see roles::set_reports_flag's own doc comment for why it's
+    // separate from `read`. It governs `totals` specifically (the
+    // aggregate, business-performance-style numbers: total revenue,
+    // total outstanding debt, and so on) — not whether a module
+    // appears at all, and not its low-stock alerts or item-level
+    // detail, both of which stay tied to plain `read` the same way
+    // the POS screen's own restocking awareness does (see
+    // pos::low_stock_items). A cashier who can read Inventory to ring
+    // up sales can still ask the assistant what's running low; they
+    // just won't get handed a revenue figure through the back door
+    // now that the Dashboard and Reports page no longer show them
+    // one directly.
+    let can_view_reports = rbac::require_reports_access(conn, user_id).is_ok();
 
     // Needed to correctly present "money"-typed totals to the AI as
     // decimal currency (e.g. 4500.00) rather than raw integer cents
@@ -31,6 +60,9 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     for (module_id, schema_json) in module_rows {
+        if !rbac::is_allowed(conn, user_id, &module_id, "read").unwrap_or(false) {
+            continue;
+        }
         let module = ModuleDef::from_json_str(&schema_json)?;
         let table = module.table_name();
 
@@ -48,7 +80,11 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
         // cents, and SQLite SUM over integers stays exact for any
         // realistic amount), but converted to decimal currency before
         // being handed to the AI — see the currency lookup above.
+        // Gated on can_view_reports (see this function's own doc
+        // comment above) — skipped entirely, not just hidden after
+        // the fact, for a role that can't view reports.
         let mut totals = serde_json::Map::new();
+        if can_view_reports {
         for f in &module.fields {
             if f.field_type == "integer" || f.field_type == "real" || f.field_type == "money" {
                 let points = report::run(
@@ -73,6 +109,7 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
                     }
                 }
             }
+        }
         }
 
         // Generic low-stock-style flag: if a module happens to define
@@ -132,6 +169,41 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 json!(items)
             }
+            // THE ACCURACY GAP THIS CLOSES: debt_credit previously fell
+            // through to the `_ => Value::Null` catch-all below, so the
+            // assistant had zero per-record visibility into Debt &
+            // Credit — not who owes what, and critically not `settled`
+            // (paid vs unpaid) at all. Asked "has X paid yet," it had
+            // nothing to answer from but an aggregate total that
+            // doesn't even separate paid from unpaid, owed-to from
+            // owed-by — the exact setup that produces a confidently
+            // wrong guess instead of a real answer, or (better, but
+            // still not useful) an "I don't have that" every time.
+            // `party_name` and `settled` are the two fields that
+            // actually answer "who, and paid or not" — everything else
+            // here is already shown in the totals a role with `read`
+            // on this module can already see.
+            "debt_credit" => {
+                let places = crate::money::decimal_places_for(&currency);
+                let scale = 10_i64.pow(places) as f64;
+                let mut detail_stmt = conn.prepare(&format!(
+                    "SELECT party_name, direction, amount, settled, due_date
+                     FROM {table} WHERE business_id = ?1 AND deleted_at IS NULL
+                     ORDER BY settled ASC, due_date ASC LIMIT 100"
+                ))?;
+                let debts: Vec<Value> = detail_stmt
+                    .query_map(rusqlite::params![business_id], |r| {
+                        Ok(json!({
+                            "party_name": r.get::<_, String>(0)?,
+                            "direction": r.get::<_, String>(1)?,
+                            "amount": r.get::<_, i64>(2)? as f64 / scale,
+                            "settled": r.get::<_, bool>(3)?,
+                            "due_date": r.get::<_, Option<String>>(4)?,
+                        }))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                json!(debts)
+            }
             "purchasing" => {
                 let places = crate::money::decimal_places_for(&currency);
                 let scale = 10_i64.pow(places) as f64;
@@ -175,10 +247,33 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
         |r| r.get(0),
     )?;
 
+    // Same coarser can_view_reports gate as `totals` above — these are
+    // both insight-style computations (a lookback-window average, a
+    // day-of-week breakdown), not a raw operational fact like
+    // low-stock, so they follow `totals`'s rule, not `low_stock`'s.
+    // Both degrade to an empty array on any failure (module not
+    // enabled, no permission, whatever) rather than surfacing an
+    // error into the AI's own prompt — the assistant just won't
+    // mention them, the same as it already does for anything else
+    // ai_context.rs doesn't manage to fetch.
+    let today = chrono::Utc::now().date_naive().to_string();
+    let stock_runway = if can_view_reports {
+        crate::stock_health::stock_runway(conn, business_id, user_id, &today, 30, 15).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let day_of_week_pattern = if can_view_reports {
+        crate::sales_patterns::day_of_week_pattern(conn, business_id, user_id, &today, 90).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     Ok(json!({
         "business_name": business_name,
         "currency": currency,
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "modules": modules_summary,
+        "stock_runway": stock_runway,
+        "day_of_week_sales_pattern": day_of_week_pattern,
     }))
 }

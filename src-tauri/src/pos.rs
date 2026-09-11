@@ -66,6 +66,120 @@ pub struct CheckoutRequest {
     /// which is what makes lifetime value tracking possible at all.
     #[serde(default)]
     pub customer_phone: Option<String>,
+    /// Whole-cart percentage discount, 0–100. Deliberately percentage-
+    /// only for now, not also a fixed amount — a fixed discount would
+    /// need its own decimal-to-cents parsing and rounding path, a
+    /// second way for a money value to go subtly wrong; a percentage
+    /// needs none of that (see checkout()'s own comment on the exact
+    /// math). Applied evenly across every line — see checkout() for
+    /// why that's mathematically identical to discounting the whole
+    /// cart at once, not an approximation of it.
+    #[serde(default)]
+    pub discount_pct: Option<f64>,
+}
+
+/// Product lookup for the POS product grid — deliberately narrower
+/// than crud::list in two ways, both intentional, not incidental:
+///
+/// 1. Permission: gated on "sell", the exact same permission checkout()
+///    itself requires — not "read". Before this existed, the POS
+///    screen's own product search called the generic crud::list, which
+///    requires "read" on Inventory. That meant a cashier needed "read"
+///    just to see what they were selling — the same "read" that also
+///    lets them open the full Inventory module screen directly (every
+///    record, every column, and everything Reports/Dashboard builds
+///    from that data) and see the same generic Report tab any other
+///    module gets. There was no way to grant "can ring up a sale"
+///    without also granting "can see everything else Inventory has."
+///    This closes that gap the same way checkout()'s own doc comment
+///    above describes: one purpose-built permission, not a shared one
+///    with a wider blast radius than the task actually needs.
+///
+/// 2. Shape: returns exactly the five fields the POS screen actually
+///    uses (see PointOfSale.tsx: id, name, sku, unit_price, quantity)
+///    — never unit_cost, category, reorder_level, or anything else on
+///    the record. This isn't just "the cashier isn't allowed to see
+///    it," it's "the response literally does not contain it," so
+///    there's no cost/margin data sitting in a browser dev-tools
+///    network tab for a screen that never needed it.
+pub fn lookup_products(
+    conn: &Connection,
+    business_id: &str,
+    user_id: &str,
+    search: Option<&str>,
+    limit: i64,
+) -> Result<Vec<Value>> {
+    crate::rbac::require(conn, user_id, "inventory", "sell")?;
+    let inventory_module = crud::load_module(conn, business_id, "inventory")
+        .map_err(|_| anyhow!("the Inventory module isn't enabled for this business"))?;
+    let table = inventory_module.table_name();
+    let limit = limit.clamp(1, 200);
+
+    let mut sql = format!(
+        "SELECT id, name, sku, unit_price, quantity FROM {table}
+         WHERE business_id = ?1 AND deleted_at IS NULL"
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(business_id.to_string())];
+    if let Some(term) = search {
+        if !term.trim().is_empty() {
+            params.push(Box::new(format!("%{term}%")));
+            let idx = params.len();
+            sql.push_str(&format!(" AND (name LIKE ?{idx} OR sku LIKE ?{idx})"));
+        }
+    }
+    params.push(Box::new(limit));
+    let limit_idx = params.len();
+    sql.push_str(&format!(" ORDER BY quantity DESC LIMIT ?{limit_idx}"));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |r| {
+        Ok(json!({
+            "id": r.get::<_, String>(0)?,
+            "name": r.get::<_, String>(1)?,
+            "sku": r.get::<_, Option<String>>(2)?,
+            "unit_price": r.get::<_, i64>(3)?,
+            "quantity": r.get::<_, f64>(4)?,
+        }))
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+/// Low-stock list for the POS screen — a cashier's own "what needs
+/// restocking" awareness, not a business-intelligence report. Same
+/// "at or below reorder_level" definition ai_context.rs's own
+/// low-stock flag already uses (kept as matching, independent code
+/// rather than refactoring that function to share this one — that
+/// function is woven into a much larger, unrelated loop, and pulling
+/// a piece out of it isn't worth the risk of disturbing something
+/// working for a change this narrow), so this always agrees with
+/// what the AI assistant and Business Pulse already call "low stock."
+/// Gated on "sell", same as lookup_products above and for the exact
+/// same reason: a cashier already has this permission to ring up
+/// sales at all, and needing to know what's running low is part of
+/// that same job, not a step up to full Inventory access.
+pub fn low_stock_items(conn: &Connection, business_id: &str, user_id: &str, limit: i64) -> Result<Vec<Value>> {
+    crate::rbac::require(conn, user_id, "inventory", "sell")?;
+    let inventory_module = crud::load_module(conn, business_id, "inventory")
+        .map_err(|_| anyhow!("the Inventory module isn't enabled for this business"))?;
+    let table = inventory_module.table_name();
+    let limit = limit.clamp(1, 100);
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT name, quantity, reorder_level FROM {table}
+         WHERE business_id = ?1 AND deleted_at IS NULL AND quantity <= reorder_level
+         ORDER BY quantity ASC LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![business_id, limit], |r| {
+        Ok(json!({
+            "name": r.get::<_, String>(0)?,
+            "quantity": r.get::<_, f64>(1)?,
+            "reorder_level": r.get::<_, f64>(2)?,
+        }))
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
 /// Runs the whole checkout as one atomic transaction. On success,
@@ -97,6 +211,17 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     }
     let inventory_table = inventory_module.table_name();
 
+    // Validated once, up front — same "reject before any write
+    // happens" discipline as every other check in this function (see
+    // the quantity/cost/stock checks in the loop below). 0 is "no
+    // discount" and always valid; NaN is rejected explicitly since
+    // `(0.0..=100.0).contains(&f64::NAN)` is false but with no useful
+    // error message on its own.
+    let discount_pct = req.discount_pct.unwrap_or(0.0);
+    if discount_pct.is_nan() || !(0.0..=100.0).contains(&discount_pct) {
+        return Err(anyhow!("discount must be between 0 and 100 percent"));
+    }
+
     // For display only (error messages below) — every actual money
     // computation in this function stays in integer cents throughout,
     // per money.rs. Same "default USD if this fails, never block the
@@ -123,6 +248,11 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     // construction; there is no fractional cent that could ever need
     // rounding here, unlike the f64 subtotal this replaced.
     let mut subtotal: i64 = 0;
+    // Sum of every line's discount_amount — see the per-line
+    // computation below. Used for the credit-sale debt amount, the
+    // auto-generated invoice's synthetic "Discount" line, and the
+    // response payload.
+    let mut total_discount: i64 = 0;
 
     let tx = conn.transaction()?;
 
@@ -201,8 +331,44 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
 
         // Exact — integer cents times an integer quantity is still an
         // exact integer, no rounding step needed or allowed here.
-        let line_total: i64 = unit_price * item.quantity;
+        let original_line_total: i64 = unit_price * item.quantity;
+
+        // THE ACTUAL FIX Deric asked for (discounts): applied
+        // identically to every line as a percentage of that line's own
+        // original total — mathematically the same result as
+        // discounting the whole cart's total at once (summing first
+        // then discounting, or discounting then summing, gives the same
+        // answer for a flat percentage), so this doesn't need a second
+        // "spread the discount across lines" step or its own rounding
+        // scheme. Reuses the exact same crate::money::apply_rate helper
+        // receipt.rs's own tax calculation already relies on, rather
+        // than writing a second, slightly different way to apply a
+        // percentage to a money amount.
+        let discount_amount: i64 = crate::money::apply_rate(original_line_total, discount_pct / 100.0);
+        let line_total: i64 = original_line_total - discount_amount;
+
+        // A discount is a SECOND, independent way this exact line could
+        // end up selling at a loss, on top of the plain listed-price
+        // check just above — that one only catches an item mispriced to
+        // begin with; this one catches a correctly-priced item that a
+        // discount pushes under cost anyway. Compared as line TOTALS,
+        // not per-unit prices, specifically so this never needs its own
+        // division/rounding rule distinct from the one above — no
+        // override exists for this, same as the check above: a sale
+        // that would go below cost is rejected outright, full stop.
+        let cost_total_for_check: i64 = unit_cost * item.quantity;
+        if line_total < cost_total_for_check {
+            let discounted_display = crate::money::format_money(line_total, &business_currency);
+            let cost_display = crate::money::format_money(cost_total_for_check, &business_currency);
+            return Err(anyhow!(
+                "cannot sell '{name}' at a {discount_pct}% discount: {} × {discounted_display} would be \
+                 below its {cost_display} cost. Lower the discount or raise the price first.",
+                item.quantity
+            ));
+        }
+
         subtotal += line_total;
+        total_discount += discount_amount;
 
         // THE ACTUAL FIX Deric asked for: snapshot what this item
         // actually cost, right now, at the exact moment it's sold —
@@ -230,6 +396,13 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         record.insert("unit_price".into(), json!(unit_price));
         record.insert("order_id".into(), json!(order_id));
         record.insert("cost_at_sale".into(), json!(cost_total));
+        // The discount actually applied to this exact line, frozen at
+        // sale time — see v23_sales_discount_amount's own comment on
+        // why this needs to be its own field rather than derived later
+        // from unit_price and revenue (refund.rs mutates revenue
+        // directly, which would make that derivation wrong after any
+        // refund).
+        record.insert("discount_amount".into(), json!(discount_amount));
         // THE BUG THIS FIXES: `sale_date` is a real, declared field on
         // the Sales schema (sales.json) that nothing ever actually
         // wrote to — not checkout, not service_sale.rs, not Excel
@@ -282,6 +455,7 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             "quantity": item.quantity,
             "unit_price": unit_price,
             "line_total": line_total,
+            "discount_amount": discount_amount,
             "unit_cost": unit_cost,
             "cost_total": cost_total,
             "remaining_stock": new_qty,
@@ -392,6 +566,24 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     // Bookkeeping post just above: a business that hasn't enabled the
     // Invoice module can still ring up a sale.
     if crud::load_module(&tx, business_id, "invoice").is_ok() {
+        // A synthetic line, not a real product — invoice.rs's
+        // InvoiceItem has no field for "this is a discount, not an
+        // item," so a negative-amount line with its own description is
+        // the same well-understood convention printed receipts already
+        // use for this. Without it, every real line above still shows
+        // its ORIGINAL, undiscounted unit_price (see this function's
+        // own comment on why unit_price is never touched by a
+        // discount), so the invoice's line items would visibly fail to
+        // add up to the discounted `subtotal` passed in below — this
+        // is what keeps them consistent.
+        let mut invoice_items = invoice_items;
+        if total_discount > 0 {
+            invoice_items.push(crate::invoice::InvoiceItem {
+                description: "Discount".to_string(),
+                quantity: 1,
+                unit_price: -total_discount,
+            });
+        }
         crate::invoice::create_invoice_for_order(
             &tx,
             business_id,
@@ -418,6 +610,7 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         "customer_id": customer_id,
         "payment_method": req.payment_method,
         "subtotal": subtotal,
+        "discount_amount": total_discount,
         "item_count": req.items.len(),
         "items": lines,
         "on_credit": req.on_credit,

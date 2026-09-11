@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 22;
+const CURRENT_VERSION: i32 = 23;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -42,7 +42,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 20 { v20_sales_order_id_index(conn)?; }
     if current < 21 { v21_add_can_view_reports(conn)?; }
     if current < 22 { v22_backfill_sale_date(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 22, "bump this alongside the last `if current < N` check above");
+    if current < 23 { v23_sales_discount_amount(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 23, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -1444,6 +1445,84 @@ fn v22_backfill_sale_date(conn: &mut Connection) -> Result<()> {
         )?;
     }
     tx.execute("INSERT INTO _schema_version (version) VALUES (22)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+// THE ACTUAL FIX Deric asked for: POS discounts, integrated correctly
+// with cost-floor protection, tax, and receipts (see pos::checkout's
+// own comment on the discount math, and receipt.rs for how it's
+// surfaced). `discount_amount` is a frozen, as-sold snapshot — same
+// "historical fact, never touched by a later refund" role
+// `cost_at_sale` already plays (see v17 above) — so refund.rs's
+// existing `revenue = MAX(0, revenue - refund_amount)` math keeps
+// working completely unchanged: it already refunds out of whatever
+// `revenue` currently holds, which correctly starts as the
+// POST-discount amount.
+//
+// Same two-part shape as v17 above, and for the identical reason:
+// adding the column to the physical table isn't enough on its own —
+// `modules.schema_json` is a per-business snapshot taken at
+// enable-time, so an already-enabled Sales module also needs its
+// stored schema patched or crud::insert_validated_record would
+// silently drop this field on every future checkout, since its
+// column-building loop only ever walks the fields a module's OWN
+// schema says it has.
+fn v23_sales_discount_amount(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_sales'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists == 1 {
+        let already_has_column: i64 = tx.query_row(
+            "SELECT count(*) FROM pragma_table_info('module_sales') WHERE name='discount_amount'",
+            [],
+            |r| r.get(0),
+        )?;
+        if already_has_column == 0 {
+            tx.execute("ALTER TABLE module_sales ADD COLUMN discount_amount INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+    }
+
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT business_id, schema_json FROM modules WHERE id = 'sales' AND enabled = 1",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (business_id, schema_json) in rows {
+        let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+            Ok(v) => v,
+            Err(_) => continue, // corrupt snapshot pre-dating this migration is out of scope to repair here; leave it untouched rather than risk making it worse
+        };
+        let mut changed = false;
+        if let Some(fields) = parsed.get_mut("fields").and_then(|f| f.as_array_mut()) {
+            let already_present = fields.iter().any(|f| f.get("name").and_then(|n| n.as_str()) == Some("discount_amount"));
+            if !already_present {
+                fields.push(serde_json::json!({
+                    "name": "discount_amount",
+                    "type": "money",
+                    "required": true,
+                    "unique": false,
+                    "default": 0,
+                }));
+                changed = true;
+            }
+        }
+        if changed {
+            let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+            tx.execute(
+                "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'sales'",
+                rusqlite::params![new_json, business_id],
+            )?;
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (23)", [])?;
     tx.commit()?;
     Ok(())
 }

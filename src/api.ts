@@ -251,6 +251,9 @@ export interface CheckoutRequest {
   allow_oversell?: boolean;
   on_credit?: boolean;
   due_date?: string;
+  // Whole-cart percentage discount, 0–100 — see pos::checkout's own
+  // comment for the exact math and why this is percentage-only for now.
+  discount_pct?: number;
 }
 export const checkout = (req: CheckoutRequest) =>
   request('/pos/checkout', { method: 'POST', body: JSON.stringify(req) });
@@ -449,6 +452,34 @@ export interface SlowMover {
 export const getSlowMovers = (days = 30, limit = 20): Promise<{ items: SlowMover[] }> =>
   request(`/inventory/slow-movers?days=${days}&limit=${limit}`);
 
+// Stock runway — days of stock left at recent selling pace. See
+// stock_health::stock_runway.
+export interface StockRunway {
+  item_name: string;
+  quantity: number;
+  avg_daily_sales: number;
+  days_of_stock_left: number | null;
+}
+export const getStockRunway = (days = 30, limit = 15): Promise<{ items: StockRunway[] }> =>
+  request(`/inventory/stock-runway?days=${days}&limit=${limit}`);
+
+// Day-of-week sales pattern — see sales_patterns::day_of_week_pattern.
+export interface DayOfWeekPattern {
+  day_name: string;
+  avg_revenue_cents: number;
+  avg_order_count: number;
+  occurrences: number;
+}
+export const getDayOfWeekPattern = (days = 90): Promise<{ items: DayOfWeekPattern[] }> =>
+  request(`/sales/day-of-week?days=${days}`);
+
+// Dashboard highlights — see report_highlights.rs.
+export interface ReportHighlights {
+  most_urgent_item: { item_name: string; days_of_stock_left: number } | null;
+  busiest_day: { day_name: string; avg_revenue_cents: number } | null;
+}
+export const getReportHighlights = (): Promise<ReportHighlights> => request('/reports/highlights');
+
 // "Frequently bought together" — see basket_analysis.rs. Read-only
 // aggregation over data pos.rs already records (one order_id shared
 // across a checkout's line items); start/end are plain YYYY-MM-DD
@@ -471,6 +502,17 @@ export const getBasketAffinity = (params: { start?: string; end?: string; limit?
 export const getModuleSchema = (moduleId: string) => request(`/modules/${moduleId}/schema`);
 export const listRecords = (moduleId: string, search?: string) =>
   request(`/modules/${moduleId}/records${search ? `?search=${encodeURIComponent(search)}` : ''}`);
+// POS product lookup — needs only "sell" on Inventory, not "read".
+// Deliberately not listRecords('inventory', ...): that requires "read",
+// which also opens the door to the full Inventory module, its Reports
+// tab, and Dashboard/Analytics built from the same data. This returns
+// only the 5 fields the POS screen actually uses (see pos::lookup_products).
+export const lookupPosProducts = (search?: string) =>
+  request(`/pos/products${search ? `?search=${encodeURIComponent(search)}` : ''}`);
+// Same "sell"-gated, cashier-facing narrowness as lookupPosProducts —
+// a restocking checklist, not a business report.
+export const getPosLowStock = (): Promise<{ items: { name: string; quantity: number; reorder_level: number }[] }> =>
+  request('/pos/low-stock');
 export const createRecord = (moduleId: string, data: Record<string, unknown>) =>
   request(`/modules/${moduleId}/records`, { method: 'POST', body: JSON.stringify(data) });
 export const updateRecord = (moduleId: string, id: string, data: Record<string, unknown>) =>

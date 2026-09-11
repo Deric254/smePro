@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { listRecords, checkout, getOrder, processRefund, getBusinessInfo, ApiError } from '../api';
+import { lookupPosProducts, getPosLowStock, checkout, getOrder, processRefund, getBusinessInfo, ApiError } from '../api';
 import ReceiptView from '../components/ReceiptView';
 import CustomerPicker from '../components/CustomerPicker';
 import type { Record_ } from '../types';
@@ -39,6 +39,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   const [onCredit, setOnCredit] = useState(false);
   const [dueDate, setDueDate] = useState('');
   const [allowOversell, setAllowOversell] = useState(false);
+  const [discountPct, setDiscountPct] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Integer cents everywhere below — see src/lib/money.ts. Fetched
@@ -48,10 +49,18 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   const [currency, setCurrency] = useState('USD');
   const [showBrandingNudge, setShowBrandingNudge] = useState(false);
   const [receipt, setReceipt] = useState<{
-    order_id: string; subtotal: number; customer?: string; payment_method?: string; on_credit?: boolean;
-    items: { name: string; sku: string; quantity: number; unit_price: number; line_total: number; remaining_stock: number }[];
+    order_id: string; subtotal: number; discount_amount?: number; customer?: string; payment_method?: string; on_credit?: boolean;
+    items: { name: string; sku: string; quantity: number; unit_price: number; line_total: number; discount_amount?: number; remaining_stock: number }[];
   } | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
+  // Cashier's own restocking awareness — see pos::low_stock_items.
+  // Fetched once, best-effort: if this role can't sell (shouldn't be
+  // possible for anyone reaching this screen) or Inventory isn't
+  // enabled, this just stays empty and the badge below never renders
+  // — same fail-quiet pattern as every other best-effort fetch in
+  // this app.
+  const [lowStock, setLowStock] = useState<{ name: string; quantity: number; reorder_level: number }[]>([]);
+  const [showLowStock, setShowLowStock] = useState(false);
 
   // ---- Refund flow state ----
   const [orderIdInput, setOrderIdInput] = useState('');
@@ -143,6 +152,10 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       .catch(() => {}); // default 'USD' stands if this fails — never blocks the POS screen
   }, []);
 
+  useEffect(() => {
+    getPosLowStock().then((r) => setLowStock(r.items)).catch(() => {});
+  }, []);
+
   // Guards against a slow response for an OLDER product-list request
   // overwriting the screen after a newer one has already resolved —
   // e.g. checkout's fetch and a debounced search fetch landing back
@@ -190,7 +203,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   // checkout, not reflected on screen until then.
   function refreshProducts() {
     const requestId = ++productsRequestRef.current;
-    return listRecords('inventory', search || undefined)
+    return lookupPosProducts(search || undefined)
       .then((r) => {
         if (requestId !== productsRequestRef.current) return; // a newer request already landed
         // Highest stock first by default — the products a cashier is
@@ -274,6 +287,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
         allow_oversell: allowOversell,
         on_credit: onCredit,
         due_date: onCredit ? (dueDate || undefined) : undefined,
+        discount_pct: discountPct ? Number(discountPct) : undefined,
       });
       setReceipt(result);
       setCart([]);
@@ -281,6 +295,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       setCustomerPhone('');
       setDueDate('');
       setOnCredit(false);
+      setDiscountPct('');
       refreshProducts(); // stock just changed — the grid should show it now, not after the next search keystroke
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Checkout failed');
@@ -309,6 +324,12 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
               <span>{formatMoney(item.line_total, currency)}</span>
             </div>
           ))}
+          {!!receipt.discount_amount && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', padding: '0.3rem 0', color: 'var(--warn)' }}>
+              <span>Discount</span>
+              <span>−{formatMoney(receipt.discount_amount, currency)}</span>
+            </div>
+          )}
           <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: '1.05rem', marginTop: '0.8rem', paddingTop: '0.6rem', borderTop: '2px solid var(--ink)' }}>
             <span>Total</span>
             <span>{formatMoney(receipt.subtotal, currency)}</span>
@@ -479,6 +500,31 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       {mode === 'sell' && (
       <div className="pos-layout">
         <div>
+          {lowStock.length > 0 && (
+            <div style={{ position: 'relative', marginBottom: '0.5rem' }}>
+              <button
+                type="button"
+                onClick={() => setShowLowStock(!showLowStock)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
+                  padding: '0.25rem 0.6rem', borderRadius: 999, fontSize: '0.75rem', fontWeight: 600,
+                  border: '1px solid var(--warn)', background: 'var(--warn-wash)', color: 'var(--warn)', cursor: 'pointer',
+                }}
+              >
+                {lowStock.length} low on stock
+              </button>
+              {showLowStock && (
+                <div className="card" style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.3rem', zIndex: 5, minWidth: 220, maxHeight: 220, overflowY: 'auto', padding: '0.5rem 0.7rem' }}>
+                  {lowStock.map((it) => (
+                    <div key={it.name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', padding: '0.25rem 0' }}>
+                      <span>{it.name}</span>
+                      <span style={{ color: 'var(--warn)', fontWeight: 600 }}>{it.quantity}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <input
             placeholder="Search products…"
             value={search}
@@ -536,6 +582,30 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
             <span>{formatMoney(subtotal, currency)}</span>
           </div>
 
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.5rem', gap: '0.6rem' }}>
+            <label style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', whiteSpace: 'nowrap' }}>Discount %</label>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={discountPct}
+              onChange={(e) => setDiscountPct(e.target.value)}
+              placeholder="0"
+              style={{ width: 70, textAlign: 'right' }}
+            />
+          </div>
+          {!!discountPct && Number(discountPct) > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: 'var(--warn)', marginTop: '0.3rem' }}>
+              <span>After discount</span>
+              {/* Client-side preview only, for the cashier's own
+                  confirmation before submitting — the server (see
+                  pos::checkout) is the one place that actually
+                  computes and validates this, including the cost-floor
+                  check a badly-mistyped discount could trip. This
+                  number is never trusted, only shown. */}
+              <span>{formatMoney(Math.max(0, subtotal - Math.round(subtotal * (Number(discountPct) / 100))), currency)}</span>
+            </div>
+          )}
+
           <div style={{ marginTop: '1rem' }}>
             <CustomerPicker
               name={customer}
@@ -550,10 +620,60 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
             </div>
           )}
 
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', textTransform: 'none', fontSize: '0.85rem', marginTop: '0.8rem', cursor: 'pointer' }}>
-            <input type="checkbox" checked={onCredit} onChange={(e) => setOnCredit(e.target.checked)} />
-            Sell on credit (adds to Debt &amp; Credit)
-          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.8rem' }}>
+            {/* THE PROBLEM THIS FIXES: two full-sentence checkbox rows
+                ("Sell on credit (adds to Debt & Credit)" and "Allow
+                selling more than what's in stock") ate a lot of
+                vertical space on a screen that's tight for it,
+                especially on phones. Replaced with small, color-coded
+                toggle chips — no label at rest, full description on
+                hover via the native `title` attribute (zero added JS,
+                zero extra hover-tracking state to get wrong or ever
+                lag). A bare colored dot with nothing on it would leave
+                a phone user with zero cue what it does, since hover
+                doesn't exist on touch — so each keeps a single-letter
+                mark, not a full word, as a middle ground: compact, but
+                not silently mysterious on the platform this app is
+                used on the most.
+                Colors are existing theme variables only — --stamp
+                (the same accent the checkout button itself uses; a
+                credit sale is a normal, supported path here, not a
+                risk) and --warn (oversell is a deliberate override of
+                the system's own stock check, closer in spirit to a
+                caution than a routine choice). Both already adapt
+                correctly across every theme (see index.css) — nothing
+                new introduced. */}
+            <button
+              type="button"
+              title="Sell on credit (adds to Debt & Credit)"
+              aria-label="Sell on credit"
+              aria-pressed={onCredit}
+              onClick={() => setOnCredit(!onCredit)}
+              style={{
+                width: 30, height: 30, borderRadius: '50%', flexShrink: 0, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: '0.7rem', fontWeight: 700, lineHeight: 1,
+                border: onCredit ? 'none' : '1px solid var(--paper-line)',
+                background: onCredit ? 'var(--stamp)' : 'transparent',
+                color: onCredit ? '#fff' : 'var(--ink-soft)',
+              }}
+            >C</button>
+            <button
+              type="button"
+              title="Allow selling more than what's in stock"
+              aria-label="Allow selling more than stock on hand"
+              aria-pressed={allowOversell}
+              onClick={() => setAllowOversell(!allowOversell)}
+              style={{
+                width: 30, height: 30, borderRadius: '50%', flexShrink: 0, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: '0.7rem', fontWeight: 700, lineHeight: 1,
+                border: allowOversell ? 'none' : '1px solid var(--paper-line)',
+                background: allowOversell ? 'var(--warn)' : 'transparent',
+                color: allowOversell ? '#fff' : 'var(--ink-soft)',
+              }}
+            >O</button>
+          </div>
 
           {onCredit ? (
             <div style={{ marginTop: '0.6rem' }}>
@@ -571,11 +691,6 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
               </select>
             </div>
           )}
-
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', textTransform: 'none', fontSize: '0.8rem', marginTop: '0.6rem', cursor: 'pointer', color: 'var(--ink-soft)' }}>
-            <input type="checkbox" checked={allowOversell} onChange={(e) => setAllowOversell(e.target.checked)} />
-            Allow selling more than what's in stock
-          </label>
         </div>
 
           {/* Pinned below the scrollable area, never inside it, so the
