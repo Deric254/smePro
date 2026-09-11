@@ -7,19 +7,24 @@ use crate::business_pulse;
 /// only way to get sales history spread across two different months
 /// in a test that has to run instantly, not actually wait a month.
 ///
-/// `cost_at_sale` is listed explicitly as 0 — the column is `NOT NULL`
-/// with no SQL-level default for exactly the reason db_migrations.rs's
-/// v17 doc comment gives (a silently-NULL cost would poison
-/// profit.rs's SUM()), so this raw INSERT, unlike crud::create's own,
-/// has to supply a real value itself rather than relying on
-/// application-layer default-fill it deliberately bypasses. 0 is also
-/// the honest value here regardless: these tests are about revenue
-/// trends, not cost/profit, and this sale never went through
-/// pos.rs::checkout(), so there's no real cost to snapshot.
+/// `cost_at_sale` and `discount_amount` are both listed explicitly as
+/// 0 — each column is `NOT NULL` with no SQL-level default (module
+/// table columns are generated straight from each field's `required`
+/// flag in module.rs's `field_column_defs`; the JSON `"default"` a
+/// field declares is only ever applied by the application layer, e.g.
+/// crud::create's default-fill, never baked into the column itself —
+/// see module.rs's own doc comment on `field_column_defs`). This raw
+/// INSERT bypasses crud::create entirely, so it has to supply real
+/// values for both rather than relying on the default-fill it
+/// deliberately skips. 0 is also the honest value for both here
+/// regardless: these tests are about revenue trends, not cost/profit
+/// or discounting, and this sale never went through
+/// pos.rs::checkout(), so there's no real cost or discount to
+/// snapshot.
 fn seed_sale(conn: &rusqlite::Connection, business_id: &str, revenue_cents: i64, created_at: &str) {
     conn.execute(
-        "INSERT INTO module_sales (id, business_id, item_name, quantity, revenue, unit_price, cost_at_sale, created_at, updated_at)
-         VALUES (lower(hex(randomblob(16))), ?1, 'Test Item', 1, ?2, ?2, 0, ?3, ?3)",
+        "INSERT INTO module_sales (id, business_id, item_name, quantity, revenue, unit_price, cost_at_sale, discount_amount, created_at, updated_at)
+         VALUES (lower(hex(randomblob(16))), ?1, 'Test Item', 1, ?2, ?2, 0, 0, ?3, ?3)",
         rusqlite::params![business_id, revenue_cents, created_at],
     )
     .unwrap();
