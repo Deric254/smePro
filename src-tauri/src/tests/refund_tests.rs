@@ -11,6 +11,7 @@ fn make_inventory_item(conn: &rusqlite::Connection, biz: &str, sku: &str, name: 
 
 fn checkout_one(conn: &mut rusqlite::Connection, biz: &str, uid: &str, inv_id: &str, qty: i64) -> serde_json::Value {
     let req = crate::pos::CheckoutRequest {
+        idempotency_key: None,
         discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id.to_string(), quantity: qty }],
         payment_method: Some("Cash".into()),

@@ -227,24 +227,31 @@ async fn rollback_to_manifest(app: tauri::AppHandle, token: String, tag: String)
     use tauri::Manager;
     use tauri_plugin_updater::UpdaterExt;
 
-    // Re-open the same database this device's own HTTP-API uses (see
-    // this same file's `setup()` closure for why `erp.db` under
-    // `app_data_dir` is the one true path) rather than trusting any
-    // connection or identity the frontend claims to already have.
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let db_path = app_data_dir.join("erp.db").to_string_lossy().to_string();
-    let conn = db::open(&db_path).map_err(|e| e.to_string())?;
+    // Everything that touches the database is confined to this block,
+    // and `conn` is dropped at its closing brace — BEFORE the first
+    // `.await` below. rusqlite's `Connection` isn't `Send`, and a
+    // Tauri async command's returned future has to be (the runtime
+    // executes commands on a thread pool), so a connection can never
+    // be left alive across an await point here. `manifest_url` — a
+    // plain, owned `String` — is the only thing that needs to survive
+    // out of this block.
+    let manifest_url = {
+        let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let db_path = app_data_dir.join("erp.db").to_string_lossy().to_string();
+        let conn = db::open(&db_path).map_err(|e| e.to_string())?;
 
-    let (user_id, _business_id) = auth::current_user(&conn, &token).map_err(|e| e.to_string())?;
+        let (user_id, _business_id) = auth::current_user(&conn, &token).map_err(|e| e.to_string())?;
 
-    // Re-checks Owner status AND schema compatibility from scratch,
-    // and returns a manifest_url this app built itself from `REPO` —
-    // never one supplied by the caller.
-    let check = rollback::check_rollback_target(&conn, &user_id, &tag).map_err(|e| e.to_string())?;
+        // Re-checks Owner status AND schema compatibility from
+        // scratch, and returns a manifest_url this app built itself
+        // from `REPO` — never one supplied by the caller.
+        let check = rollback::check_rollback_target(&conn, &user_id, &tag).map_err(|e| e.to_string())?;
+        check.manifest_url
+    };
 
     let updater = app
         .updater_builder()
-        .endpoints(vec![check.manifest_url.parse().map_err(|e| format!("not a valid URL: {e}"))?])
+        .endpoints(vec![manifest_url.parse().map_err(|e| format!("not a valid URL: {e}"))?])
         .map_err(|e| e.to_string())?
         .version_comparator(|_current, _remote| true)
         .build()

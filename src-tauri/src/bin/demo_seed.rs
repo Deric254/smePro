@@ -67,21 +67,29 @@ fn main() -> Result<()> {
     let soap_id = items.iter().find(|r| r["sku"] == serde_json::json!("SOAP-BAR")).unwrap()["id"].as_str().unwrap().to_string();
 
     core_engine::pos::checkout(&mut conn, &business_id, &owner_id, core_engine::pos::CheckoutRequest {
+        idempotency_key: None,
+        discount_pct: None,
         items: vec![core_engine::pos::CartItem { inventory_record_id: rice_id.clone(), quantity: 3 }],
         payment_method: Some("Cash".into()), customer: Some("Amina".into()), customer_phone: None,
         allow_oversell: false, on_credit: false, due_date: None,
     })?;
     core_engine::pos::checkout(&mut conn, &business_id, &owner_id, core_engine::pos::CheckoutRequest {
+        idempotency_key: None,
+        discount_pct: None,
         items: vec![core_engine::pos::CartItem { inventory_record_id: oil_id, quantity: 2 }],
         payment_method: Some("M-Pesa".into()), customer: Some("Brian".into()), customer_phone: None,
         allow_oversell: false, on_credit: false, due_date: None,
     })?;
     core_engine::pos::checkout(&mut conn, &business_id, &owner_id, core_engine::pos::CheckoutRequest {
+        idempotency_key: None,
+        discount_pct: None,
         items: vec![core_engine::pos::CartItem { inventory_record_id: soap_id, quantity: 2 }],
         payment_method: None, customer: None, customer_phone: None,
         allow_oversell: false, on_credit: false, due_date: None,
     })?;
     core_engine::pos::checkout(&mut conn, &business_id, &owner_id, core_engine::pos::CheckoutRequest {
+        idempotency_key: None,
+        discount_pct: None,
         items: vec![core_engine::pos::CartItem { inventory_record_id: rice_id, quantity: 1 }],
         payment_method: Some("Cash".into()), customer: None, customer_phone: None,
         allow_oversell: false, on_credit: false, due_date: None,

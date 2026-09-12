@@ -17,6 +17,7 @@ fn test_moving_average_forecast_rejects_zero_window() {
 
     let inv_id = seed_inventory_item(&conn, &biz, "FCAST-001", "Forecast Item", 50, 100, 200);
     let req = crate::pos::CheckoutRequest {
+        idempotency_key: None,
         discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
         payment_method: Some("Cash".into()),
@@ -44,6 +45,7 @@ fn test_moving_average_forecast_accepts_a_real_window() {
 
     let inv_id = seed_inventory_item(&conn, &biz, "FCAST-002", "Forecast Item 2", 50, 100, 200);
     let req = crate::pos::CheckoutRequest {
+        idempotency_key: None,
         discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
         payment_method: Some("Cash".into()),
@@ -96,6 +98,7 @@ fn test_exponential_smoothing_forecast_accepts_the_full_valid_range() {
 
     let inv_id = seed_inventory_item(&conn, &biz, "FCAST-004", "Forecast Item 4", 50, 100, 200);
     let req = crate::pos::CheckoutRequest {
+        idempotency_key: None,
         discount_pct: None,
         items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
         payment_method: Some("Cash".into()),
