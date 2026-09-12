@@ -11,6 +11,11 @@ export default function SlowMoversCard({ items, currency }: { items: SlowMover[]
     );
   }
 
+  // Total across this slow-movers list only (there's no whole-business
+  // inventory value passed in here) — so the % reads as "share of the
+  // at-risk stock shown", the same "of shown" honesty as TopCustomersCard.
+  const totalAtRisk = items.reduce((sum, it) => sum + it.value_at_risk_cents, 0);
+
   return (
     <div className="card" style={{ padding: '0.9rem 1.1rem' }}>
       <div style={{ fontWeight: 600, marginBottom: '0.2rem' }}>Slow-moving stock</div>
@@ -29,8 +34,13 @@ export default function SlowMoversCard({ items, currency }: { items: SlowMover[]
                 {it.quantity} in stock · {it.days_since_last_sale === null ? 'never sold' : `last sold ${it.days_since_last_sale}d ago`}
               </div>
             </div>
-            <div style={{ fontWeight: 600, flexShrink: 0 }}>
-              {formatMoney(it.value_at_risk_cents, currency)}
+            <div style={{ textAlign: 'right', flexShrink: 0 }}>
+              <div style={{ fontWeight: 600 }}>{formatMoney(it.value_at_risk_cents, currency)}</div>
+              {totalAtRisk > 0 && (
+                <div style={{ fontSize: '0.74rem', color: 'var(--ink-soft)' }}>
+                  {((it.value_at_risk_cents / totalAtRisk) * 100).toFixed(1)}% of shown
+                </div>
+              )}
             </div>
           </div>
         ))}

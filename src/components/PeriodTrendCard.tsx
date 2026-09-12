@@ -1,10 +1,10 @@
 import type { PeriodTrendPoint } from '../api';
 import { formatMoney } from '../lib/money';
 
-// Shared by the weekly and monthly trend sections on the Reports
-// page — same data shape (sales_patterns::PeriodTrendPoint), same
-// "is this bucket even finished yet" honesty concern either way, so
-// one component renders both rather than two near-identical copies.
+// Renders the monthly trend section on the Reports page — data shape
+// is sales_patterns::PeriodTrendPoint, with the "is this bucket even
+// finished yet" honesty concern baked in for the current in-progress
+// month.
 export default function PeriodTrendCard({
   title,
   items,

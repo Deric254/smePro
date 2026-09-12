@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   listModules, getModuleSchema, getBusinessInfo, getDebtSummary, getGrossProfitSummary,
   getBasketAffinity, getProfitByItem, getDebtAging, getSlowMovers, getStockRunway,
-  getRefundRateByItem, getDayOfWeekPattern, getHourOfDayPattern, getWeeklyTrend, getMonthlyTrend, getSeasonalPattern, runReport,
+  getRefundRateByItem, getDayOfWeekPattern, getHourOfDayPattern, getMonthlyTrend, getSeasonalPattern, runReport,
 } from '../api';
 import type {
   DebtSummary, GrossProfitSummary, BasketPair, ItemProfit, DebtAgingSummary,
@@ -100,7 +100,6 @@ export default function Reports() {
 
   const [dayOfWeek, setDayOfWeek] = useState<DayOfWeekPattern[] | null>(null);
   const [hourOfDay, setHourOfDay] = useState<HourOfDayPattern[] | null>(null);
-  const [weeklyTrend, setWeeklyTrend] = useState<PeriodTrendPoint[] | null>(null);
   const [monthlyTrend, setMonthlyTrend] = useState<PeriodTrendPoint[] | null>(null);
   const [seasonal, setSeasonal] = useState<SeasonalMonthPattern[] | null>(null);
   const [patternsLoading, setPatternsLoading] = useState(false);
@@ -170,7 +169,6 @@ export default function Reports() {
     Promise.allSettled([
       getDayOfWeekPattern(90).then((r) => setDayOfWeek(r.items)),
       getHourOfDayPattern(30).then((r) => setHourOfDay(r.items)),
-      getWeeklyTrend(12).then((r) => setWeeklyTrend(r.items)),
       getMonthlyTrend(12).then((r) => setMonthlyTrend(r.items)),
       getSeasonalPattern().then((r) => setSeasonal(r.items)),
     ]).finally(() => setPatternsLoading(false));
@@ -254,14 +252,6 @@ export default function Reports() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
           {dayOfWeek && <DayOfWeekCard items={dayOfWeek} currency={currency} />}
           {hourOfDay && <HourOfDayCard items={hourOfDay} currency={currency} />}
-          {weeklyTrend && (
-            <PeriodTrendCard
-              title="Weekly trend (last 12 weeks)"
-              items={weeklyTrend}
-              currency={currency}
-              formatLabel={(label) => `Wk of ${label.slice(5)}`}
-            />
-          )}
           {monthlyTrend && (
             <PeriodTrendCard
               title="Monthly trend (last 12 months)"

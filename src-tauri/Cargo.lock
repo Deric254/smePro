@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "core_engine"
-version = "0.1.63"
+version = "0.1.67"
 dependencies = [
  "anyhow",
  "argon2",

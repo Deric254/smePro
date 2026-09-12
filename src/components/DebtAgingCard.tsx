@@ -33,6 +33,11 @@ export default function DebtAgingCard({ aging, currency }: { aging: DebtAgingSum
             <span>{b.label}</span>
             <span style={{ color: 'var(--ink-soft)' }}>
               {b.count} · <strong style={{ color: 'var(--ink)' }}>{formatMoney(b.amount, currency)}</strong>
+              {aging.total_overdue_amount > 0 && (
+                <span style={{ marginLeft: '0.4rem' }}>
+                  ({((b.amount / aging.total_overdue_amount) * 100).toFixed(1)}%)
+                </span>
+              )}
             </span>
           </div>
         ))}

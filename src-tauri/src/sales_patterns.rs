@@ -108,95 +108,28 @@ pub fn day_of_week_pattern(
         .collect())
 }
 
-/// One bucket of a weekly or monthly trend — deliberately the same
-/// shape for both, since the honesty concerns are identical: real
-/// totals, a real zero for a bucket with no sales (never just absent
-/// from the list, which would look like missing data rather than a
-/// quiet period), and whether the bucket has actually finished yet.
+/// One bucket of a monthly trend — real totals, a real zero for a
+/// bucket with no sales (never just absent from the list, which would
+/// look like missing data rather than a quiet period), and whether
+/// the bucket has actually finished yet.
 #[derive(Debug, Serialize)]
 pub struct PeriodTrendPoint {
-    /// Week: the Monday it starts, "YYYY-MM-DD". Month: "YYYY-MM".
+    /// "YYYY-MM".
     pub label: String,
     pub revenue_cents: i64,
     pub order_count: i64,
-    /// False for the bucket `today` currently falls in — a week or
-    /// month still in progress isn't comparable to a full one next to
-    /// it (a Wednesday-only "this week" will always look slower than
-    /// a full past week, not because business is actually down).
+    /// False for the bucket `today` currently falls in — a month
+    /// still in progress isn't comparable to a full one next to it (a
+    /// three-day-old "this month" will always look slower than a
+    /// full past month, not because business is actually down).
     /// Every OTHER bucket in the returned list is always true: this
     /// only ever applies to the single most recent point.
     pub is_complete: bool,
 }
 
-/// `weeks` clamped to [2, 104] — one week alone isn't a trend, and two
-/// years is generous enough for a real trend view while still keeping
-/// the query window bounded. Weeks start Monday, matching
-/// report.rs's own `TimeBucket::Week` convention exactly, so a week
-/// label here means the same calendar week a Reports-page chart would
-/// show for it.
-pub fn weekly_trend(
-    conn: &Connection,
-    business_id: &str,
-    user_id: &str,
-    today: &str,
-    weeks: i64,
-    offset_minutes: i64,
-) -> Result<Vec<PeriodTrendPoint>> {
-    crate::rbac::require(conn, user_id, "sales", "read")?;
-    let sales_module = crud::load_module(conn, business_id, "sales")
-        .map_err(|_| anyhow!("the Sales module isn't enabled for this business"))?;
-    let table = sales_module.table_name();
-    let weeks = weeks.clamp(2, 104);
-    // Same reasoning as day_of_week_pattern's own offset handling —
-    // which calendar week a sale belongs to is exactly the kind of
-    // boundary a raw-UTC bucketing silently gets wrong near midnight.
-    let offset_minutes = offset_minutes.clamp(-720, 840);
-    let offset_modifier = format!("{offset_minutes:+} minutes");
-
-    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d").map_err(|_| anyhow!("invalid date"))?;
-    // Same Monday-start convention as report.rs's TimeBucket::Week —
-    // 'weekday 1' in SQLite's date() means "the next Monday on or
-    // before this date", i.e. the start of this ISO week.
-    let this_week_start = today_date - chrono::Duration::days((today_date.weekday().num_days_from_monday()) as i64);
-
-    // Every week label that SHOULD appear in the window, oldest
-    // first — same reasoning as day_of_week_pattern's `occurrences`
-    // array: a week with zero sales must still show up as a real
-    // zero, not silently vanish from a SQL GROUP BY that only ever
-    // sees weeks with at least one row.
-    let labels: Vec<NaiveDate> = (0..weeks).rev().map(|i| this_week_start - chrono::Duration::weeks(i)).collect();
-    let earliest = labels[0];
-
-    let sql = format!(
-        "SELECT date(created_at, ?3, '-6 days', 'weekday 1') AS week_start,
-                COALESCE(SUM(revenue), 0), COUNT(DISTINCT order_id)
-         FROM {table}
-         WHERE business_id = ?1 AND deleted_at IS NULL AND created_at >= ?2
-         GROUP BY week_start"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![business_id, earliest.to_string(), offset_modifier], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-    })?;
-    let mut by_label: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
-    for row in rows {
-        let (label, revenue, orders) = row?;
-        by_label.insert(label, (revenue, orders));
-    }
-
-    Ok(labels
-        .into_iter()
-        .map(|week_start| {
-            let label = week_start.to_string();
-            let (revenue_cents, order_count) = by_label.get(&label).copied().unwrap_or((0, 0));
-            PeriodTrendPoint { label, revenue_cents, order_count, is_complete: week_start < this_week_start }
-        })
-        .collect())
-}
-
-/// `months` clamped to [2, 36] — same reasoning as `weekly_trend`
-/// above, just a longer natural ceiling since a month is a coarser
-/// bucket (3 years of monthly points is still a manageable chart).
+/// `months` clamped to [2, 36] — one month alone isn't a trend, and
+/// three years is generous enough for a real trend view while still
+/// keeping a monthly chart a manageable size.
 pub fn monthly_trend(
     conn: &Connection,
     business_id: &str,
@@ -210,7 +143,9 @@ pub fn monthly_trend(
         .map_err(|_| anyhow!("the Sales module isn't enabled for this business"))?;
     let table = sales_module.table_name();
     let months = months.clamp(2, 36);
-    // Same reasoning as weekly_trend's own offset handling.
+    // Same reasoning as day_of_week_pattern's own offset handling —
+    // which calendar month a sale belongs to is exactly the kind of
+    // boundary a raw-UTC bucketing silently gets wrong near midnight.
     let offset_minutes = offset_minutes.clamp(-720, 840);
     let offset_modifier = format!("{offset_minutes:+} minutes");
 
@@ -218,9 +153,9 @@ pub fn monthly_trend(
     let this_month_label = format!("{:04}-{:02}", today_date.year(), today_date.month());
 
     // Same "every label must exist, even at zero" reasoning as
-    // weekly_trend above — walk back `months` calendar months from
-    // today rather than trusting SQL's GROUP BY to surface a month
-    // with no sales at all.
+    // day_of_week_pattern's `occurrences` array above — walk back
+    // `months` calendar months from today rather than trusting SQL's
+    // GROUP BY to surface a month with no sales at all.
     let labels: Vec<String> = (0..months)
         .rev()
         .map(|i| {
@@ -391,7 +326,7 @@ pub struct SeasonalMonthPattern {
 }
 
 /// Deliberately takes no `lookback_days`/window parameter the way the
-/// day-of-week and weekly/monthly trends above do — seasonality is
+/// day-of-week pattern and monthly trend above do — seasonality is
 /// inherently a question about ALL the history a business has, not a
 /// recent slice of it. Returns real per-year contributions rather
 /// than pretending a single year of data already IS the seasonal

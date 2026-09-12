@@ -1379,21 +1379,6 @@ fn route(
         };
     }
 
-    // ---- Weekly sales trend: /sales/weekly-trend?weeks=&offset_minutes=
-    // — see sales_patterns::weekly_trend. Reports-gated, same as every
-    // other sales_patterns endpoint on this page.
-    if parts.as_slice() == ["sales", "weekly-trend"] && *method == Method::Get {
-        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
-        let q = query_params(url);
-        let today = chrono::Utc::now().date_naive().to_string();
-        let weeks = q.get("weeks").and_then(|s| s.parse::<i64>().ok()).unwrap_or(12);
-        let offset_minutes = q.get("offset_minutes").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-        return match crate::sales_patterns::weekly_trend(conn, &business_id, &user_id, &today, weeks, offset_minutes) {
-            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
-            Err(e) => crud_error(&e),
-        };
-    }
-
     // ---- Monthly sales trend: /sales/monthly-trend?months=&offset_minutes=
     // — see sales_patterns::monthly_trend.
     if parts.as_slice() == ["sales", "monthly-trend"] && *method == Method::Get {

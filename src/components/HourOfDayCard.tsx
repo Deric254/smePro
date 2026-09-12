@@ -28,6 +28,9 @@ export default function HourOfDayCard({ items, currency }: { items: HourOfDayPat
   });
   const maxPeriodRevenue = Math.max(...byPeriod.map((p) => p.revenue_cents), 1);
   const maxHourRevenue = Math.max(...items.map((h) => h.avg_revenue_cents), 1);
+  // Share of the day's average revenue across the four periods, same
+  // reasoning as DayOfWeekCard — the bar gets a number attached.
+  const totalDayRevenue = byPeriod.reduce((sum, p) => sum + p.revenue_cents, 0);
 
   return (
     <div className="card" style={{ padding: '0.9rem 1.1rem' }}>
@@ -51,8 +54,13 @@ export default function HourOfDayCard({ items, currency }: { items: HourOfDayPat
               <div style={{ flex: 1, background: 'var(--paper-line)', borderRadius: 4, height: 8, overflow: 'hidden' }}>
                 <div style={{ width: `${(p.revenue_cents / maxPeriodRevenue) * 100}%`, background: 'var(--stamp)', height: '100%' }} />
               </div>
-              <span style={{ width: 74, flexShrink: 0, textAlign: 'right', fontWeight: 600 }}>
-                {formatMoney(p.revenue_cents, currency)}
+              <span style={{ width: 100, flexShrink: 0, textAlign: 'right' }}>
+                <span style={{ fontWeight: 600 }}>{formatMoney(p.revenue_cents, currency)}</span>
+                {totalDayRevenue > 0 && (
+                  <span style={{ fontSize: '0.74rem', color: 'var(--ink-soft)', marginLeft: '0.3rem' }}>
+                    ({((p.revenue_cents / totalDayRevenue) * 100).toFixed(0)}%)
+                  </span>
+                )}
               </span>
             </button>
             {expanded === p.period && (

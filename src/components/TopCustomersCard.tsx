@@ -15,6 +15,13 @@ export default function TopCustomersCard({ customers, currency }: { customers: {
     );
   }
 
+  // Share of revenue across this displayed list, not of the whole
+  // business — there's no total-revenue figure passed in here, and
+  // implying "% of all sales" from a top-10 slice would be a false
+  // precision. Labeled "of shown" below so that distinction stays
+  // visible instead of silently assumed.
+  const totalShown = customers.reduce((sum, c) => sum + c.value, 0);
+
   return (
     <div className="card" style={{ padding: '0.9rem 1.1rem' }}>
       <div style={{ fontWeight: 600, marginBottom: '0.2rem' }}>Top customers</div>
@@ -28,7 +35,14 @@ export default function TopCustomersCard({ customers, currency }: { customers: {
             }}
           >
             <span>{c.label}</span>
-            <span style={{ fontWeight: 600, flexShrink: 0 }}>{formatMoney(c.value, currency)}</span>
+            <div style={{ textAlign: 'right', flexShrink: 0 }}>
+              <div style={{ fontWeight: 600 }}>{formatMoney(c.value, currency)}</div>
+              {totalShown > 0 && (
+                <div style={{ fontSize: '0.74rem', color: 'var(--ink-soft)' }}>
+                  {((c.value / totalShown) * 100).toFixed(1)}% of shown
+                </div>
+              )}
+            </div>
           </div>
         ))}
       </div>

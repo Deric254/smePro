@@ -14,6 +14,9 @@ export default function DayOfWeekCard({ items, currency }: { items: DayOfWeekPat
 
   const maxRevenue = Math.max(...items.map((d) => d.avg_revenue_cents), 1);
   const minOccurrences = Math.min(...withData.map((d) => d.occurrences));
+  // Share of the week's average daily revenue, so the bar's length has
+  // a number attached rather than only a relative visual comparison.
+  const totalRevenue = items.reduce((sum, d) => sum + d.avg_revenue_cents, 0);
 
   return (
     <div className="card" style={{ padding: '0.9rem 1.1rem' }}>
@@ -30,7 +33,14 @@ export default function DayOfWeekCard({ items, currency }: { items: DayOfWeekPat
             <div style={{ flex: 1, background: 'var(--paper-line)', borderRadius: 4, height: 8, overflow: 'hidden' }}>
               <div style={{ width: `${(d.avg_revenue_cents / maxRevenue) * 100}%`, background: 'var(--stamp)', height: '100%' }} />
             </div>
-            <span style={{ width: 74, flexShrink: 0, textAlign: 'right', fontWeight: 600 }}>{formatMoney(d.avg_revenue_cents, currency)}</span>
+            <span style={{ width: 100, flexShrink: 0, textAlign: 'right' }}>
+              <span style={{ fontWeight: 600 }}>{formatMoney(d.avg_revenue_cents, currency)}</span>
+              {totalRevenue > 0 && (
+                <span style={{ fontSize: '0.74rem', color: 'var(--ink-soft)', marginLeft: '0.3rem' }}>
+                  ({((d.avg_revenue_cents / totalRevenue) * 100).toFixed(0)}%)
+                </span>
+              )}
+            </span>
           </div>
         ))}
       </div>

@@ -523,18 +523,14 @@ export const getHourOfDayPattern = (days = 30): Promise<{ items: HourOfDayPatter
   return request(`/sales/hour-of-day?days=${days}&offset_minutes=${offsetMinutes}`);
 };
 
-// Weekly/monthly sales trend and seasonal (month-of-year) pattern —
-// see sales_patterns::weekly_trend / monthly_trend / seasonal_month_pattern.
+// Monthly sales trend and seasonal (month-of-year) pattern — see
+// sales_patterns::monthly_trend / seasonal_month_pattern.
 export interface PeriodTrendPoint {
   label: string;
   revenue_cents: number;
   order_count: number;
   is_complete: boolean;
 }
-export const getWeeklyTrend = (weeks = 12): Promise<{ items: PeriodTrendPoint[] }> => {
-  const offsetMinutes = -new Date().getTimezoneOffset();
-  return request(`/sales/weekly-trend?weeks=${weeks}&offset_minutes=${offsetMinutes}`);
-};
 export const getMonthlyTrend = (months = 12): Promise<{ items: PeriodTrendPoint[] }> => {
   const offsetMinutes = -new Date().getTimezoneOffset();
   return request(`/sales/monthly-trend?months=${months}&offset_minutes=${offsetMinutes}`);
