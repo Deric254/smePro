@@ -405,6 +405,40 @@ pub fn import(
             }
         }
 
+        // `po_number`/`entry_number` have no static default that would
+        // make sense (a fixed value would defeat the point of being
+        // unique), so their module JSON gives them `default: ""` purely
+        // as a placeholder the default-fill loop above can drop in for
+        // a row whose sheet never had that column at all — the real
+        // value is only ever generated further down, AFTER this row has
+        // survived every other check (item_name resolution included),
+        // so a row that ultimately gets rejected for some unrelated
+        // reason never burns a sequence number it won't use.
+        // THE GAP THIS SHIM CLOSES: `module.validate()` right below now
+        // rejects an empty/whitespace string on any `required: true`
+        // text field (see that check's own doc comment), so the ""
+        // placeholder — which used to sail through validate() before
+        // that check existed — would otherwise reject every fresh
+        // import row before generation ever got a chance to run. A
+        // still-blank po_number/entry_number gets a throwaway non-empty
+        // placeholder just long enough to satisfy validate(), then it's
+        // put right back to "" so the untouched generation logic
+        // further down still sees "nothing real here yet" and does its
+        // normal job. A row that already carries its real value (a
+        // genuine "Export to Excel" re-upload) is left alone entirely —
+        // the placeholder is only ever inserted, and only ever cleared
+        // back out, for a row that didn't have a real one to begin with.
+        let po_number_needs_placeholder = module.id == "purchasing"
+            && record.get("po_number").and_then(|v| v.as_str()).map(|s| s.trim().is_empty()).unwrap_or(true);
+        if po_number_needs_placeholder {
+            record.insert("po_number".to_string(), json!("PENDING"));
+        }
+        let entry_number_needs_placeholder = module.id == "debt_credit"
+            && record.get("entry_number").and_then(|v| v.as_str()).map(|s| s.trim().is_empty()).unwrap_or(true);
+        if entry_number_needs_placeholder {
+            record.insert("entry_number".to_string(), json!("PENDING"));
+        }
+
         if let Err(e) = module.validate(&record) {
             errors.push(json!({"row": row_num, "error": e.to_string()}));
             continue;
@@ -412,6 +446,18 @@ pub fn import(
         if let Err(e) = reference_data::validate_field_references(&tx, business_id, module, &record) {
             errors.push(json!({"row": row_num, "error": e.to_string()}));
             continue;
+        }
+
+        // Put the placeholder right back to "" now that validate() has
+        // done its job — the real generation logic below still keys off
+        // an empty po_number/entry_number to mean "generate one", so
+        // leaving "PENDING" in place here would make it think this row
+        // already has a real value and skip generation entirely.
+        if po_number_needs_placeholder {
+            record.insert("po_number".to_string(), json!(""));
+        }
+        if entry_number_needs_placeholder {
+            record.insert("entry_number".to_string(), json!(""));
         }
 
         // `inventory_record_id` isn't a template column for `purchasing`
@@ -457,23 +503,22 @@ pub fn import(
 
         // `po_number` has no static default that would make sense (it
         // can't be a fixed value — that's exactly what would make it
-        // NOT unique), so `purchasing.json` gives it `default: ""`
-        // purely so the fill-in-defaults loop above lets a row with no
-        // po_number column pass `module.validate()`'s required-field
-        // check — that placeholder is never the real value stored.
-        // Two real cases land here:
+        // NOT unique); the placeholder shim above only ever gets
+        // validate() past the "" default, it never invents a real
+        // value. Two real cases land here:
         //   - The blank "new orders" template (see generate_template)
         //     never had a po_number column at all, so every one of its
-        //     rows carries the "" placeholder — replaced here with a
-        //     freshly generated real number, same as crud::create's
-        //     purchasing block does for a hand-typed record.
+        //     rows still carries "" at this point (cleared back from
+        //     the placeholder above) — replaced here with a freshly
+        //     generated real number, same as crud::create's purchasing
+        //     block does for a hand-typed record.
         //   - A re-uploaded "Export to Excel" file DOES carry each
-        //     row's real po_number (export includes every field) — so
-        //     the placeholder check below is false, nothing is
-        //     regenerated, and that real value is exactly what the key
-        //     match right after this uses to find and correct the
-        //     matching existing order (is_update_blocked_field then
-        //     protects po_number itself from being changed by that
+        //     row's real po_number (export includes every field) — the
+        //     shim above never touched it, so the check below is false,
+        //     nothing is regenerated, and that real value is exactly
+        //     what the key match right after this uses to find and
+        //     correct the matching existing order (is_update_blocked_field
+        //     then protects po_number itself from being changed by that
         //     same re-import, same as `received`).
         // Generated in row order from the single starting sequence
         // fetched once before this loop — see
