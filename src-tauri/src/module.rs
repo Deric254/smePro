@@ -30,6 +30,29 @@ pub struct FieldDef {
     /// on any module, built-in or custom.
     #[serde(default)]
     pub min: Option<i64>,
+    /// Cross-field floor: this field's value may never be lower than
+    /// the value of the OTHER field named here, in the same record.
+    /// Unlike `min` (a fixed number), the floor here is itself another
+    /// field's value — the canonical case is inventory's `unit_price`
+    /// declaring `unit_cost` as its `min_field`, so a selling price can
+    /// never be saved below its own cost price. Declared per-field, in
+    /// the module's own JSON, so any module — built-in or custom — gets
+    /// this protection for any comparable pair of `integer`/`money`
+    /// fields just by setting it; the engine (see
+    /// `ModuleDef::validate_cross_field_floors`) has never heard of
+    /// "inventory" specifically. `None` (the default) means no
+    /// cross-field constraint. Only meaningful for `integer`/`money`
+    /// fields; ignored otherwise.
+    #[serde(default)]
+    pub min_field: Option<String>,
+    /// Optional human-readable error to use instead of the generic
+    /// "'X' cannot be lower than 'Y'" message when `min_field`'s check
+    /// fails — e.g. inventory's actual message, "selling price cannot
+    /// be lower than the cost price — this would sell at a loss", is
+    /// far clearer than a field-name-only fallback would be. Ignored
+    /// when `min_field` is None.
+    #[serde(default)]
+    pub min_field_message: Option<String>,
 }
 
 /// A module's own declaration of what single number best represents it
@@ -444,6 +467,68 @@ impl ModuleDef {
         for f in &self.fields {
             if let Some(v) = record.get(&f.name) {
                 self.validate_field_value(f, v)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks every field that declares a `min_field` against the field
+    /// it points at, for whichever of the two are actually present in
+    /// `record` this call. Schema-driven and module-agnostic on
+    /// purpose — this used to be a block hand-written in `crud.rs` that
+    /// only ever fired `if module_id == "inventory"`, which meant a
+    /// business's own custom module with its own cost/price-style pair
+    /// got no such protection no matter what its JSON said. Moving the
+    /// rule here, keyed off `min_field` instead of a hardcoded module
+    /// id, gives every module — built-in or custom — the identical
+    /// check for free.
+    ///
+    /// `record` is whatever the caller is actually writing this call —
+    /// a fresh create (which already has every field, defaults
+    /// included) or a PATCH-style update (which may have only one side
+    /// of the pair). `lookup_stored` is how a caller supplies whichever
+    /// side isn't in `record`: `create()` has nothing stored yet, so it
+    /// passes a closure that always returns `None` (falling through to
+    /// 0, exactly as both fields' own `default: 0` already implies);
+    /// `update()` passes a closure that queries the field's current
+    /// value from the database, since an absent field there means
+    /// "unchanged," not "zero."
+    ///
+    /// A pair is only checked at all when at least one side is present
+    /// in `record` — an update that touches neither field has nothing
+    /// new to validate, and skipping it also means `lookup_stored`
+    /// (which may hit the database) is never called needlessly.
+    pub fn validate_cross_field_floors(
+        &self,
+        record: &std::collections::HashMap<String, Value>,
+        lookup_stored: impl Fn(&str) -> Option<i64>,
+    ) -> Result<()> {
+        for f in &self.fields {
+            let Some(floor_field) = &f.min_field else { continue };
+            if !matches!(f.field_type.as_str(), "integer" | "money") {
+                continue;
+            }
+            if !record.contains_key(&f.name) && !record.contains_key(floor_field) {
+                continue;
+            }
+            let value = record
+                .get(&f.name)
+                .and_then(|v| v.as_i64())
+                .or_else(|| lookup_stored(&f.name))
+                .unwrap_or(0);
+            let floor = record
+                .get(floor_field)
+                .and_then(|v| v.as_i64())
+                .or_else(|| lookup_stored(floor_field))
+                .unwrap_or(0);
+            if value < floor {
+                return Err(anyhow!(
+                    "{}",
+                    f.min_field_message.clone().unwrap_or_else(|| format!(
+                        "'{}' cannot be lower than '{}'",
+                        f.name, floor_field
+                    ))
+                ));
             }
         }
         Ok(())

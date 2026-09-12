@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import {
   listModules, getModuleSchema, getBusinessInfo, getDebtSummary, getGrossProfitSummary,
-  getBasketAffinity, getProfitByItem, getDebtAging, getSlowMovers, getStockRunway,
+  getBasketAffinity, getProfitByItem, getDebtAging, getSlowMovers, getStockRunway, getUnpricedItems, getZeroCostPurchases,
   getRefundRateByItem, getDayOfWeekPattern, getHourOfDayPattern, getMonthlyTrend, getSeasonalPattern, runReport,
 } from '../api';
 import type {
   DebtSummary, GrossProfitSummary, BasketPair, ItemProfit, DebtAgingSummary,
-  SlowMover, StockRunway, RefundRate, DayOfWeekPattern, HourOfDayPattern, PeriodTrendPoint, SeasonalMonthPattern,
+  SlowMover, StockRunway, UnpricedItem, ZeroCostPurchase, RefundRate, DayOfWeekPattern, HourOfDayPattern, PeriodTrendPoint, SeasonalMonthPattern,
 } from '../api';
 import type { ModuleListItem, ModuleSchema } from '../types';
 import { formatMoney } from '../lib/money';
@@ -16,6 +16,7 @@ import ItemMarginCard from '../components/ItemMarginCard';
 import DebtAgingCard from '../components/DebtAgingCard';
 import SlowMoversCard from '../components/SlowMoversCard';
 import StockRunwayCard from '../components/StockRunwayCard';
+import UnpricedItemsCard from '../components/UnpricedItemsCard';
 import RefundRateCard from '../components/RefundRateCard';
 import TopCustomersCard from '../components/TopCustomersCard';
 import DayOfWeekCard from '../components/DayOfWeekCard';
@@ -93,6 +94,8 @@ export default function Reports() {
 
   const [slowMovers, setSlowMovers] = useState<SlowMover[] | null>(null);
   const [stockRunway, setStockRunway] = useState<StockRunway[] | null>(null);
+  const [unpricedItems, setUnpricedItems] = useState<UnpricedItem[] | null>(null);
+  const [zeroCostPurchases, setZeroCostPurchases] = useState<ZeroCostPurchase[] | null>(null);
   const [stockLoading, setStockLoading] = useState(false);
 
   const [debtAging, setDebtAging] = useState<DebtAgingSummary | null>(null);
@@ -153,6 +156,8 @@ export default function Reports() {
     Promise.allSettled([
       getSlowMovers(30, 10).then((r) => setSlowMovers(r.items)),
       getStockRunway(30, 15).then((r) => setStockRunway(r.items)),
+      getUnpricedItems(50).then((r) => setUnpricedItems(r.items)),
+      getZeroCostPurchases(50).then((r) => setZeroCostPurchases(r.items)),
     ]).finally(() => setStockLoading(false));
   }
 
@@ -221,6 +226,9 @@ export default function Reports() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: '0.9rem' }}>
           {stockRunway && <StockRunwayCard items={stockRunway} />}
           {slowMovers && <SlowMoversCard items={slowMovers} currency={currency} />}
+          {(unpricedItems || zeroCostPurchases) && (
+            <UnpricedItemsCard items={unpricedItems ?? []} zeroCostPurchases={zeroCostPurchases ?? []} currency={currency} />
+          )}
         </div>
       </CollapsibleSection>
 

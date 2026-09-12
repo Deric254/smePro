@@ -844,20 +844,20 @@ pub fn import(
                 if module.id == "sales" {
                     record.insert("cost_at_sale".to_string(), json!(0));
                 }
-                // Same "never sell at a loss" rule crud::create()/update()
-                // enforce for the single-record form — a new inventory
-                // item created via spreadsheet import is just as capable
-                // of carrying a bad price as one typed in by hand, and
-                // this insert path calls insert_validated_record()
-                // directly rather than crud::create(), so it doesn't get
-                // that check for free.
-                if module.id == "inventory" {
-                    let unit_cost = record.get("unit_cost").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let unit_price = record.get("unit_price").and_then(|v| v.as_i64()).unwrap_or(0);
-                    if unit_price < unit_cost {
-                        errors.push(json!({"row": row_num, "error": "selling price cannot be lower than the cost price — this would sell at a loss"}));
-                        continue;
-                    }
+                // Same schema-driven cross-field floor crud::create()/
+                // update() enforce for the single-record form (see
+                // FieldDef::min_field and
+                // ModuleDef::validate_cross_field_floors) — a new item
+                // created via spreadsheet import is just as capable of
+                // carrying a bad price as one typed in by hand, and this
+                // insert path calls insert_validated_record() directly
+                // rather than crud::create(), so it doesn't get that
+                // check for free. Every field on this row already has
+                // its default applied above (mirroring create()), so
+                // there's nothing for `lookup_stored` to supply here.
+                if let Err(e) = module.validate_cross_field_floors(&record, |_| None) {
+                    errors.push(json!({"row": row_num, "error": e.to_string()}));
+                    continue;
                 }
                 match crud::insert_validated_record(&tx, business_id, module, &record) {
                     Ok(new_id) => {

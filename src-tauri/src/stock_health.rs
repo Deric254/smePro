@@ -175,3 +175,141 @@ pub fn stock_runway(
     out.truncate(limit as usize);
     Ok(out)
 }
+
+/// Items sitting in Inventory with a zero unit_cost, zero unit_price,
+/// or both. Both fields are "money" (required, default 0 — see
+/// inventory.json), so an item created without either one is
+/// perfectly valid data as far as the schema and the "never sell below
+/// cost" rule are concerned (0 is not less than 0) — this report is
+/// how a business actually catches that before a cashier rings up a
+/// $0 sale at the till, not a hard block on creation, which would
+/// wrongly reject the (rarer, but real) case of a genuinely free
+/// promotional give-away item.
+///
+/// Deliberately NOT filtered to `quantity > 0` the way slow_movers and
+/// stock_runway are: those two are about capital efficiency on stock
+/// that's actually on the shelf right now, but a zero-priced item with
+/// no stock yet is just as capable of getting sold for $0 the moment
+/// it's next received — this report exists to catch the pricing
+/// mistake itself, before it matters, not just once it's already
+/// costing money.
+#[derive(Debug, Serialize)]
+pub struct UnpricedItem {
+    pub item_name: String,
+    pub quantity: f64,
+    pub unit_cost_cents: i64,
+    pub unit_price_cents: i64,
+    /// Which side of the pair is actually zero — "cost", "price", or
+    /// "both" — so the UI can say precisely what's missing instead of
+    /// a generic "check this item".
+    pub missing: &'static str,
+}
+
+/// `limit` clamped to [1, 500] — same "discovery report, not an
+/// unbounded export" reasoning as slow_movers/stock_runway above,
+/// just a wider ceiling since every matching row here is actionable
+/// (there's no long tail of merely-slow items to cut off early).
+pub fn unpriced_items(
+    conn: &Connection,
+    business_id: &str,
+    user_id: &str,
+    limit: i64,
+) -> Result<Vec<UnpricedItem>> {
+    crate::rbac::require(conn, user_id, "inventory", "read")?;
+    let inventory_module = crud::load_module(conn, business_id, "inventory")
+        .map_err(|_| anyhow!("the Inventory module isn't enabled for this business"))?;
+    let inv_table = inventory_module.table_name();
+    let limit = limit.clamp(1, 500);
+
+    let sql = format!(
+        "SELECT name, quantity, unit_cost, unit_price
+         FROM {inv_table}
+         WHERE business_id = ?1 AND deleted_at IS NULL AND (unit_cost = 0 OR unit_price = 0)
+         ORDER BY name ASC
+         LIMIT ?2"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![business_id, limit], |r| {
+        let quantity: f64 = r.get(1)?;
+        let unit_cost: i64 = r.get(2)?;
+        let unit_price: i64 = r.get(3)?;
+        let missing = match (unit_cost == 0, unit_price == 0) {
+            (true, true) => "both",
+            (true, false) => "cost",
+            (false, true) => "price",
+            // Can't be reached — the WHERE clause above only ever
+            // matches a row where at least one side is 0.
+            (false, false) => "both",
+        };
+        Ok(UnpricedItem {
+            item_name: r.get(0)?,
+            quantity,
+            unit_cost_cents: unit_cost,
+            unit_price_cents: unit_price,
+            missing,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+/// Purchasing order lines recorded with a zero unit_cost. Purchasing
+/// has no unit_price field to compare against (it's a buying record,
+/// not a selling one), and its own `unit_cost` floor is `min: 0`, not
+/// `min: 1` — a genuinely free/donated delivery is real, legitimate
+/// data, so this stays a report, not a hard block (same choice as
+/// unpriced_items above, same reasoning).
+///
+/// Why this matters beyond Purchasing itself: `receiving.rs`'s
+/// weighted-average cost recalculation folds a received PO's
+/// unit_cost straight into the matching Inventory item's cost basis.
+/// A $0 purchase — typo'd or genuine — pulls that cost basis toward
+/// zero, which can make Inventory's own "price can't be below cost"
+/// guard nearly meaningless on that item afterward (almost any price
+/// clears an almost-zero cost). `received` is included in the result
+/// so it's clear whether that cost-basis effect has already happened
+/// for a given row, or the order is still pending.
+#[derive(Debug, Serialize)]
+pub struct ZeroCostPurchase {
+    pub po_number: String,
+    pub supplier: String,
+    pub item_name: String,
+    pub quantity: f64,
+    pub received: bool,
+}
+
+/// `limit` clamped to [1, 500] — same reasoning as unpriced_items.
+pub fn zero_cost_purchases(
+    conn: &Connection,
+    business_id: &str,
+    user_id: &str,
+    limit: i64,
+) -> Result<Vec<ZeroCostPurchase>> {
+    crate::rbac::require(conn, user_id, "purchasing", "read")?;
+    let purchasing_module = crud::load_module(conn, business_id, "purchasing")
+        .map_err(|_| anyhow!("the Purchasing module isn't enabled for this business"))?;
+    let table = purchasing_module.table_name();
+    let limit = limit.clamp(1, 500);
+
+    let sql = format!(
+        "SELECT po_number, supplier, item_name, quantity, received
+         FROM {table}
+         WHERE business_id = ?1 AND deleted_at IS NULL AND unit_cost = 0
+         ORDER BY po_number ASC
+         LIMIT ?2"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![business_id, limit], |r| {
+        Ok(ZeroCostPurchase {
+            po_number: r.get(0)?,
+            supplier: r.get(1)?,
+            item_name: r.get(2)?,
+            quantity: r.get(3)?,
+            received: r.get(4)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}

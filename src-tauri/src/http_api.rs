@@ -1314,6 +1314,34 @@ fn route(
         };
     }
 
+    // ---- Unpriced items: /inventory/unpriced-items?limit= — items
+    // with a zero unit_cost, zero unit_price, or both. See
+    // stock_health::unpriced_items. Reports-gated, same reasoning as
+    // slow-movers/stock-runway above.
+    if parts.as_slice() == ["inventory", "unpriced-items"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
+        return match crate::stock_health::unpriced_items(conn, &business_id, &user_id, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Zero-cost purchases: /purchasing/zero-cost?limit= —
+    // Purchasing order lines recorded with unit_cost = 0. See
+    // stock_health::zero_cost_purchases. Reports-gated, same reasoning
+    // as unpriced-items above.
+    if parts.as_slice() == ["purchasing", "zero-cost"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
+        return match crate::stock_health::zero_cost_purchases(conn, &business_id, &user_id, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
     // ---- Rollback: /system/releases — real, published GitHub
     // releases for this app, newest first. Owner-gated inside
     // rollback::list_releases itself (see that module's own doc

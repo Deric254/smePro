@@ -469,6 +469,30 @@ export interface StockRunway {
 export const getStockRunway = (days = 30, limit = 15): Promise<{ items: StockRunway[] }> =>
   request(`/inventory/stock-runway?days=${days}&limit=${limit}`);
 
+// Unpriced items — zero unit_cost, zero unit_price, or both. See
+// stock_health::unpriced_items.
+export interface UnpricedItem {
+  item_name: string;
+  quantity: number;
+  unit_cost_cents: number;
+  unit_price_cents: number;
+  missing: 'cost' | 'price' | 'both';
+}
+export const getUnpricedItems = (limit = 50): Promise<{ items: UnpricedItem[] }> =>
+  request(`/inventory/unpriced-items?limit=${limit}`);
+
+// Zero-cost purchase orders — unit_cost = 0 on Purchasing. See
+// stock_health::zero_cost_purchases.
+export interface ZeroCostPurchase {
+  po_number: string;
+  supplier: string;
+  item_name: string;
+  quantity: number;
+  received: boolean;
+}
+export const getZeroCostPurchases = (limit = 50): Promise<{ items: ZeroCostPurchase[] }> =>
+  request(`/purchasing/zero-cost?limit=${limit}`);
+
 // Rollback — list real GitHub releases and check one tag's manifest
 // URL and database-schema compatibility. See rollback::list_releases /
 // check_rollback_target; both Owner-gated

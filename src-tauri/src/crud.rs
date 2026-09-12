@@ -362,21 +362,13 @@ pub fn create(
     if module_id == "sales" {
         record.insert("cost_at_sale".to_string(), json!(0));
     }
-    // Hard business rule, not just a UI nicety: an inventory item can
-    // never be saved with a selling price below its cost price. Both
-    // fields are "money" (required, default 0), so by the time we get
-    // here `record` always has a value for each — either what the
-    // caller sent or the default just applied above — so this is a
-    // simple, complete comparison with nothing left to fall back to.
-    if module_id == "inventory" {
-        let unit_cost = record.get("unit_cost").and_then(|v| v.as_i64()).unwrap_or(0);
-        let unit_price = record.get("unit_price").and_then(|v| v.as_i64()).unwrap_or(0);
-        if unit_price < unit_cost {
-            return Err(anyhow!(
-                "selling price cannot be lower than the cost price — this would sell at a loss"
-            ));
-        }
-    }
+    // Schema-driven cross-field floor (e.g. inventory's unit_price >=
+    // unit_cost) — see FieldDef::min_field and
+    // ModuleDef::validate_cross_field_floors for why this is no longer
+    // hardcoded to `module_id == "inventory"`. Every field this module
+    // declares already has its default applied above, so there's
+    // nothing for `lookup_stored` to supply on a fresh create.
+    module.validate_cross_field_floors(&record, |_| None)?;
     module.validate(&record)?;
     crate::reference_data::validate_field_references(conn, business_id, &module, &record)?;
 
@@ -648,31 +640,26 @@ pub fn update(
     module.validate_partial(&record)?;
     crate::reference_data::validate_field_references(conn, business_id, &module, &record)?;
 
-    // Same "never sell at a loss" rule as create(), applied here too —
-    // an edit is just as capable of putting a bad price on an item as
-    // a create is. This is a PATCH, so unlike create() the value being
-    // compared against might not be in `record` at all (e.g. someone
-    // only edits unit_price and leaves unit_cost untouched) — for
-    // whichever of the pair is missing from this update, fall back to
-    // what's already stored for this record rather than treating an
-    // absent field as zero, which would wrongly wave through a real
-    // cost the caller just didn't happen to resend.
-    if module_id == "inventory" && (record.contains_key("unit_cost") || record.contains_key("unit_price")) {
-        let (stored_cost, stored_price): (i64, i64) = conn
-            .query_row(
-                &format!("SELECT unit_cost, unit_price FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
-                params![record_id, business_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|_| anyhow!("record not found"))?;
-        let unit_cost = record.get("unit_cost").and_then(|v| v.as_i64()).unwrap_or(stored_cost);
-        let unit_price = record.get("unit_price").and_then(|v| v.as_i64()).unwrap_or(stored_price);
-        if unit_price < unit_cost {
-            return Err(anyhow!(
-                "selling price cannot be lower than the cost price — this would sell at a loss"
-            ));
-        }
-    }
+    // Same schema-driven cross-field floor as create() — see
+    // FieldDef::min_field and ModuleDef::validate_cross_field_floors.
+    // This is a PATCH, so unlike create() the value being compared
+    // against might not be in `record` at all (e.g. someone only edits
+    // unit_price and leaves unit_cost untouched) — `lookup_stored`
+    // below is exactly that fallback: whichever of a pair is missing
+    // from this update is read from what's already stored for this
+    // record, rather than treated as zero, which would wrongly wave
+    // through a real cost the caller just didn't happen to resend.
+    // Only queries the database for a field `validate_cross_field_floors`
+    // actually needs (it skips any pair untouched by this update), so
+    // this costs nothing on updates that don't touch a floor-checked field.
+    module.validate_cross_field_floors(&record, |field_name| {
+        conn.query_row(
+            &format!("SELECT {field_name} FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+            params![record_id, business_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()
+    })?;
 
     sets.push("updated_at = datetime('now')".to_string());
 
