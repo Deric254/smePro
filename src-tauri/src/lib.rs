@@ -308,17 +308,24 @@ pub fn run() {
     // passed to generate_handler! has to already be the right list
     // per platform, the same way the plugin registration just below
     // is already split by platform.
+    // generate_handler!'s expansion is generic over Tauri's Runtime
+    // type and only resolves once it's fed straight into a call that
+    // pins that type down (invoke_handler on a concrete Builder). Store
+    // it in an intermediate `let` first — as this used to do — and
+    // that pinning never happens, so rustc has nothing to infer the
+    // Runtime from (E0282). Each cfg branch below builds the whole
+    // `builder` in one statement instead, keeping the invoke_handler
+    // call and its generate_handler! argument together.
     #[cfg(desktop)]
-    let handler = tauri::generate_handler![
+    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
         get_network_mode,
         set_network_mode,
         get_lan_address,
         rollback_to_manifest
-    ];
+    ]);
     #[cfg(not(desktop))]
-    let handler = tauri::generate_handler![get_network_mode, set_network_mode, get_lan_address];
-
-    let builder = tauri::Builder::default().invoke_handler(handler);
+    let builder = tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![get_network_mode, set_network_mode, get_lan_address]);
 
     // Self-updating via tauri-plugin-updater only makes sense on
     // desktop — that plugin has no Android/iOS implementation.
