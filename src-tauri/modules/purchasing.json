@@ -28,12 +28,14 @@
       "name": "quantity",
       "type": "integer",
       "required": true,
-      "default": 1
+      "default": 1,
+      "min": 0
     },
     {
       "name": "unit_cost",
       "type": "money",
-      "required": true
+      "required": true,
+      "min": 0
     },
     {
       "name": "order_date",

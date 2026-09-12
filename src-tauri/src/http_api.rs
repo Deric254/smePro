@@ -26,90 +26,124 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
     let auth_limiter = Arc::new(RateLimiter::new(5, Duration::from_secs(15 * 60)));
     println!("[api] listening on http://{addr}");
 
+    // THE BUG THIS FIXES: this loop used to handle each request
+    // in-line, on this one accept-loop thread, so `server.incoming_
+    // requests()` never advanced to the next connection until the
+    // current one was fully handled. Combined with the single shared
+    // `Mutex<Connection>` held for a whole request's duration, that
+    // meant every request — from every user of this business, for
+    // every feature, not just AI — queued strictly behind whichever
+    // one request happened to be in flight. Spawning a thread per
+    // request is the standard fix for a blocking server like
+    // tiny_http's: the accept loop itself now only ever does the
+    // cheap work of reading the request and handing it off, so it's
+    // back to accepting the next connection immediately. Real
+    // concurrency between requests still ultimately serializes on the
+    // Mutex below where they touch the database — correct and
+    // intentional, since SQLite only ever wants one writer — but they
+    // no longer serialize behind the accept loop itself, and (see
+    // handle_ai_ask above) the slowest single thing this app does,
+    // the AI provider call, no longer holds that Mutex at all.
     for mut request in server.incoming_requests() {
-        let method = request.method().clone();
-        let url = request.url().to_string();
+        let conn = Arc::clone(&conn);
+        let auth_limiter = Arc::clone(&auth_limiter);
+        std::thread::spawn(move || {
+            let method = request.method().clone();
+            let url = request.url().to_string();
 
-        // CORS preflight — the frontend runs on a different port (Vite
-        // dev server) than this API, so browsers send an OPTIONS request
-        // before PUT/DELETE calls and calls with custom headers.
-        if method == Method::Options {
-            let headers = cors_headers();
-            let response = Response::from_string("").with_status_code(204);
-            let response = headers.into_iter().fold(response, |r, h| r.with_header(h));
-            let _ = request.respond(response);
-            continue;
-        }
+            // CORS preflight — the frontend runs on a different port (Vite
+            // dev server) than this API, so browsers send an OPTIONS request
+            // before PUT/DELETE calls and calls with custom headers.
+            if method == Method::Options {
+                let headers = cors_headers();
+                let response = Response::from_string("").with_status_code(204);
+                let response = headers.into_iter().fold(response, |r, h| r.with_header(h));
+                let _ = request.respond(response);
+                return;
+            }
 
-        let mut body_str = String::new();
-        let _ = request.as_reader().read_to_string(&mut body_str);
+            let mut body_str = String::new();
+            let _ = request.as_reader().read_to_string(&mut body_str);
 
-        if let Err(e) = crate::security::check_body_size(body_str.as_bytes()) {
-            let response = Response::from_string(json!({"error": e.to_string()}).to_string()).with_status_code(413);
-            let response = cors_headers().into_iter().fold(response, |r, h| r.with_header(h));
-            let _ = request.respond(response);
-            continue;
-        }
+            if let Err(e) = crate::security::check_body_size(body_str.as_bytes()) {
+                let response = Response::from_string(json!({"error": e.to_string()}).to_string()).with_status_code(413);
+                let response = cors_headers().into_iter().fold(response, |r, h| r.with_header(h));
+                let _ = request.respond(response);
+                return;
+            }
 
-        let bearer = header_value(request.headers(), "Authorization")
-            .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
-        let business_id_header = header_value(request.headers(), "X-Business-Id");
+            let bearer = header_value(request.headers(), "Authorization")
+                .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
+            let business_id_header = header_value(request.headers(), "X-Business-Id");
 
-        // std::panic::catch_unwind, not a bare call — this is the
-        // actual fix for the deeper problem the Mutex recovery above
-        // only partly addresses: if route() (or anything it calls,
-        // across every module this server touches) panics, an
-        // uncaught panic unwinds straight out of THIS for-loop,
-        // ending server.incoming_requests() entirely — the whole
-        // accept loop thread exits, and the server stops accepting
-        // ANY new connection at all, permanently, from one single bad
-        // request. Catching it here means one request that hits an
-        // unexpected panic becomes a clean 500 response instead of a
-        // dead server. AssertUnwindSafe is genuinely safe here, not
-        // just silencing the compiler: rusqlite::Connection isn't
-        // UnwindSafe by default (it wraps a raw C pointer via FFI),
-        // but a panic mid-request just means whatever SQL transaction
-        // was in flight never commits — SQLite's own atomicity
-        // guarantees mean nothing partial is ever left behind, so the
-        // connection is genuinely still valid and safe to keep using
-        // for the next request, which is exactly why the Mutex
-        // recovery above (poisoned.into_inner()) is also correct
-        // rather than a workaround.
-        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut conn_guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            route(&mut conn_guard, &method, &url, &body_str, bearer.as_deref(), business_id_header.as_deref(), &auth_limiter)
-        }))
-        .unwrap_or_else(|_| {
-            eprintln!("[api] a request handler panicked — recovered, server continues serving other requests");
-            ApiResponse::Json(500, json!({"error": "internal server error"}))
+            // AI ask routes get their own handler with fine-grained
+            // locking (see handle_ai_ask's doc comment) — checked
+            // before the general single-lock path below, and only
+            // for those two specific routes; everything else falls
+            // through unchanged.
+            let ai_response = handle_ai_ask(&conn, &method, &url, &body_str, bearer.as_deref());
+
+            // std::panic::catch_unwind, not a bare call — this is the
+            // actual fix for the deeper problem the Mutex recovery above
+            // only partly addresses: if route() (or anything it calls,
+            // across every module this server touches) panics, an
+            // uncaught panic used to unwind straight out of the accept
+            // loop, ending server.incoming_requests() entirely and
+            // killing the whole server. Now that each request runs on
+            // its own spawned thread, an uncaught panic would otherwise
+            // just silently kill THAT thread with no response ever sent
+            // — still a hung request from the caller's point of view.
+            // Catching it here means one request that hits an
+            // unexpected panic becomes a clean 500 response instead.
+            // AssertUnwindSafe is genuinely safe here, not just
+            // silencing the compiler: rusqlite::Connection isn't
+            // UnwindSafe by default (it wraps a raw C pointer via FFI),
+            // but a panic mid-request just means whatever SQL transaction
+            // was in flight never commits — SQLite's own atomicity
+            // guarantees mean nothing partial is ever left behind, so the
+            // connection is genuinely still valid and safe to keep using
+            // for the next request, which is exactly why the Mutex
+            // recovery above (poisoned.into_inner()) is also correct
+            // rather than a workaround.
+            let response = match ai_response {
+                Some(r) => r,
+                None => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut conn_guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    route(&mut conn_guard, &method, &url, &body_str, bearer.as_deref(), business_id_header.as_deref(), &auth_limiter)
+                }))
+                .unwrap_or_else(|_| {
+                    eprintln!("[api] a request handler panicked — recovered, server continues serving other requests");
+                    ApiResponse::Json(500, json!({"error": "internal server error"}))
+                }),
+            };
+
+            let http_response = match response {
+                ApiResponse::Json(status, payload) => {
+                    let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+                    Response::from_string(payload.to_string()).with_status_code(status).with_header(header)
+                }
+                ApiResponse::Xlsx(status, bytes, filename) => {
+                    let ctype = Header::from_bytes(
+                        &b"Content-Type"[..],
+                        &b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"[..],
+                    ).unwrap();
+                    let disposition = Header::from_bytes(
+                        &b"Content-Disposition"[..],
+                        format!("attachment; filename=\"{filename}\"").as_bytes(),
+                    ).unwrap();
+                    Response::from_data(bytes).with_status_code(status).with_header(ctype).with_header(disposition)
+                }
+                ApiResponse::Image(status, bytes, mime) => {
+                    let ctype = Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap();
+                    Response::from_data(bytes).with_status_code(status).with_header(ctype)
+                }
+            };
+            let http_response = cors_headers().into_iter().fold(http_response, |r, h| r.with_header(h));
+            let http_response = crate::security::security_headers().into_iter().fold(http_response, |r, (name, value)| {
+                r.with_header(Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap())
+            });
+            let _ = request.respond(http_response);
         });
-
-        let http_response = match response {
-            ApiResponse::Json(status, payload) => {
-                let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-                Response::from_string(payload.to_string()).with_status_code(status).with_header(header)
-            }
-            ApiResponse::Xlsx(status, bytes, filename) => {
-                let ctype = Header::from_bytes(
-                    &b"Content-Type"[..],
-                    &b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"[..],
-                ).unwrap();
-                let disposition = Header::from_bytes(
-                    &b"Content-Disposition"[..],
-                    format!("attachment; filename=\"{filename}\"").as_bytes(),
-                ).unwrap();
-                Response::from_data(bytes).with_status_code(status).with_header(ctype).with_header(disposition)
-            }
-            ApiResponse::Image(status, bytes, mime) => {
-                let ctype = Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap();
-                Response::from_data(bytes).with_status_code(status).with_header(ctype)
-            }
-        };
-        let http_response = cors_headers().into_iter().fold(http_response, |r, h| r.with_header(h));
-        let http_response = crate::security::security_headers().into_iter().fold(http_response, |r, (name, value)| {
-            r.with_header(Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap())
-        });
-        let _ = request.respond(http_response);
     }
     Ok(())
 }
@@ -177,6 +211,113 @@ fn urlish_decode(s: &str) -> String {
         }
     }
     out
+}
+
+/// Handles the two AI-ask routes (`POST /ai/ask` and `POST
+/// /ai/sessions/{id}/ask`) with fine-grained locking instead of the
+/// single whole-request lock `route()` below uses for everything
+/// else. See ai_assistant.rs's `PreparedAiCall` doc comment for why:
+/// the outbound call to the AI provider can take several seconds
+/// (up to its own 30s timeout — see tls_agent()), and this server
+/// shares one `Mutex<Connection>` across every request. Holding that
+/// lock for the network call's whole duration would freeze every
+/// other endpoint, for every user, for that long — which is exactly
+/// what used to happen here. This function does its DB reads (auth,
+/// session history, provider/key/model resolution) under a brief
+/// lock, drops it, makes the network call with NO lock held, then
+/// re-locks briefly to persist the answer.
+///
+/// Returns `None` for any request that isn't one of these two
+/// routes, so `serve()` below falls through to the normal `route()`
+/// dispatch unchanged for everything else.
+fn handle_ai_ask(
+    conn: &Arc<Mutex<Connection>>,
+    method: &Method,
+    url: &str,
+    body: &str,
+    bearer: Option<&str>,
+) -> Option<ApiResponse> {
+    let path = url.split('?').next().unwrap_or("");
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+
+    let is_legacy_ask = parts.as_slice() == ["ai", "ask"] && *method == Method::Post;
+    let session_id: Option<String> =
+        if parts.len() == 4 && parts[0] == "ai" && parts[1] == "sessions" && parts[3] == "ask" && *method == Method::Post {
+            Some(parts[2].to_string())
+        } else {
+            None
+        };
+    if !is_legacy_ask && session_id.is_none() {
+        return None;
+    }
+
+    let token = match bearer {
+        Some(t) => t,
+        None => return Some(json_err(401, "missing Authorization: Bearer <token>")),
+    };
+    let question = match json_body(body).and_then(|o| o.get("question").and_then(Value::as_str).map(|s| s.to_string())) {
+        Some(q) if !q.trim().is_empty() => q,
+        _ => return Some(json_err(400, "'question' is required")),
+    };
+
+    // ---- Phase 1: DB reads only — auth, session history, provider
+    // config. Lock held only for this block. ----
+    let (user_id, business_id, history, prepared) = {
+        let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match crate::security::check_session_expired(&guard, token) {
+            Ok(true) => return Some(json_err(401, "session expired due to inactivity, please log in again")),
+            Ok(false) => {}
+            Err(e) => return Some(json_err(500, &e.to_string())),
+        }
+        let (user_id, business_id) = match auth::current_user(&guard, token) {
+            Ok(pair) => pair,
+            Err(e) => return Some(json_err(401, &e.to_string())),
+        };
+        let history = if let Some(sid) = &session_id {
+            match ai_chat::history_for_provider(&guard, &business_id, &user_id, sid) {
+                Ok(h) => h,
+                Err(e) => return Some(json_err(404, &e.to_string())),
+            }
+        } else {
+            Vec::new()
+        };
+        let prepared = match ai_assistant::prepare(&guard, &business_id, &user_id) {
+            Ok(p) => p,
+            Err(e) => return Some(json_err(502, &e.to_string())),
+        };
+        (user_id, business_id, history, prepared)
+        // `guard` drops here, at the end of this block — the lock is
+        // released before the network call below ever starts.
+    };
+
+    // ---- Phase 2: the actual provider call. NO lock held — every
+    // other endpoint, for every other user, keeps working normally
+    // while this is in flight. ----
+    let answer = match ai_assistant::send(&prepared, &question, &history) {
+        Ok(a) => a,
+        Err(e) => return Some(json_err(502, &e.to_string())),
+    };
+
+    // ---- Phase 3: persist the turn and compute the pulse. Brief
+    // lock again, released as soon as this block ends. ----
+    let mut guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(sid) = &session_id {
+        // record_turn persists the real `answer` text only — the
+        // pulse below is computed fresh and attached to the response
+        // alone, never folded into the stored message. If it were
+        // saved into that same field, it would become part of the
+        // conversation history resent to the provider on every future
+        // turn (see history_for_provider) — wasted tokens narrating
+        // stats the model doesn't need to see again.
+        if let Err(e) = ai_chat::record_turn(&mut guard, &business_id, &user_id, sid, &question, &answer) {
+            return Some(json_err(400, &e.to_string()));
+        }
+        let pulse = crate::business_pulse::compute(&guard, &business_id, &user_id);
+        Some(ApiResponse::Json(200, json!({"answer": answer, "session_id": sid, "business_pulse": pulse})))
+    } else {
+        let pulse = crate::business_pulse::compute(&guard, &business_id, &user_id);
+        Some(ApiResponse::Json(200, json!({"answer": answer, "business_pulse": pulse})))
+    }
 }
 
 fn route(
@@ -1173,14 +1314,113 @@ fn route(
         };
     }
 
-    // ---- Day-of-week sales pattern: /sales/day-of-week?days= — see
-    // sales_patterns::day_of_week_pattern. Reports-gated.
+    // ---- Rollback: /system/releases — real, published GitHub
+    // releases for this app, newest first. Owner-gated inside
+    // rollback::list_releases itself (see that module's own doc
+    // comment for why this is a require_owner check, not a per-module
+    // one) rather than at this route-dispatch level, matching how
+    // every sales_patterns endpoint on this page gates itself too.
+    if parts.as_slice() == ["system", "releases"] && *method == Method::Get {
+        return match crate::rollback::list_releases(conn, &user_id) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Rollback: /system/releases/check?tag= — confirms one chosen
+    // tag is actually safe to install (schema compatibility + manifest
+    // exists) before the frontend shows its final confirm step. See
+    // rollback::check_rollback_target; the actual install still only
+    // happens via the rollback_to_manifest Tauri command in lib.rs,
+    // using the manifest_url this returns.
+    if parts.as_slice() == ["system", "releases", "check"] && *method == Method::Get {
+        let q = query_params(url);
+        let tag = q.get("tag").cloned().unwrap_or_default();
+        return match crate::rollback::check_rollback_target(conn, &user_id, &tag) {
+            Ok(check) => ApiResponse::Json(200, json!(check)),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Day-of-week sales pattern: /sales/day-of-week?days=&offset_minutes=
+    // — see sales_patterns::day_of_week_pattern. Reports-gated. Same
+    // offset_minutes convention as /sales/hour-of-day just below — a
+    // weekday boundary is exactly as UTC-sensitive as an hour one.
     if parts.as_slice() == ["sales", "day-of-week"] && *method == Method::Get {
         if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
         let q = query_params(url);
         let today = chrono::Utc::now().date_naive().to_string();
         let days = q.get("days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(90);
-        return match crate::sales_patterns::day_of_week_pattern(conn, &business_id, &user_id, &today, days) {
+        let offset_minutes = q.get("offset_minutes").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        return match crate::sales_patterns::day_of_week_pattern(conn, &business_id, &user_id, &today, days, offset_minutes) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Hour-of-day sales pattern: /sales/hour-of-day?days=&offset_minutes=
+    // — see sales_patterns::hour_of_day_pattern. Reports-gated, same
+    // as every other sales_patterns endpoint on this page.
+    // `offset_minutes` is the caller's real local UTC offset (minutes
+    // to ADD to UTC to get local time — the opposite sign from JS's
+    // own Date.getTimezoneOffset(); see the frontend call site in
+    // api.ts for the conversion) since every created_at in this
+    // database is UTC-only — see hour_of_day_pattern's own doc
+    // comment for why this can't default away to 0/UTC.
+    if parts.as_slice() == ["sales", "hour-of-day"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let days = q.get("days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30);
+        let offset_minutes = q.get("offset_minutes").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        return match crate::sales_patterns::hour_of_day_pattern(conn, &business_id, &user_id, &today, days, offset_minutes) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Weekly sales trend: /sales/weekly-trend?weeks=&offset_minutes=
+    // — see sales_patterns::weekly_trend. Reports-gated, same as every
+    // other sales_patterns endpoint on this page.
+    if parts.as_slice() == ["sales", "weekly-trend"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let weeks = q.get("weeks").and_then(|s| s.parse::<i64>().ok()).unwrap_or(12);
+        let offset_minutes = q.get("offset_minutes").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        return match crate::sales_patterns::weekly_trend(conn, &business_id, &user_id, &today, weeks, offset_minutes) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Monthly sales trend: /sales/monthly-trend?months=&offset_minutes=
+    // — see sales_patterns::monthly_trend.
+    if parts.as_slice() == ["sales", "monthly-trend"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let months = q.get("months").and_then(|s| s.parse::<i64>().ok()).unwrap_or(12);
+        let offset_minutes = q.get("offset_minutes").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let today = chrono::Utc::now().date_naive().to_string();
+        return match crate::sales_patterns::monthly_trend(conn, &business_id, &user_id, &today, months, offset_minutes) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Seasonal (month-of-year) pattern: /sales/seasonal?offset_minutes=
+    // — see sales_patterns::seasonal_month_pattern. No days/weeks/months
+    // query param: this always looks at this business's ENTIRE sales
+    // history, by design — see that function's own doc comment on why
+    // a lookback-window parameter wouldn't make sense for a
+    // seasonality question the way it does for the trend endpoints
+    // above. `offset_minutes` still applies, though — see that
+    // function's own doc comment on the month/year boundary.
+    if parts.as_slice() == ["sales", "seasonal"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let offset_minutes = q.get("offset_minutes").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        return match crate::sales_patterns::seasonal_month_pattern(conn, &business_id, &user_id, offset_minutes) {
             Ok(items) => ApiResponse::Json(200, json!({"items": items})),
             Err(e) => crud_error(&e),
         };
@@ -1497,39 +1737,17 @@ fn route(
     // everything else this feeds from.
     if parts.as_slice() == ["reports", "highlights"] && *method == Method::Get {
         if let Err(e) = rbac::require_reports_access(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let q = query_params(url);
         let today = chrono::Utc::now().date_naive().to_string();
-        let highlights = crate::report_highlights::compute(conn, &business_id, &user_id, &today);
+        let offset_minutes = q.get("offset_minutes").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let highlights = crate::report_highlights::compute(conn, &business_id, &user_id, &today, offset_minutes);
         return ApiResponse::Json(200, json!(highlights));
     }
 
-    // ---- AI floating assistant: POST /ai/ask {question} — legacy,
-    // stateless single-turn ask kept for anything that still calls it
-    // without a session. The chat panel itself uses the session-based
-    // routes below instead. ----
-    if parts.as_slice() == ["ai", "ask"] && *method == Method::Post {
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "body must be JSON with a 'question' field") };
-        let question = match obj.get("question").and_then(Value::as_str) {
-            Some(q) if !q.trim().is_empty() => q,
-            _ => return json_err(400, "'question' is required"),
-        };
-        return match ai_assistant::ask(conn, &business_id, &user_id, question) {
-            Ok(answer) => {
-                // A real, computed performance readout attached to
-                // EVERY answer — see business_pulse.rs's own doc
-                // comment on why this is deterministic arithmetic over
-                // real sales data, never something the AI model is
-                // asked to narrate from memory. compute() never
-                // returns an error — a missing pulse degrades to
-                // has_data:false rather than ever breaking the actual
-                // answer above it.
-                let pulse = crate::business_pulse::compute(conn, &business_id, &user_id);
-                ApiResponse::Json(200, json!({"answer": answer, "business_pulse": pulse}))
-            }
-            Err(e) => json_err(502, &e.to_string()),
-        };
-    }
-
-    // ---- AI chat history: sessions ----
+    // ---- AI chat history: sessions. (The two actual ask/answer
+    // routes — POST /ai/ask and POST /ai/sessions/{id}/ask — are
+    // handled by handle_ai_ask() above, before serve() ever reaches
+    // route() at all; see that function's doc comment for why.) ----
     // GET /ai/sessions — list this user's own conversations, most
     // recently active first.
     if parts.as_slice() == ["ai", "sessions"] && *method == Method::Get {
@@ -1562,41 +1780,12 @@ fn route(
             Err(e) => json_err(404, &e.to_string()),
         };
     }
-    // POST /ai/sessions/{id}/ask {question} — asks within this
-    // session's context (its prior turns are sent to the provider) and
-    // persists both the question and the answer.
-    if parts.len() == 4 && parts[0] == "ai" && parts[1] == "sessions" && parts[3] == "ask" && *method == Method::Post {
-        let session_id = parts[2];
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "body must be JSON with a 'question' field") };
-        let question = match obj.get("question").and_then(Value::as_str) {
-            Some(q) if !q.trim().is_empty() => q,
-            _ => return json_err(400, "'question' is required"),
-        };
-        let history = match ai_chat::history_for_provider(conn, &business_id, &user_id, session_id) {
-            Ok(h) => h,
-            Err(e) => return json_err(404, &e.to_string()),
-        };
-        let answer = match ai_assistant::ask_with_history(conn, &business_id, &user_id, question, &history) {
-            Ok(a) => a,
-            Err(e) => return json_err(502, &e.to_string()),
-        };
-        return match ai_chat::record_turn(conn, &business_id, &user_id, session_id, question, &answer) {
-            Ok(()) => {
-                // Computed fresh, attached to the response only — NOT
-                // folded into the stored `answer` text. record_turn
-                // above already persisted the real answer; if this
-                // pulse text got saved into that same field, it would
-                // become part of the conversation history sent back to
-                // the AI provider on every future turn in this
-                // session (see history_for_provider) — wasted tokens
-                // narrating stats the model doesn't need to see again,
-                // not an actual part of the conversation.
-                let pulse = crate::business_pulse::compute(conn, &business_id, &user_id);
-                ApiResponse::Json(200, json!({"answer": answer, "session_id": session_id, "business_pulse": pulse}))
-            }
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
+    // POST /ai/sessions/{id}/ask — handled by handle_ai_ask() above,
+    // before serve() ever reaches route() at all (see that function's
+    // doc comment: the provider call needs the DB lock released
+    // across it, which requires managing the lock at a level route()
+    // itself doesn't have access to).
+
     // POST /ai/sessions/{id}/clear — empty this session's messages,
     // keep the session slot itself (see ai_chat::clear_session).
     if parts.len() == 4 && parts[0] == "ai" && parts[1] == "sessions" && parts[3] == "clear" && *method == Method::Post {

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 23;
+const CURRENT_VERSION: i32 = 27;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -19,6 +19,30 @@ pub fn run(conn: &mut Connection) -> Result<()> {
         [],
         |r| r.get(0),
     )?;
+
+    // This build genuinely cannot safely run against a database shaped
+    // by migrations it has never heard of — several past migrations in
+    // this same file (see v10, v13, v20 below) rebuild a table under a
+    // new shape entirely (rename-old, create-new, copy, drop), not
+    // just add a nullable column; old code querying columns that no
+    // longer exist, or writing into a table whose meaning has changed,
+    // is exactly the silent-corruption risk this guard exists to rule
+    // out before a single query runs. This is deliberately a hard stop
+    // rather than "proceed and hope": the one place in this app that
+    // can knowingly trigger this state (rollback::check_rollback_target
+    // in rollback.rs) already checks for it BEFORE ever installing an
+    // older build for exactly this reason, so reaching this branch at
+    // all means that pre-flight check was bypassed somehow (a manually
+    // installed old build outside this app's own rollback feature,
+    // for instance) — not a normal-use failure mode.
+    if current > CURRENT_VERSION {
+        anyhow::bail!(
+            "this database was last used by a newer version of this app (schema {current}); \
+             this installed build only understands up to schema {CURRENT_VERSION} and cannot \
+             safely open it. Install the latest version, or restore a backup made for this \
+             version, before continuing."
+        );
+    }
 
     if current < 1 { v1_initial(conn)?; }
     if current < 2 { v2_add_slogan(conn)?; }
@@ -43,7 +67,11 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 21 { v21_add_can_view_reports(conn)?; }
     if current < 22 { v22_backfill_sale_date(conn)?; }
     if current < 23 { v23_sales_discount_amount(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 23, "bump this alongside the last `if current < N` check above");
+    if current < 24 { v24_accounting_transaction_date(conn)?; }
+    if current < 25 { v25_created_by_column(conn)?; }
+    if current < 26 { v26_field_min_floors(conn)?; }
+    if current < 27 { v27_idempotency_keys(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 27, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -1527,3 +1555,243 @@ fn v23_sales_discount_amount(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+// THE BUG THIS FIXES: `transaction_date` (accounting.json) was a
+// real, declared field on every bookkeeping entry, but every report
+// and forecast built on this module bucketed by `created_at` instead
+// — see ModuleDef::time_field's own doc comment on module.rs for the
+// distinction. A bookkeeper backdating today's entry to when the
+// transaction actually happened (last Tuesday's expense, entered
+// today) had that date silently ignored: it landed in today's
+// numbers, not last Tuesday's, in every trend and forecast. Two
+// parts, same two-part shape as v22/v23 above and for the same
+// reason:
+//
+// 1. `date_field: "transaction_date"` needs adding to accounting's
+//    module.rs-level ModuleDef so forecast.rs knows to bucket by it
+//    — done directly in accounting.json for any business enabling
+//    Accounting from here on, but `modules.schema_json` is a
+//    per-business snapshot taken at enable-time, so an
+//    already-enabled Accounting module also needs its stored schema
+//    patched, or it keeps reading as if no date_field were declared
+//    at all (ModuleDef::time_field falls back to created_at exactly
+//    the way it always has).
+// 2. Any transaction_date left blank before this fix existed needs
+//    backfilling — same reasoning, same fix, as v22_backfill_sale_date
+//    above: a NULL/empty date bucketed by strftime() just vanishes
+//    from every report silently rather than erroring, so the honest
+//    default for a blank one is the day it was actually recorded,
+//    same as sale_date's own precedent.
+fn v24_accounting_transaction_date(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_accounting'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists == 1 {
+        tx.execute(
+            "UPDATE module_accounting SET transaction_date = date(created_at) WHERE transaction_date IS NULL OR transaction_date = ''",
+            [],
+        )?;
+    }
+
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT business_id, schema_json FROM modules WHERE id = 'accounting' AND enabled = 1",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (business_id, schema_json) in rows {
+        let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+            Ok(v) => v,
+            Err(_) => continue, // corrupt snapshot pre-dating this migration is out of scope to repair here; leave it untouched rather than risk making it worse
+        };
+        let already_set = parsed.get("date_field").and_then(|v| v.as_str()) == Some("transaction_date");
+        if !already_set {
+            if let Some(obj) = parsed.as_object_mut() {
+                obj.insert("date_field".to_string(), serde_json::Value::String("transaction_date".to_string()));
+                let new_json = serde_json::to_string(&serde_json::Value::Object(obj.clone())).unwrap_or(schema_json.clone());
+                tx.execute(
+                    "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'accounting'",
+                    rusqlite::params![new_json, business_id],
+                )?;
+            }
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (24)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+// THE BUG THIS FIXES: there was no way to know, for any record in any
+// module, which actual person created it — no `created_by` column
+// existed anywhere in the schema. That's what made a `read_own`
+// permission (rbac::ReadScope::Own — "a cashier sees the sales they
+// personally rang up, not every till") impossible to build honestly:
+// there was nothing to filter by. module.rs::create_table now writes
+// this column into every NEW module table going forward; this
+// migration is the other half, adding it to every module table that
+// already exists. Unlike v23/v24 above, this needs no
+// `modules.schema_json` patching — `created_by` is a base/engine
+// column exactly like `business_id`/`created_at`/`updated_at`, never
+// part of a module's own JSON field list, so ModuleDef never needs to
+// know it exists to build correct INSERT/SELECT statements around it.
+// Deliberately does NOT backfill it for existing rows: unlike
+// v22_backfill_sale_date, where "the day this row was created" is a
+// safe, honest stand-in for a genuinely missing date, there is no
+// honest stand-in for "who created this" — guessing would just
+// misattribute a real cashier's past sale to whoever happens to run
+// this migration. Every pre-existing record is left NULL — which,
+// correctly, a `read_own` filter (`created_by = ?`) never matches, so
+// old records simply predate per-user attribution rather than being
+// silently mis-assigned to someone.
+fn v25_created_by_column(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let module_tables: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'module_%'",
+        )?;
+        let mapped = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for table in module_tables {
+        let already_has_column: i64 = tx.query_row(
+            &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name='created_by'"),
+            [],
+            |r| r.get(0),
+        )?;
+        if already_has_column == 0 {
+            tx.execute(&format!("ALTER TABLE {table} ADD COLUMN created_by TEXT"), [])?;
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (25)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+// THE BUG THIS FIXES: `module.rs::validate_field_value`'s type check
+// confirmed a "money"/"integer" field was the right JSON type, but had
+// no concept of a valid RANGE — a negative unit_cost and unit_price
+// together could even pass inventory's own separate "price >= cost"
+// check (-50 >= -100 is true). The engine fix is `FieldDef::min` (see
+// its own doc comment for why it's opt-in per field, not a blanket
+// "reject all negative money" rule); this migration is the other half
+// — patching every already-provisioned business's stored
+// `modules.schema_json` snapshot to actually carry `"min": 0` on the
+// specific fields that should never be negative, the same way
+// v23/v24 above patched in a field/setting that didn't exist when an
+// older build first wrote that snapshot. A business that enables one
+// of these modules for the first time AFTER this version already gets
+// the floor from the shipped modules/*.json directly — this migration
+// exists purely for businesses whose snapshot predates it.
+fn v26_field_min_floors(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    // (module id, [field names that should get a floor of 0]) — kept
+    // in sync with modules/*.json by hand, same as v23's single
+    // hardcoded `discount_amount` field above. Deliberately excludes
+    // `sales.discount_amount` and any other field where negative is a
+    // real, legitimate value (see money.rs's `parse_money_input` doc
+    // comment) — this never becomes "every money field gets a floor,"
+    // only the specific ones that do.
+    let targets: &[(&str, &[&str])] = &[
+        ("inventory", &["quantity", "unit_cost", "unit_price", "reorder_level"]),
+        ("purchasing", &["quantity", "unit_cost"]),
+        ("refunds", &["quantity_refunded", "refund_amount", "cost_reversed"]),
+        ("invoice", &["subtotal", "tax_amount", "total"]),
+        ("sales", &["quantity", "revenue", "unit_price", "cost_at_sale"]),
+        ("hr", &["salary"]),
+        ("debt_credit", &["amount"]),
+        ("accounting", &["amount"]),
+    ];
+
+    for (module_id, field_names) in targets {
+        let rows: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT business_id, schema_json FROM modules WHERE id = ?1 AND enabled = 1",
+            )?;
+            let mapped = stmt.query_map([module_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (business_id, schema_json) in rows {
+            let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+                Ok(v) => v,
+                // Corrupt snapshot pre-dating this migration is out of
+                // scope to repair here; leave it untouched rather than
+                // risk making it worse.
+                Err(_) => continue,
+            };
+            let mut changed = false;
+            if let Some(fields) = parsed.get_mut("fields").and_then(|f| f.as_array_mut()) {
+                for f in fields.iter_mut() {
+                    let name_matches = f
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|n| field_names.contains(&n))
+                        .unwrap_or(false);
+                    if !name_matches {
+                        continue;
+                    }
+                    let already_zero = f.get("min").and_then(|m| m.as_i64()) == Some(0);
+                    if already_zero {
+                        continue;
+                    }
+                    if let Some(obj) = f.as_object_mut() {
+                        obj.insert("min".to_string(), serde_json::json!(0));
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+                tx.execute(
+                    "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = ?3",
+                    rusqlite::params![new_json, business_id, module_id],
+                )?;
+            }
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (26)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+// THE BUG THIS FIXES: POS checkout had no server-side idempotency
+// protection. The frontend already disables the checkout button while
+// a request is in flight (see PointOfSale.tsx), which handles a
+// double-click — but it does nothing for a network retry after a
+// timeout: if the response to a genuinely-successful checkout never
+// makes it back to the client (the request itself succeeded, only the
+// reply was lost), a naive retry would run `pos::checkout` a second
+// time and create a second real order, sell the same stock twice, and
+// double-count the revenue. This table is what makes a retry safe:
+// `(business_id, idempotency_key)` is the primary key, so a second
+// INSERT attempt with the same key hits a UNIQUE conflict instead of
+// creating a second order — see pos.rs::checkout's own doc comment
+// for how that conflict is turned into "return the original result"
+// rather than an error.
+fn v27_idempotency_keys(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS idempotency_keys (
+            business_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            order_id TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (business_id, key)
+        )",
+        [],
+    )?;
+    tx.execute("INSERT INTO _schema_version (version) VALUES (27)", [])?;
+    tx.commit()?;
+    Ok(())
+}

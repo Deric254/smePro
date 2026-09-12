@@ -380,7 +380,7 @@ pub fn create(
     module.validate(&record)?;
     crate::reference_data::validate_field_references(conn, business_id, &module, &record)?;
 
-    let id = insert_validated_record(conn, business_id, &module, &record)?;
+    let id = insert_validated_record_by(conn, business_id, &module, &record, Some(user_id))?;
 
     audit::log(conn, business_id, Some(user_id), module_id, "create", Some(&id), Some(&json!(body)))?;
     Ok(id)
@@ -395,11 +395,43 @@ pub fn create(
 /// responsibility (call `module.validate()` and
 /// `reference_data::validate_field_references()` first) — this
 /// function trusts `record` is already correct.
+/// The actual INSERT, split out from `create()` above so any caller
+/// that needs this exact insert wrapped in a LARGER transaction — most
+/// notably `pos::checkout`, which must insert a sales record AND
+/// deduct inventory atomically — reuses this precisely, instead of a
+/// second, hand-copied INSERT that could quietly drift out of sync
+/// with this one as the schema evolves. Validation is the caller's
+/// responsibility (call `module.validate()` and
+/// `reference_data::validate_field_references()` first) — this
+/// function trusts `record` is already correct. Thin wrapper around
+/// `insert_validated_record_by` below with `created_by: None` — every
+/// call site that predates the `created_by` column (most of them:
+/// system-generated Bookkeeping entries, Excel imports, anything with
+/// no single human author to attribute) keeps working completely
+/// unchanged. Only call sites that DO have a real, known author —
+/// `create()` just above, and pos::checkout's own sales-record
+/// inserts — call `insert_validated_record_by` directly instead.
 pub fn insert_validated_record(
     conn: &Connection,
     business_id: &str,
     module: &ModuleDef,
     record: &std::collections::HashMap<String, Value>,
+) -> Result<String> {
+    insert_validated_record_by(conn, business_id, module, record, None)
+}
+
+/// Same as `insert_validated_record` above, but records who actually
+/// created this row — `None` for every system/derived record with no
+/// single human author, `Some(user_id)` wherever there genuinely is
+/// one. See rbac::ReadScope::Own for the one thing this is for: a
+/// `read_own` permission that can only honestly filter by this
+/// column where it's actually populated.
+pub fn insert_validated_record_by(
+    conn: &Connection,
+    business_id: &str,
+    module: &ModuleDef,
+    record: &std::collections::HashMap<String, Value>,
+    created_by: Option<&str>,
 ) -> Result<String> {
     let table = module.table_name();
     let mut col_names = vec!["id".to_string(), "business_id".to_string()];
@@ -417,6 +449,15 @@ pub fn insert_validated_record(
             values.push(value_to_sql(v));
             idx += 1;
         }
+    }
+    if let Some(uid) = created_by {
+        col_names.push("created_by".into());
+        placeholders.push(format!("?{idx}"));
+        values.push(Box::new(uid.to_string()));
+        // idx += 1; — would be needed by any column added after this
+        // one; none currently exist, so this is a no-op left out
+        // rather than kept around to silence an unused-assignment
+        // warning for no real purpose.
     }
     col_names.push("created_at".into());
     col_names.push("updated_at".into());
@@ -446,7 +487,10 @@ pub fn list(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Value>> {
-    rbac::require(conn, user_id, module_id, "read")?;
+    let scope = rbac::read_scope(conn, user_id, module_id)?;
+    if scope == rbac::ReadScope::None {
+        anyhow::bail!("{}: user {} cannot 'read' on module '{}'", rbac::PERMISSION_DENIED_PREFIX, user_id, module_id);
+    }
     let module = load_module(conn, business_id, module_id)?;
     let table = module.table_name();
 
@@ -455,6 +499,17 @@ pub fn list(
         module.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ")
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(business_id.to_string())];
+
+    // `read_own` — see rbac::ReadScope's own doc comment for why this
+    // exists as a distinct action rather than a modifier on `read`.
+    // Narrows every list call to records this exact user created,
+    // enforced here (the single generic list path every module's
+    // table view goes through) rather than trusted to the frontend,
+    // which only ever hides UI, never actually restricts data.
+    if scope == rbac::ReadScope::Own {
+        sql.push_str(" AND created_by = ?2");
+        params.push(Box::new(user_id.to_string()));
+    }
 
     if let Some(term) = search {
         let text_fields: Vec<&str> = module

@@ -139,6 +139,7 @@ pub fn module_json(module_id: &str) -> Option<&'static str> {
 pub mod report;
 pub mod report_highlights;
 pub mod roles;
+pub mod rollback;
 pub mod settings;
 pub mod users;
 pub mod xlsx_export;
@@ -173,6 +174,94 @@ fn get_lan_address() -> Option<String> {
     network_mode::local_lan_ip()
 }
 
+/// Installs one specific past release the Owner picked via
+/// `rollback::list_releases`/`check_rollback_target`. This command's
+/// job is the part only the Tauri runtime can do: build a one-off
+/// `Updater` pointed at that release's own manifest, with a comparator
+/// that accepts installing a version that isn't newer. That override
+/// is necessary, not cosmetic — confirmed by reading
+/// tauri-plugin-updater's own source (updater.rs): with no custom
+/// comparator it hard-codes `release.version > current_version`, which
+/// would silently refuse every real rollback (the whole point of this
+/// command) while reporting no error at all, just "no update
+/// available."
+///
+/// THE BUG THIS FIXES: this command used to take a bare `manifest_url`
+/// string straight from the frontend and install it with no
+/// authorization check of its own — it trusted that the caller had
+/// already been through the Owner-gated, schema-checked HTTP-API path
+/// (`list_releases`/`check_rollback_target`). That trust doesn't hold:
+/// Tauri's `invoke()` is reachable from anything running in the
+/// webview's JS context, not just this app's own UI code — a
+/// non-Owner staff session, or a compromised frontend dependency,
+/// could call this command directly with any URL and skip both the
+/// Owner gate and the schema-compatibility check entirely. Fixed by
+/// having this command take only a `token` and a `tag` — never a raw
+/// URL — and re-running `check_rollback_target` itself, right here,
+/// against a freshly opened connection. That's the same function the
+/// HTTP-API route calls, so it's a single source of truth: it
+/// re-verifies the caller is actually an Owner AND that the tag is
+/// schema-compatible, and it rebuilds the manifest URL itself from
+/// this app's own `REPO` constant rather than trusting anything the
+/// caller supplied. A prior HTTP-API check is no longer load-bearing —
+/// this command is safe to call directly, with attacker-chosen
+/// arguments, and still can't do anything a non-Owner or an
+/// incompatible tag shouldn't be able to do.
+///
+/// The pubkey from tauri.conf.json still applies unchanged —
+/// `updater_builder()` starts from that same registered plugin config,
+/// only `.endpoints()` and `.version_comparator()` are overridden here
+/// — so a tampered or improperly-signed build at the chosen tag still
+/// fails signature verification exactly as a forward update would.
+/// This path can only move the app backward in version number, never
+/// around the signing check that makes the updater trustworthy at all.
+///
+/// Desktop-only: mobile never registers `tauri_plugin_updater` (see
+/// this same file's own comment on that `#[cfg(desktop)]` plugin
+/// line), so `app.updater_builder()` has no plugin state to read on
+/// mobile. Cfg-gating this command out of that build entirely is safer
+/// than trying to make it fail gracefully at runtime instead.
+#[cfg(desktop)]
+#[tauri::command]
+async fn rollback_to_manifest(app: tauri::AppHandle, token: String, tag: String) -> Result<(), String> {
+    use tauri::Manager;
+    use tauri_plugin_updater::UpdaterExt;
+
+    // Re-open the same database this device's own HTTP-API uses (see
+    // this same file's `setup()` closure for why `erp.db` under
+    // `app_data_dir` is the one true path) rather than trusting any
+    // connection or identity the frontend claims to already have.
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let db_path = app_data_dir.join("erp.db").to_string_lossy().to_string();
+    let conn = db::open(&db_path).map_err(|e| e.to_string())?;
+
+    let (user_id, _business_id) = auth::current_user(&conn, &token).map_err(|e| e.to_string())?;
+
+    // Re-checks Owner status AND schema compatibility from scratch,
+    // and returns a manifest_url this app built itself from `REPO` —
+    // never one supplied by the caller.
+    let check = rollback::check_rollback_target(&conn, &user_id, &tag).map_err(|e| e.to_string())?;
+
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![check.manifest_url.parse().map_err(|e| format!("not a valid URL: {e}"))?])
+        .map_err(|e| e.to_string())?
+        .version_comparator(|_current, _remote| true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "that release has no installable update manifest for this platform".to_string())?;
+
+    update
+        .download_and_install(|_chunk, _total_len| {}, || {})
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// The one real entry point for the packaged app — desktop (called from
 /// `main.rs`) and mobile (called automatically via the
 /// `mobile_entry_point` attribute below) both run through here. This is
@@ -205,11 +294,24 @@ fn get_lan_address() -> Option<String> {
 /// all (`mobile` is false there).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
+    // Split by platform, not appended after the fact: Tauri's
+    // invoke_handler can only be set once on the builder, and
+    // rollback_to_manifest itself doesn't exist on mobile builds (see
+    // that command's own `#[cfg(desktop)]` doc comment) — so the list
+    // passed to generate_handler! has to already be the right list
+    // per platform, the same way the plugin registration just below
+    // is already split by platform.
+    #[cfg(desktop)]
+    let handler = tauri::generate_handler![
         get_network_mode,
         set_network_mode,
-        get_lan_address
-    ]);
+        get_lan_address,
+        rollback_to_manifest
+    ];
+    #[cfg(not(desktop))]
+    let handler = tauri::generate_handler![get_network_mode, set_network_mode, get_lan_address];
+
+    let builder = tauri::Builder::default().invoke_handler(handler);
 
     // Self-updating via tauri-plugin-updater only makes sense on
     // desktop — that plugin has no Android/iOS implementation.
@@ -309,7 +411,15 @@ pub fn run() {
             // app data directory too.
             std::env::set_var("SME_APP_DATA_DIR", app_data_dir.to_string_lossy().to_string());
 
-            let conn = db::open(&db_path).expect("failed to open local database");
+            // NOT `.expect()`: db_migrations::run() can now legitimately
+            // return Err for a real, reachable case (this database is
+            // from a newer app version than this build understands —
+            // see that function's own guard and doc comment), and that
+            // deserves the specific, actionable message it already
+            // constructs, not a generic "failed to open local
+            // database" panic string that throws away exactly the
+            // detail a user would need to fix it.
+            let conn = db::open(&db_path).map_err(|e| e.to_string())?;
 
             // Crash reporting is off by default (no DSN configured) — see
             // crash_report.rs. Flip `None` to `Some("your-sentry-dsn")` once

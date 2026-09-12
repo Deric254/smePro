@@ -22,7 +22,8 @@
       "name": "quantity",
       "type": "integer",
       "required": true,
-      "default": 0
+      "default": 0,
+      "min": 0
     },
     {
       "name": "unit",
@@ -33,13 +34,15 @@
       "name": "unit_cost",
       "type": "money",
       "required": true,
-      "default": 0
+      "default": 0,
+      "min": 0
     },
     {
       "name": "unit_price",
       "type": "money",
       "required": true,
-      "default": 0
+      "default": 0,
+      "min": 0
     },
     {
       "name": "currency",
@@ -50,7 +53,8 @@
       "name": "reorder_level",
       "type": "integer",
       "required": false,
-      "default": 5
+      "default": 5,
+      "min": 0
     },
     {
       "name": "expiry_date",

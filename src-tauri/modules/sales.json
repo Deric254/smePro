@@ -26,12 +26,14 @@
       "name": "quantity",
       "type": "integer",
       "required": true,
-      "default": 1
+      "default": 1,
+      "min": 0
     },
     {
       "name": "revenue",
       "type": "money",
-      "required": true
+      "required": true,
+      "min": 0
     },
     {
       "name": "sale_date",
@@ -41,7 +43,8 @@
     {
       "name": "unit_price",
       "type": "money",
-      "required": false
+      "required": false,
+      "min": 0
     },
     {
       "name": "payment_method",
@@ -57,7 +60,8 @@
       "name": "cost_at_sale",
       "type": "money",
       "required": true,
-      "default": 0
+      "default": 0,
+      "min": 0
     },
     {
       "name": "discount_amount",
@@ -69,6 +73,7 @@
   "actions": [
     "create",
     "read",
+    "read_own",
     "update",
     "delete",
     "export",
@@ -93,6 +98,7 @@
     ],
     "Staff": [
       "create",
+      "read_own",
       "refund"
     ]
   },

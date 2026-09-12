@@ -262,8 +262,17 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
     } else {
         Vec::new()
     };
+    // `offset_minutes: 0` here, not the caller's real local offset —
+    // unlike the equivalent /sales/day-of-week HTTP route, there's no
+    // per-request browser timezone available at this call site (the
+    // AI assistant's context gets built server-side, not from a page
+    // that just ran `new Date().getTimezoneOffset()`). This falls
+    // back to UTC-day bucketing rather than local — a smaller, known
+    // gap versus that route's own fix, not a fixed one. See
+    // day_of_week_pattern's own doc comment for what's actually wrong
+    // with a 0 offset here.
     let day_of_week_pattern = if can_view_reports {
-        crate::sales_patterns::day_of_week_pattern(conn, business_id, user_id, &today, 90).unwrap_or_default()
+        crate::sales_patterns::day_of_week_pattern(conn, business_id, user_id, &today, 90, 0).unwrap_or_default()
     } else {
         Vec::new()
     };

@@ -76,6 +76,13 @@ pub struct CheckoutRequest {
     /// cart at once, not an approximation of it.
     #[serde(default)]
     pub discount_pct: Option<f64>,
+    /// Optional client-generated key that makes a checkout retry-safe.
+    /// See `checkout()`'s own doc comment on `idempotency_keys` for
+    /// the full mechanism. `None` means "no idempotency protection for
+    /// this call" — existing callers that never send one behave
+    /// exactly as before.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 /// Product lookup for the POS product grid — deliberately narrower
@@ -182,10 +189,57 @@ pub fn low_stock_items(conn: &Connection, business_id: &str, user_id: &str, limi
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
+/// Looks up a previously-committed checkout by its idempotency key —
+/// the fast path for the common case (a client retrying after a lost
+/// response), and also what a genuine concurrent-race loser falls
+/// back to in `checkout()` below, after its own INSERT into this table
+/// hits the other request's already-committed row.
+fn fetch_cached_checkout(conn: &Connection, business_id: &str, key: &str) -> Result<Option<Value>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT response_json FROM idempotency_keys WHERE business_id = ?1 AND key = ?2",
+            params![business_id, key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match raw {
+        Some(s) => Ok(Some(serde_json::from_str(&s)?)),
+        None => Ok(None),
+    }
+}
+
+/// True specifically for a UNIQUE/PRIMARY KEY conflict — the one
+/// SQLite error `checkout()`'s idempotency insert treats as "someone
+/// else already committed this exact key," never any other kind of
+/// database error, which should still surface as a real failure.
+fn is_unique_violation(e: &rusqlite::Error) -> bool {
+    e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
+}
+
 /// Runs the whole checkout as one atomic transaction. On success,
 /// returns the order summary (order_id, subtotal, per-line detail) —
 /// everything a receipt screen needs, computed from what was actually
 /// written, not just echoed back from the request.
+///
+/// IDEMPOTENCY: the frontend already disables the checkout button
+/// while a request is in flight, which handles a double-click, but
+/// does nothing for a network retry after a timeout — if the request
+/// actually succeeded server-side and only the response was lost, a
+/// naive retry would run this whole function again and create a
+/// second real order, sell the same stock twice, and double-count
+/// revenue. When `req.idempotency_key` is set, this closes that gap
+/// two ways: (1) a fast-path lookup up front returns the original
+/// result immediately, without redoing any work, for the common case
+/// of a client retrying after already having succeeded once; (2) for
+/// the rarer case of two identical requests genuinely racing each
+/// other, the key is also inserted as part of the SAME transaction as
+/// every other write, with `(business_id, key)` as that table's
+/// primary key — so whichever request's transaction commits first
+/// wins, and the loser's INSERT hits a UNIQUE conflict, rolls its
+/// entire transaction back (no stock deducted, no sale recorded), and
+/// falls back to returning the winner's already-committed result
+/// instead of erroring or creating a duplicate. Either way, calling
+/// `checkout` twice with the same key can never produce two orders.
 pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: CheckoutRequest) -> Result<Value> {
     if req.items.is_empty() {
         return Err(anyhow!("the cart is empty"));
@@ -193,6 +247,15 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     // One check, up front, for the whole operation — not per-line and
     // not split across two different modules' permissions.
     crate::rbac::require(conn, user_id, "inventory", "sell")?;
+
+    // Fast path: this exact checkout already happened (most likely a
+    // client retry after a timeout) — hand back the original result
+    // rather than doing any of the work, or any of the checks, again.
+    if let Some(key) = req.idempotency_key.as_deref() {
+        if let Some(cached) = fetch_cached_checkout(conn, business_id, key)? {
+            return Ok(cached);
+        }
+    }
 
     let inventory_module = crud::load_module(conn, business_id, "inventory")
         .map_err(|_| anyhow!("the Inventory module isn't enabled for this business — checkout needs it"))?;
@@ -447,7 +510,7 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         // special-casing for POS-originated records.
         sales_module.validate(&record)?;
         crate::reference_data::validate_field_references(&tx, business_id, &sales_module, &record)?;
-        let sale_id = crud::insert_validated_record(&tx, business_id, &sales_module, &record)?;
+        let sale_id = crud::insert_validated_record_by(&tx, business_id, &sales_module, &record, Some(user_id))?;
 
         lines.push(json!({
             "sku": sku,
@@ -602,7 +665,6 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
     // process died at any point before this line, every UPDATE and
     // INSERT above would simply not exist on next read, not exist
     // "partially."
-    tx.commit()?;
 
     let summary = json!({
         "order_id": order_id,
@@ -616,6 +678,31 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         "on_credit": req.on_credit,
         "debt_record_id": debt_record_id,
     });
+
+    // Idempotency insert happens INSIDE the same transaction as every
+    // other write above — see checkout()'s own doc comment for why
+    // that's what makes the race-loser fallback below safe rather than
+    // a second, separate opportunity for two orders to be created.
+    if let Some(key) = req.idempotency_key.as_deref() {
+        let insert_result = tx.execute(
+            "INSERT INTO idempotency_keys (business_id, key, order_id, response_json) VALUES (?1, ?2, ?3, ?4)",
+            params![business_id, key, order_id, summary.to_string()],
+        );
+        if let Err(e) = insert_result {
+            if is_unique_violation(&e) {
+                // Another request with this same key already
+                // committed first. Drop this transaction — nothing
+                // above is applied, no double stock deduction, no
+                // duplicate sale — and hand back THEIR result.
+                drop(tx);
+                return fetch_cached_checkout(conn, business_id, key)?
+                    .ok_or_else(|| anyhow!("checkout idempotency conflict, but no cached result was found"));
+            }
+            return Err(e.into());
+        }
+    }
+
+    tx.commit()?;
 
     // Logged after commit, deliberately: the audit log recording a
     // checkout that turned out not to actually happen (had the commit
@@ -729,7 +816,7 @@ pub fn create_service_sale(conn: &mut Connection, business_id: &str, user_id: &s
         }
         sales_module.validate(&record)?;
         crate::reference_data::validate_field_references(&tx, business_id, &sales_module, &record)?;
-        let sale_id = crud::insert_validated_record(&tx, business_id, &sales_module, &record)?;
+        let sale_id = crud::insert_validated_record_by(&tx, business_id, &sales_module, &record, Some(user_id))?;
 
         lines_out.push(json!({
             "description": line.description,

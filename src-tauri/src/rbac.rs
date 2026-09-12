@@ -128,6 +128,43 @@ pub fn require(conn: &Connection, user_id: &str, module_id: &str, action: &str) 
     }
 }
 
+/// How much of a module's data a `read`-family permission actually
+/// grants — the difference between `read` (every record in the
+/// business) and `read_own` (only records this exact user created).
+/// A role can hold both; `read` always wins since it's strictly
+/// broader. See `crud::list`'s use of this for the one place the
+/// distinction is enforced — nowhere else needs to know it exists.
+/// This is deliberately its own action string, not a modifier on
+/// `read` a role could combine some other way: a role either has full
+/// visibility into a module or it doesn't, and `read_own` exists
+/// specifically for the case where a real business wants a narrower,
+/// honest middle ground instead of the all-or-nothing choice `read`
+/// on its own forces — see sales.json's own Staff role, granted
+/// `read_own` instead of `read` for exactly this reason: a cashier
+/// should see the sales they rang up without also seeing every other
+/// cashier's till.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ReadScope {
+    /// Neither `read` nor `read_own` granted — treat exactly like any
+    /// other denied `require()` call.
+    None,
+    /// `read_own` only — every record returned must additionally be
+    /// filtered to `created_by = this user`.
+    Own,
+    /// `read` — every record in the business, no filter.
+    All,
+}
+
+pub fn read_scope(conn: &Connection, user_id: &str, module_id: &str) -> Result<ReadScope> {
+    if is_allowed(conn, user_id, module_id, "read")? {
+        Ok(ReadScope::All)
+    } else if is_allowed(conn, user_id, module_id, "read_own")? {
+        Ok(ReadScope::Own)
+    } else {
+        Ok(ReadScope::None)
+    }
+}
+
 /// What THIS signed-in user can actually see/do, as a single navigation-
 /// level summary — see api.ts's `getMyCapabilities` on the frontend for
 /// what it powers.
@@ -194,7 +231,7 @@ pub fn my_capabilities(conn: &Connection, business_id: &str, user_id: &str) -> a
     let readable_modules: Vec<String> = crate::business_panel::list_modules(conn, business_id)?
         .into_iter()
         .filter(|m| m.enabled)
-        .filter(|m| allowed_for_role(&m.id, "read"))
+        .filter(|m| allowed_for_role(&m.id, "read") || allowed_for_role(&m.id, "read_own"))
         .map(|m| m.id)
         .collect();
     Ok(MyCapabilities { is_admin_tier, can_sell, can_stocktake, can_view_reports, readable_modules })

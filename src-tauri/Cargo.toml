@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.66"
+version = "0.1.63"
 edition = "2021"
 
 [lib]
@@ -129,3 +129,21 @@ version = "=0.9.103"
 # proceeding with no usable crypto library, not visible until the final
 # link step, which made this a genuinely nasty one to trace.
 features = ["vendored"]
+
+# THE BUG THIS CLOSES: Rust's default release-profile behavior lets
+# integer arithmetic silently WRAP on overflow instead of panicking —
+# debug builds panic, release builds don't, unless overridden here.
+# i64 (what every money/quantity value in this app is stored and
+# computed as — see money.rs) is enormous, so this needs a genuinely
+# pathological input to hit in practice. But a fat-fingered extra zero
+# on quantity × unit_price is exactly the kind of honest mistake that
+# could approach it, and a silently wrapped total would show up as
+# plausible-looking — possibly even negative — revenue with no error
+# raised anywhere in the whole pipeline: not at input validation, not
+# in the transaction, not in any report built on top of it afterward.
+# For a system whose whole design principle is "money is exact integer
+# cents, never approximate," failing loudly on overflow instead of
+# producing a silently wrong number is worth the small, well-understood
+# performance cost overflow-checks carries in release builds.
+[profile.release]
+overflow-checks = true

@@ -40,7 +40,7 @@ pub struct ReportHighlights {
     pub busiest_day: Option<BusiestDay>,
 }
 
-pub fn compute(conn: &Connection, business_id: &str, user_id: &str, today: &str) -> ReportHighlights {
+pub fn compute(conn: &Connection, business_id: &str, user_id: &str, today: &str, offset_minutes: i64) -> ReportHighlights {
     let most_urgent_item = crate::stock_health::stock_runway(conn, business_id, user_id, today, 30, 1)
         .ok()
         .and_then(|v| v.into_iter().next())
@@ -48,7 +48,7 @@ pub fn compute(conn: &Connection, business_id: &str, user_id: &str, today: &str)
         .filter(|(_, d)| *d <= 14.0)
         .map(|(item_name, days_of_stock_left)| UrgentItem { item_name, days_of_stock_left });
 
-    let busiest_day = crate::sales_patterns::day_of_week_pattern(conn, business_id, user_id, today, 90)
+    let busiest_day = crate::sales_patterns::day_of_week_pattern(conn, business_id, user_id, today, 90, offset_minutes)
         .ok()
         .and_then(|days| {
             days.into_iter()

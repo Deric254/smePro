@@ -25,12 +25,14 @@
     {
       "name": "quantity_refunded",
       "type": "integer",
-      "required": true
+      "required": true,
+      "min": 0
     },
     {
       "name": "refund_amount",
       "type": "money",
-      "required": true
+      "required": true,
+      "min": 0
     },
     {
       "name": "reason",
@@ -52,11 +54,13 @@
       "name": "cost_reversed",
       "type": "money",
       "required": true,
-      "default": 0
+      "default": 0,
+      "min": 0
     }
   ],
   "actions": [
     "read",
+    "read_own",
     "export"
   ],
   "default_roles": {
@@ -70,7 +74,7 @@
       "export"
     ],
     "Staff": [
-      "read"
+      "read_own"
     ]
   },
   "dashboard_metric": {

@@ -22,7 +22,8 @@
     {
       "name": "amount",
       "type": "money",
-      "required": true
+      "required": true,
+      "min": 0
     },
     {
       "name": "due_date",

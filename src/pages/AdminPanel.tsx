@@ -13,9 +13,11 @@ import {
   listTaxRates, setTaxRate, computeTax,
   changeBusinessType,
   listModules, listAvailableModules, getModuleSchema, enableModule, disableModule,
+  listReleases, checkRollbackTarget,
+  getToken,
   ApiError,
 } from '../api';
-import type { AuditLogEntry, NotificationRecord, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule } from '../api';
+import type { AuditLogEntry, NotificationRecord, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule, ReleaseOption } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
 import { parseBackendTimestamp } from '../lib/date';
@@ -941,6 +943,16 @@ function SettingsTab() {
   const [typeChangedModules, setTypeChangedModules] = useState<string[] | null>(null);
   const [typeError, setTypeError] = useState<string | null>(null);
 
+  const [releases, setReleases] = useState<ReleaseOption[] | null>(null);
+  const [releasesError, setReleasesError] = useState<string | null>(null);
+  const [selectedTag, setSelectedTag] = useState('');
+  const [checkPhase, setCheckPhase] = useState<'idle' | 'checking' | 'ok' | 'blocked'>('idle');
+  const [checkMessage, setCheckMessage] = useState<string | null>(null);
+  const [checkedManifestUrl, setCheckedManifestUrl] = useState<string | null>(null);
+  const [rollbackConfirm, setRollbackConfirm] = useState('');
+  const [rollbackStatus, setRollbackStatus] = useState<'idle' | 'confirming' | 'working' | 'error'>('idle');
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
+
   useEffect(() => {
     getSettings().then((s) => { if (s.theme) setTheme(s.theme); }).catch(() => {});
   }, []);
@@ -996,6 +1008,71 @@ function SettingsTab() {
       // Genuinely running in the desktop app but the check itself
       // failed (e.g. no network, update server unreachable).
       setUpdateStatus('error');
+    }
+  }
+
+  async function loadReleases() {
+    setReleasesError(null);
+    try {
+      const res = await listReleases();
+      setReleases(res.items);
+    } catch (err) {
+      setReleasesError(err instanceof ApiError ? err.message : 'Could not load past releases');
+    }
+  }
+
+  async function runCompatibilityCheck(tag: string) {
+    setCheckPhase('checking');
+    setCheckMessage(null);
+    setCheckedManifestUrl(null);
+    try {
+      const res = await checkRollbackTarget(tag);
+      setCheckedManifestUrl(res.manifest_url);
+      setCheckPhase('ok');
+      setCheckMessage(`Verified compatible (database schema ${res.current_schema_version}).`);
+    } catch (err) {
+      setCheckPhase('blocked');
+      setCheckMessage(err instanceof ApiError ? err.message : `Could not verify ${tag} — try again`);
+    }
+  }
+
+  function handleSelectTag(tag: string) {
+    setSelectedTag(tag);
+    setRollbackConfirm('');
+    setRollbackStatus('idle');
+    setRollbackError(null);
+    if (tag) {
+      runCompatibilityCheck(tag);
+    } else {
+      setCheckPhase('idle');
+      setCheckMessage(null);
+      setCheckedManifestUrl(null);
+    }
+  }
+
+  async function handleRollback() {
+    if (!selectedTag || rollbackConfirm !== 'ROLLBACK' || checkPhase !== 'ok' || !checkedManifestUrl) return;
+    setRollbackStatus('working');
+    setRollbackError(null);
+    try {
+      const { isTauri } = await import('@tauri-apps/api/core');
+      if (!isTauri()) {
+        setRollbackError('Rollback only works in the packaged desktop app, not in a browser or dev preview.');
+        setRollbackStatus('error');
+        return;
+      }
+      const { invoke } = await import('@tauri-apps/api/core');
+      // Sends only the token and tag, never a manifest URL: the
+      // backend command re-derives and re-verifies everything itself
+      // (Owner check + schema compatibility + manifest URL) from
+      // these two, so this call can't be replayed or spoofed with a
+      // stale or attacker-chosen URL.
+      await invoke('rollback_to_manifest', { token: getToken(), tag: selectedTag });
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch (err) {
+      setRollbackError(err instanceof ApiError ? err.message : typeof err === 'string' ? err : `Rollback to ${selectedTag} failed`);
+      setRollbackStatus('error');
     }
   }
 
@@ -1063,6 +1140,59 @@ function SettingsTab() {
         {updateStatus === 'preview' && (
           <div style={{ marginTop: '0.7rem', color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
             Update checks only work in the packaged desktop app, not in a browser or dev preview.
+          </div>
+        )}
+      </div>
+
+      <div className="card" style={{ marginTop: '1rem' }}>
+        <h3 style={{ marginTop: 0 }}>Roll back to a previous version</h3>
+        <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginBottom: '0.6rem' }}>
+          Restricted to the business Owner. Use this only if the current version has a problem —
+          it reinstalls an older, previously published release and restarts the app.
+        </div>
+        <ErrorBox error={releasesError} />
+        <ErrorBox error={rollbackError} />
+        {!releases && (
+          <button className="btn btn-outline" onClick={loadReleases}>Load past releases</button>
+        )}
+        {releases && releases.length === 0 && (
+          <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>No past releases found.</div>
+        )}
+        {releases && releases.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', maxWidth: 420 }}>
+            <select
+              value={selectedTag}
+              onChange={(e) => handleSelectTag(e.target.value)}
+            >
+              <option value="">Choose a version…</option>
+              {releases.map((r) => (
+                <option key={r.tag} value={r.tag}>
+                  {r.tag}{r.name ? ` — ${r.name}` : ''}{r.is_prerelease ? ' (pre-release)' : ''}
+                </option>
+              ))}
+            </select>
+            {checkPhase === 'checking' && (
+              <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>Checking compatibility…</div>
+            )}
+            {checkPhase === 'blocked' && (
+              <div style={{ fontSize: '0.85rem', color: 'var(--danger, #b00)' }}>{checkMessage}</div>
+            )}
+            {checkPhase === 'ok' && (
+              <>
+                <div style={{ fontSize: '0.85rem', color: 'var(--ok)' }}>{checkMessage}</div>
+                <div>
+                  <label>Type <span className="mono">ROLLBACK</span> to confirm — this cannot be undone</label>
+                  <input value={rollbackConfirm} onChange={(e) => setRollbackConfirm(e.target.value)} style={{ width: '100%', marginTop: '0.3rem' }} />
+                </div>
+                <button
+                  className="btn btn-stamp"
+                  onClick={handleRollback}
+                  disabled={rollbackConfirm !== 'ROLLBACK' || rollbackStatus === 'working'}
+                >
+                  {rollbackStatus === 'working' ? 'Rolling back…' : `Roll back to ${selectedTag}`}
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>

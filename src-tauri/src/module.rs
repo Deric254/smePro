@@ -14,6 +14,22 @@ pub struct FieldDef {
     #[serde(default)]
     pub unique: bool,
     pub default: Option<Value>,
+    /// Inclusive floor for "integer"/"money" fields, in the same unit
+    /// the field is stored in (whole units for integer, minor units —
+    /// cents — for money). `None` means no floor at all, which is the
+    /// deliberate default: negative is legitimate for fields like a
+    /// sale's `discount_amount` (see money.rs's `parse_money_input`
+    /// doc comment on why negative is allowed there), so this is never
+    /// a blanket "reject all negative money" switch — each module's
+    /// own JSON opts a specific field in with e.g. `"min": 0`, which
+    /// every quantity/cost/price field in the shipped modules now
+    /// does. Checked in `validate_field_value` alongside the existing
+    /// type check, so a value must be both the right type AND within
+    /// this floor before it's accepted — a raw API call bypassing the
+    /// UI can no longer write e.g. -500 units or a negative unit_cost
+    /// on any module, built-in or custom.
+    #[serde(default)]
+    pub min: Option<i64>,
 }
 
 /// A module's own declaration of what single number best represents it
@@ -45,13 +61,42 @@ pub struct ModuleDef {
     pub default_roles: std::collections::HashMap<String, Vec<String>>,
     #[serde(default)]
     pub dashboard_metric: Option<DashboardMetric>,
+    /// Which of this module's own `date`-typed fields represents when
+    /// the record actually happened, for reporting/forecasting
+    /// purposes — as opposed to `created_at`, which is only ever when
+    /// the row was typed into this app. Optional and backward-
+    /// compatible: a module without one (the common case, where the
+    /// two are effectively the same thing) just uses `created_at`,
+    /// same as every module did before this existed. Declare this
+    /// when a module lets someone backdate a record — accounting.json
+    /// sets it to "transaction_date" for exactly that reason: a
+    /// bookkeeper entering last Tuesday's expense today needs it to
+    /// land in last Tuesday's numbers, not today's, or every report
+    /// and forecast built on this module silently misattributes it.
+    /// See forecast.rs's `time_field_for` for where this gets read.
+    #[serde(default)]
+    pub date_field: Option<String>,
+}
+
+impl ModuleDef {
+    /// The field reports/forecasts should bucket this module's records
+    /// by — `date_field` if the module declares one, `created_at`
+    /// otherwise. Doesn't validate the field exists or is actually a
+    /// `date` field itself; `report::run`'s own field-existence check
+    /// (it already validates any `Dimension::Time` field against this
+    /// module's real field list) is the enforcement point for that,
+    /// so a typo'd `date_field` fails loudly as "not a field on this
+    /// module" rather than silently falling back to created_at.
+    pub fn time_field(&self) -> &str {
+        self.date_field.as_deref().unwrap_or("created_at")
+    }
 }
 
 /// SQL column/table names are RESERVED — every module table already has
 /// these; a field trying to reuse one of them would silently collide
 /// with (or, combined with the injection risk below, deliberately
 /// shadow) a real system column.
-const RESERVED_COLUMN_NAMES: &[&str] = &["id", "business_id", "created_at", "updated_at", "deleted_at"];
+const RESERVED_COLUMN_NAMES: &[&str] = &["id", "business_id", "created_at", "updated_at", "deleted_at", "created_by"];
 
 /// Validates that `name` is safe to interpolate directly into raw SQL
 /// as an identifier (a table or column name) — which is exactly what
@@ -214,6 +259,19 @@ impl ModuleDef {
         cols.extend(self.field_column_defs()?);
         cols.push("created_at TEXT NOT NULL".to_string());
         cols.push("updated_at TEXT NOT NULL".to_string());
+        // Nullable, deliberately: not every record has a real human
+        // author to attribute — see excel_import.rs bulk imports,
+        // system-generated Bookkeeping entries created as a
+        // side-effect of some other action (a sale, a receiving), and
+        // every record that existed before this column did (v25's
+        // migration leaves those NULL rather than guessing). Where it
+        // IS known — a person filling out this module's own create
+        // form, a cashier ringing up a sale — crud::insert_validated_
+        // record's `created_by` parameter records it. See rbac::
+        // ReadScope::Own for the one thing this column exists to
+        // support: a `read_own` permission that can honestly filter
+        // "records this user created" only where that's actually true.
+        cols.push("created_by TEXT".to_string());
         cols.push("deleted_at TEXT".to_string()); // soft delete, keeps audit trail meaningful
         // Business-scoped, not global — see that method's own doc
         // comment for the bug this avoids.
@@ -393,6 +451,10 @@ impl ModuleDef {
 
     fn validate_field_value(&self, f: &FieldDef, v: &Value) -> Result<()> {
         let ok = match f.field_type.as_str() {
+            // "text"/"unit"/"currency" need only be a string — no
+            // further shape implied by the type. "date" is a string
+            // too at the JSON level, but gets its own real
+            // calendar-date check below, past this initial type gate.
             "text" | "date" | "unit" | "currency" => v.is_string(),
             "integer" => v.is_i64() || v.is_u64(),
             // Money is ALWAYS integer minor units by the time it
@@ -419,6 +481,95 @@ impl ModuleDef {
                 v
             ));
         }
+
+        // THE GAP THIS CLOSES: the check above only ever confirmed
+        // "is this the right JSON type" — a "money" field being an
+        // integer at all, never whether that integer made sense.
+        // -50 is exactly as valid an i64 as 50 was, so a negative
+        // unit_cost or unit_price sailed straight through, and two
+        // negatives together could even pass inventory's own separate
+        // "price >= cost" check (-50 >= -100 is true). This is the
+        // floor half of that fix — see `FieldDef::min`'s own doc
+        // comment for why it's opt-in per field rather than a global
+        // "no negative money" rule.
+        if let Some(min) = f.min {
+            if matches!(f.field_type.as_str(), "integer" | "money") {
+                let n = v.as_i64().or_else(|| v.as_u64().map(|u| u as i64));
+                if let Some(n) = n {
+                    if n < min {
+                        return Err(anyhow!(
+                            "field '{}' must be at least {min}, got {n}",
+                            f.name
+                        ));
+                    }
+                }
+            }
+        }
+
+        // THE GAP THIS CLOSES: `required: true` only ever meant "the
+        // key is present in the record" — an empty or whitespace-only
+        // string satisfied that and nothing else, so a customer name
+        // or item name of "" (or "   ") was accepted as a complete,
+        // valid required field. A value simply isn't present here
+        // (see `validate`/`validate_partial` above) is a different,
+        // already-handled case; this is specifically about a value
+        // that IS present but carries no real content.
+        if f.required && f.field_type == "text" {
+            if let Some(s) = v.as_str() {
+                if s.trim().is_empty() {
+                    return Err(anyhow!("field '{}' is required and cannot be empty", f.name));
+                }
+            }
+        }
+
+        // THE GAP THIS CLOSES: a "date" field's type check was just
+        // `is_string()` — any string at all, including something like
+        // "tomorrow" or "13/45/2026", passed silently and only
+        // misbehaved much later (wrong bucket, wrong sort order) in
+        // every date-range report that reads it back, with no error
+        // anywhere close to where the bad value was actually entered.
+        // Every date this app itself ever produces is the same
+        // `chrono` ISO shape (see e.g. `Utc::now().date_naive()`
+        // callers throughout http_api.rs/pos.rs), so that's the one
+        // shape accepted here too — not a looser format that would
+        // just move the "does this actually parse" problem elsewhere.
+        // An empty, optional date field is left alone: `""` for a
+        // field that isn't required is "not set", not "an invalid
+        // date", and the `required`-empty-string check above already
+        // handles the case where that's not allowed.
+        if f.field_type == "date" {
+            if let Some(s) = v.as_str() {
+                if !(s.is_empty() && !f.required)
+                    && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_err()
+                {
+                    return Err(anyhow!(
+                        "field '{}' must be a valid date in YYYY-MM-DD form, got '{}'",
+                        f.name,
+                        s
+                    ));
+                }
+            }
+        }
+
+        // Storage-bloat guard, not a correctness rule: no module field
+        // ever legitimately needs more than this many characters, and
+        // an unbounded TEXT column otherwise has no ceiling at all — a
+        // raw API call (or a pasted document) could write megabytes
+        // into a single field. Generous enough that no real "notes" or
+        // free-text field anyone actually writes should ever hit it.
+        const MAX_TEXT_LEN: usize = 20_000;
+        if f.field_type == "text" {
+            if let Some(s) = v.as_str() {
+                if s.len() > MAX_TEXT_LEN {
+                    return Err(anyhow!(
+                        "field '{}' is too long ({} characters, max {MAX_TEXT_LEN})",
+                        f.name,
+                        s.len()
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 }

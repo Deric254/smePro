@@ -164,6 +164,20 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   // ever applied.
   const productsRequestRef = useRef(0);
 
+  // Holds the current checkout attempt's idempotency key (see
+  // handleCheckout and api.ts's CheckoutRequest.idempotency_key doc
+  // comment) — null means "no attempt in flight / last attempt is
+  // done," so the next call to handleCheckout generates a fresh one.
+  const checkoutKeyRef = useRef<string | null>(null);
+
+  // Editing the cart after a failed or abandoned checkout attempt is a
+  // genuinely different checkout, not a retry of the old one — so the
+  // stale key is dropped here rather than reused for whatever gets
+  // rung up next.
+  useEffect(() => {
+    checkoutKeyRef.current = null;
+  }, [cart]);
+
   useEffect(() => {
     const timer = setTimeout(() => { refreshProducts(); }, search ? 250 : 0); // instant on initial load / cleared search, debounced while typing
     return () => clearTimeout(timer);
@@ -278,6 +292,16 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
     if (cart.length === 0) return;
     setError(null);
     setLoading(true);
+    // Generated once per checkout attempt and reused on every retry of
+    // THIS attempt (see api.ts's CheckoutRequest.idempotency_key doc
+    // comment) — a fresh key per call would defeat the whole point,
+    // which is why this is only created the first time and not
+    // regenerated below. Cleared by the cart-change effect whenever
+    // the cart itself changes, since editing the cart is a genuinely
+    // different checkout, not a retry of the old one.
+    if (!checkoutKeyRef.current) {
+      checkoutKeyRef.current = crypto.randomUUID();
+    }
     try {
       const result = await checkout({
         items: cart.map((c) => ({ inventory_record_id: c.inventory_record_id, quantity: c.quantity })),
@@ -288,7 +312,9 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
         on_credit: onCredit,
         due_date: onCredit ? (dueDate || undefined) : undefined,
         discount_pct: discountPct ? Number(discountPct) : undefined,
+        idempotency_key: checkoutKeyRef.current,
       });
+      checkoutKeyRef.current = null; // this attempt is done — a future checkout is a new one
       setReceipt(result);
       setCart([]);
       setCustomer('');
@@ -298,6 +324,10 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       setDiscountPct('');
       refreshProducts(); // stock just changed — the grid should show it now, not after the next search keystroke
     } catch (err) {
+      // Deliberately NOT cleared here — a retry of this exact failed
+      // (or ambiguous, e.g. timed-out) attempt should reuse the same
+      // key, which is what makes the retry safe against having
+      // actually already succeeded server-side.
       setError(err instanceof ApiError ? err.message : 'Checkout failed');
     } finally {
       setLoading(false);

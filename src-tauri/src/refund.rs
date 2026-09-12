@@ -288,7 +288,7 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
     // purpose-built path instead of generic CRUD.
     refunds_module.validate(&record)?;
     crate::reference_data::validate_field_references(&tx, business_id, &refunds_module, &record)?;
-    let refund_id = crud::insert_validated_record(&tx, business_id, &refunds_module, &record)?;
+    let refund_id = crud::insert_validated_record_by(&tx, business_id, &refunds_module, &record, Some(user_id))?;
 
     // Same Bookkeeping auto-post as checkout() and receive(). Skipped
     // when refund_amount is 0 — a valid case (an even exchange, no

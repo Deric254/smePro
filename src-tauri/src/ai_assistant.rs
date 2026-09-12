@@ -107,13 +107,31 @@ pub struct Turn {
 /// follow-up question ("what about last week?") is actually answered in
 /// context instead of as an isolated one-off question. `history` should
 /// be in chronological order and NOT include `question` itself.
-pub fn ask_with_history(
-    conn: &Connection,
-    business_id: &str,
-    user_id: &str,
-    question: &str,
-    history: &[Turn],
-) -> Result<String> {
+/// Everything a call to an AI provider needs that has to come from the
+/// database — the provider choice, its API key, its model, and the
+/// grounding snapshot baked into the system prompt. Deliberately holds
+/// no `Connection` and nothing borrowed from one: this is the exact
+/// boundary between "needs the DB" and "just needs the network," so a
+/// caller can build one of these under a brief lock, drop the lock,
+/// and then call `send()` against owned data while the (possibly
+/// multi-second) HTTP call to the provider is in flight. See
+/// http_api.rs's AI-ask routes for why that boundary matters: this
+/// app's API server holds one shared `Mutex<Connection>` per request,
+/// and a network call made while still holding that lock blocks every
+/// other endpoint, for every user, for as long as the provider takes
+/// to answer.
+pub struct PreparedAiCall {
+    provider: Provider,
+    api_key: String,
+    model: String,
+    system_prompt: String,
+}
+
+/// The DB-dependent half of answering a question: builds the grounding
+/// snapshot and resolves which provider/key/model this business is
+/// configured to use. Does no network I/O — safe to run under a brief
+/// lock. Pair with `send()` below, called after the lock is released.
+pub fn prepare(conn: &Connection, business_id: &str, user_id: &str) -> Result<PreparedAiCall> {
     let snapshot = ai_context::build_snapshot(conn, business_id, user_id)?;
     let system_prompt = format!(
         "You are a business assistant embedded in an SME's ERP system. \
@@ -129,12 +147,55 @@ pub fn ask_with_history(
         serde_json::to_string_pretty(&snapshot)?
     );
 
-    match Provider::resolve(conn, business_id) {
-        Provider::NvidiaNim => ask_nvidia_nim(conn, business_id, &system_prompt, question, history),
-        Provider::Gemini => ask_gemini(conn, business_id, &system_prompt, question, history),
-        Provider::OpenAi => ask_openai(conn, business_id, &system_prompt, question, history),
-        Provider::Claude => ask_claude(conn, business_id, &system_prompt, question, history),
+    let provider = Provider::resolve(conn, business_id);
+    let (api_key, model) = match provider {
+        Provider::NvidiaNim => (
+            resolve_key(conn, business_id, "nvidia", "NVIDIA_API_KEY", Some("https://build.nvidia.com"))?,
+            model_for(conn, business_id, "nvidia", DEFAULT_NVIDIA_MODEL),
+        ),
+        Provider::Gemini => (
+            resolve_key(conn, business_id, "gemini", "GOOGLE_API_KEY", Some("https://aistudio.google.com"))?,
+            model_for(conn, business_id, "gemini", "gemini-3.6-flash"),
+        ),
+        Provider::OpenAi => (
+            resolve_key(conn, business_id, "openai", "OPENAI_API_KEY", None)?,
+            model_for(conn, business_id, "openai", "gpt-4o-mini"),
+        ),
+        Provider::Claude => (
+            resolve_key(conn, business_id, "claude", "ANTHROPIC_API_KEY", None)?,
+            model_for(conn, business_id, "claude", "claude-sonnet-4-6"),
+        ),
+    };
+
+    Ok(PreparedAiCall { provider, api_key, model, system_prompt })
+}
+
+/// The network half — no `Connection` anywhere in this call chain.
+/// Safe (and intended) to call with no lock held at all.
+pub fn send(prepared: &PreparedAiCall, question: &str, history: &[Turn]) -> Result<String> {
+    match prepared.provider {
+        Provider::NvidiaNim => ask_nvidia_nim(&prepared.api_key, &prepared.model, &prepared.system_prompt, question, history),
+        Provider::Gemini => ask_gemini(&prepared.api_key, &prepared.model, &prepared.system_prompt, question, history),
+        Provider::OpenAi => ask_openai(&prepared.api_key, &prepared.model, &prepared.system_prompt, question, history),
+        Provider::Claude => ask_claude(&prepared.api_key, &prepared.model, &prepared.system_prompt, question, history),
     }
+}
+
+/// Same DB-read-then-network shape as `prepare()` + `send()` above,
+/// collapsed into one call — convenient for callers that don't need
+/// the lock released in between (e.g. tests, which use an in-memory
+/// connection with no concurrent requests to block). Real HTTP
+/// callers (see http_api.rs) use `prepare()`/`send()` directly instead,
+/// specifically so they CAN release the lock in between.
+pub fn ask_with_history(
+    conn: &Connection,
+    business_id: &str,
+    user_id: &str,
+    question: &str,
+    history: &[Turn],
+) -> Result<String> {
+    let prepared = prepare(conn, business_id, user_id)?;
+    send(&prepared, question, history)
 }
 
 /// Single-turn convenience wrapper, kept for any existing caller that
@@ -148,17 +209,13 @@ fn tls_agent() -> Result<ureq::Agent> {
     // See the matching comment in notifications.rs — plain default
     // agent, rustls via ureq's "tls" feature, no system OpenSSL needed.
     //
-    // The timeout here is NOT optional polish: http_api.rs::serve()
-    // runs a single-threaded, blocking `incoming_requests()` loop —
-    // every request for every user of this business is handled
-    // serially on one thread. An AI provider call with no timeout
-    // that hangs (network stall, provider outage, an LLM that never
-    // finishes generating) would freeze the ENTIRE HTTP API — every
-    // endpoint, every user — until the process is killed and
-    // restarted, since there's no other thread to serve anything
-    // else in the meantime. 30 seconds is generous enough for
-    // legitimate LLM generation latency while still bounding how
-    // long one stalled provider can take the whole app down for.
+    // The timeout here is still not optional polish, even now that
+    // http_api.rs's AI-ask routes release the DB mutex before making
+    // this call (see prepare()/send() above and serve()'s dedicated
+    // AI handling) and the server spawns a thread per request: a hung
+    // provider would otherwise tie up that one thread indefinitely.
+    // Bounded at 30s so one stalled provider costs one slow answer,
+    // never an unbounded hang.
     Ok(ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(30)).build())
 }
 
@@ -183,9 +240,11 @@ fn openai_style_messages(system_prompt: &str, question: &str, history: &[Turn]) 
 }
 
 /// NVIDIA NIM — free tier, OpenAI-compatible chat completions API.
-fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
-    let api_key = resolve_key(conn, business_id, "nvidia", "NVIDIA_API_KEY", Some("https://build.nvidia.com"))?;
-    let model = model_for(conn, business_id, "nvidia", DEFAULT_NVIDIA_MODEL);
+/// Takes an already-resolved `api_key`/`model` (see `prepare()` above)
+/// rather than a `Connection` — this function is purely network I/O,
+/// deliberately callable with no DB lock held.
+fn ask_nvidia_nim(api_key: &str, model: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
+    let model = model.to_string();
     // THE BUG THIS FIXES: this used to be the exact same string as
     // `DEFAULT_NVIDIA_MODEL` above, which meant the fallback attempt
     // below could never actually run for anyone using the default (i.e.
@@ -243,10 +302,7 @@ fn ask_nvidia_nim(conn: &Connection, business_id: &str, system_prompt: &str, que
 /// Note: on the free tier, Google's terms allow using your prompts to
 /// improve their models — flag this to the business owner if the data
 /// they're asking about is sensitive.
-fn ask_gemini(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
-    let api_key = resolve_key(conn, business_id, "gemini", "GOOGLE_API_KEY", Some("https://aistudio.google.com"))?;
-    let model = model_for(conn, business_id, "gemini", "gemini-3.6-flash");
-
+fn ask_gemini(api_key: &str, model: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
     // Gemini's wire format uses "model" (not "assistant") for the
     // other side of the conversation, and "contents" instead of
     // "messages" — different enough from the OpenAI-style shape above
@@ -284,10 +340,7 @@ fn ask_gemini(conn: &Connection, business_id: &str, system_prompt: &str, questio
 /// OpenAI — paid (has a small free trial credit for new accounts, not
 /// an ongoing free tier). Chat completions API, same shape as NVIDIA
 /// NIM since NIM deliberately mirrors it.
-fn ask_openai(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
-    let api_key = resolve_key(conn, business_id, "openai", "OPENAI_API_KEY", None)?;
-    let model = model_for(conn, business_id, "openai", "gpt-4o-mini");
-
+fn ask_openai(api_key: &str, model: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
     let body = json!({
         "model": model,
         "max_tokens": 500,
@@ -319,10 +372,7 @@ fn ask_openai(conn: &Connection, business_id: &str, system_prompt: &str, questio
 /// Claude — paid, no ongoing free tier, but included since it's
 /// Anthropic's own model and may be worth it once the business is
 /// generating revenue.
-fn ask_claude(conn: &Connection, business_id: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
-    let api_key = resolve_key(conn, business_id, "claude", "ANTHROPIC_API_KEY", None)?;
-    let model = model_for(conn, business_id, "claude", "claude-sonnet-4-6");
-
+fn ask_claude(api_key: &str, model: &str, system_prompt: &str, question: &str, history: &[Turn]) -> Result<String> {
     // Claude takes "system" as its own top-level field, not a message
     // in the array — same shape as OpenAI's messages otherwise
     // ("assistant" for the model's own prior turns), so this reuses
@@ -344,7 +394,7 @@ fn ask_claude(conn: &Connection, business_id: &str, system_prompt: &str, questio
     let agent = tls_agent()?;
     let response = agent
         .post("https://api.anthropic.com/v1/messages")
-        .set("x-api-key", &api_key)
+        .set("x-api-key", api_key)
         .set("anthropic-version", "2023-06-01")
         .set("content-type", "application/json")
         .send_json(body);

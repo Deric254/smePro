@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react';
 import {
   listModules, getModuleSchema, getBusinessInfo, getDebtSummary, getGrossProfitSummary,
   getBasketAffinity, getProfitByItem, getDebtAging, getSlowMovers, getStockRunway,
-  getRefundRateByItem, getDayOfWeekPattern, runReport,
+  getRefundRateByItem, getDayOfWeekPattern, getHourOfDayPattern, getWeeklyTrend, getMonthlyTrend, getSeasonalPattern, runReport,
 } from '../api';
 import type {
   DebtSummary, GrossProfitSummary, BasketPair, ItemProfit, DebtAgingSummary,
-  SlowMover, StockRunway, RefundRate, DayOfWeekPattern,
+  SlowMover, StockRunway, RefundRate, DayOfWeekPattern, HourOfDayPattern, PeriodTrendPoint, SeasonalMonthPattern,
 } from '../api';
 import type { ModuleListItem, ModuleSchema } from '../types';
 import { formatMoney } from '../lib/money';
@@ -19,6 +19,9 @@ import StockRunwayCard from '../components/StockRunwayCard';
 import RefundRateCard from '../components/RefundRateCard';
 import TopCustomersCard from '../components/TopCustomersCard';
 import DayOfWeekCard from '../components/DayOfWeekCard';
+import HourOfDayCard from '../components/HourOfDayCard';
+import PeriodTrendCard from '../components/PeriodTrendCard';
+import SeasonalCard from '../components/SeasonalCard';
 
 // Same collapsible +/− pattern the per-module report list at the
 // bottom of this page already used — extended here to every section
@@ -96,6 +99,10 @@ export default function Reports() {
   const [debtorsLoading, setDebtorsLoading] = useState(false);
 
   const [dayOfWeek, setDayOfWeek] = useState<DayOfWeekPattern[] | null>(null);
+  const [hourOfDay, setHourOfDay] = useState<HourOfDayPattern[] | null>(null);
+  const [weeklyTrend, setWeeklyTrend] = useState<PeriodTrendPoint[] | null>(null);
+  const [monthlyTrend, setMonthlyTrend] = useState<PeriodTrendPoint[] | null>(null);
+  const [seasonal, setSeasonal] = useState<SeasonalMonthPattern[] | null>(null);
   const [patternsLoading, setPatternsLoading] = useState(false);
 
   const [refundRates, setRefundRates] = useState<RefundRate[] | null>(null);
@@ -160,7 +167,13 @@ export default function Reports() {
 
   function loadPatterns() {
     setPatternsLoading(true);
-    getDayOfWeekPattern(90).then((r) => setDayOfWeek(r.items)).finally(() => setPatternsLoading(false));
+    Promise.allSettled([
+      getDayOfWeekPattern(90).then((r) => setDayOfWeek(r.items)),
+      getHourOfDayPattern(30).then((r) => setHourOfDay(r.items)),
+      getWeeklyTrend(12).then((r) => setWeeklyTrend(r.items)),
+      getMonthlyTrend(12).then((r) => setMonthlyTrend(r.items)),
+      getSeasonalPattern().then((r) => setSeasonal(r.items)),
+    ]).finally(() => setPatternsLoading(false));
   }
 
   function loadRefunds() {
@@ -238,7 +251,27 @@ export default function Reports() {
       </CollapsibleSection>
 
       <CollapsibleSection title="Sales patterns" onExpand={loadPatterns} loading={patternsLoading}>
-        {dayOfWeek && <DayOfWeekCard items={dayOfWeek} currency={currency} />}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          {dayOfWeek && <DayOfWeekCard items={dayOfWeek} currency={currency} />}
+          {hourOfDay && <HourOfDayCard items={hourOfDay} currency={currency} />}
+          {weeklyTrend && (
+            <PeriodTrendCard
+              title="Weekly trend (last 12 weeks)"
+              items={weeklyTrend}
+              currency={currency}
+              formatLabel={(label) => `Wk of ${label.slice(5)}`}
+            />
+          )}
+          {monthlyTrend && (
+            <PeriodTrendCard
+              title="Monthly trend (last 12 months)"
+              items={monthlyTrend}
+              currency={currency}
+              formatLabel={(label) => label}
+            />
+          )}
+          {seasonal && <SeasonalCard items={seasonal} currency={currency} />}
+        </div>
       </CollapsibleSection>
 
       <CollapsibleSection title="Refunds" onExpand={loadRefunds} loading={refundsLoading}>

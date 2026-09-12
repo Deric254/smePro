@@ -20,7 +20,8 @@
     {
       "name": "amount",
       "type": "money",
-      "required": true
+      "required": true,
+      "min": 0
     },
     {
       "name": "transaction_date",
@@ -68,5 +69,6 @@
     "measure": "amount",
     "aggregation": "sum",
     "label": "net recorded"
-  }
+  },
+  "date_field": "transaction_date"
 }

@@ -254,6 +254,12 @@ export interface CheckoutRequest {
   // Whole-cart percentage discount, 0–100 — see pos::checkout's own
   // comment for the exact math and why this is percentage-only for now.
   discount_pct?: number;
+  // Makes a retry safe — see pos::checkout's own doc comment. The
+  // SAME key must be sent on every retry of one logical checkout
+  // attempt (see PointOfSale.tsx's handleCheckout, which generates it
+  // once per attempt, not once per HTTP call) — a fresh key per retry
+  // would defeat the whole point.
+  idempotency_key?: string;
 }
 export const checkout = (req: CheckoutRequest) =>
   request('/pos/checkout', { method: 'POST', body: JSON.stringify(req) });
@@ -463,6 +469,25 @@ export interface StockRunway {
 export const getStockRunway = (days = 30, limit = 15): Promise<{ items: StockRunway[] }> =>
   request(`/inventory/stock-runway?days=${days}&limit=${limit}`);
 
+// Rollback — list real GitHub releases and check one tag's manifest
+// URL and database-schema compatibility. See rollback::list_releases /
+// check_rollback_target; both Owner-gated
+// server-side.
+export interface ReleaseOption {
+  tag: string;
+  name: string;
+  published_at: string;
+  is_prerelease: boolean;
+}
+export const listReleases = (): Promise<{ items: ReleaseOption[] }> => request(`/system/releases`);
+export interface RollbackCheck {
+  manifest_url: string;
+  target_schema_version: number;
+  current_schema_version: number;
+}
+export const checkRollbackTarget = (tag: string): Promise<RollbackCheck> =>
+  request(`/system/releases/check?tag=${encodeURIComponent(tag)}`);
+
 // Day-of-week sales pattern — see sales_patterns::day_of_week_pattern.
 export interface DayOfWeekPattern {
   day_name: string;
@@ -470,15 +495,70 @@ export interface DayOfWeekPattern {
   avg_order_count: number;
   occurrences: number;
 }
-export const getDayOfWeekPattern = (days = 90): Promise<{ items: DayOfWeekPattern[] }> =>
-  request(`/sales/day-of-week?days=${days}`);
+export const getDayOfWeekPattern = (days = 90): Promise<{ items: DayOfWeekPattern[] }> => {
+  // Same offset_minutes convention as getHourOfDayPattern just below
+  // — a weekday boundary is exactly as UTC-sensitive as an hour one.
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  return request(`/sales/day-of-week?days=${days}&offset_minutes=${offsetMinutes}`);
+};
+
+// Hour-of-day sales pattern — see sales_patterns::hour_of_day_pattern.
+// `offset_minutes` is derived here, not left to the caller: the
+// backend needs the real local UTC offset (minutes to ADD to UTC to
+// get local time) to bucket each sale into the right hour, since
+// every created_at it stores is UTC-only — see that function's own
+// doc comment for why. `Date.getTimezoneOffset()` returns the
+// opposite sign of what we want (positive west of UTC), hence the
+// negation.
+export interface HourOfDayPattern {
+  hour: number;
+  hour_label: string;
+  period: string;
+  avg_revenue_cents: number;
+  avg_order_count: number;
+  occurrences: number;
+}
+export const getHourOfDayPattern = (days = 30): Promise<{ items: HourOfDayPattern[] }> => {
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  return request(`/sales/hour-of-day?days=${days}&offset_minutes=${offsetMinutes}`);
+};
+
+// Weekly/monthly sales trend and seasonal (month-of-year) pattern —
+// see sales_patterns::weekly_trend / monthly_trend / seasonal_month_pattern.
+export interface PeriodTrendPoint {
+  label: string;
+  revenue_cents: number;
+  order_count: number;
+  is_complete: boolean;
+}
+export const getWeeklyTrend = (weeks = 12): Promise<{ items: PeriodTrendPoint[] }> => {
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  return request(`/sales/weekly-trend?weeks=${weeks}&offset_minutes=${offsetMinutes}`);
+};
+export const getMonthlyTrend = (months = 12): Promise<{ items: PeriodTrendPoint[] }> => {
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  return request(`/sales/monthly-trend?months=${months}&offset_minutes=${offsetMinutes}`);
+};
+
+export interface SeasonalMonthPattern {
+  month_name: string;
+  avg_revenue_cents: number;
+  years_seen: number;
+}
+export const getSeasonalPattern = (): Promise<{ items: SeasonalMonthPattern[] }> => {
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  return request(`/sales/seasonal?offset_minutes=${offsetMinutes}`);
+};
 
 // Dashboard highlights — see report_highlights.rs.
 export interface ReportHighlights {
   most_urgent_item: { item_name: string; days_of_stock_left: number } | null;
   busiest_day: { day_name: string; avg_revenue_cents: number } | null;
 }
-export const getReportHighlights = (): Promise<ReportHighlights> => request('/reports/highlights');
+export const getReportHighlights = (): Promise<ReportHighlights> => {
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  return request(`/reports/highlights?offset_minutes=${offsetMinutes}`);
+};
 
 // "Frequently bought together" — see basket_analysis.rs. Read-only
 // aggregation over data pos.rs already records (one order_id shared

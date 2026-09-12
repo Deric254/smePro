@@ -39,6 +39,7 @@ pub fn moving_average_forecast(
         return Err(anyhow!("'window' must be at least 1"));
     }
     let time_bucket = report::parse_time_bucket(bucket)?;
+    let time_field = time_field_for(conn, business_id, module_id);
     let history = report::run(
         conn,
         business_id,
@@ -47,7 +48,7 @@ pub fn moving_average_forecast(
         report::ReportQuery {
             measure_field: Some(measure),
             aggregation: "sum",
-            dimension: Dimension::Time { field: "created_at", bucket: time_bucket },
+            dimension: Dimension::Time { field: &time_field, bucket: time_bucket },
             range_start: None,
             range_end: None,
         },
@@ -99,6 +100,7 @@ pub fn exponential_smoothing_forecast(
         return Err(anyhow!("'alpha' must be a finite number in (0, 1]"));
     }
     let time_bucket = report::parse_time_bucket(bucket)?;
+    let time_field = time_field_for(conn, business_id, module_id);
     let history = report::run(
         conn,
         business_id,
@@ -107,7 +109,7 @@ pub fn exponential_smoothing_forecast(
         report::ReportQuery {
             measure_field: Some(measure),
             aggregation: "sum",
-            dimension: Dimension::Time { field: "created_at", bucket: time_bucket },
+            dimension: Dimension::Time { field: &time_field, bucket: time_bucket },
             range_start: None,
             range_end: None,
         },
@@ -133,4 +135,19 @@ pub fn exponential_smoothing_forecast(
 
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
+}
+
+/// Which real column a forecast should bucket `module_id`'s records by
+/// — see `ModuleDef::time_field`'s own doc comment for why this isn't
+/// always just `created_at`. Falls back to `created_at` on any lookup
+/// failure (module not found/not enabled) rather than erroring here —
+/// `report::run` immediately below re-derives the same module and
+/// will raise the real, more specific error itself if the module
+/// genuinely doesn't exist or isn't enabled; this just needs *a*
+/// field name to hand it, not the authority on whether that lookup
+/// succeeds.
+fn time_field_for(conn: &Connection, business_id: &str, module_id: &str) -> String {
+    crate::crud::load_module(conn, business_id, module_id)
+        .map(|m| m.time_field().to_string())
+        .unwrap_or_else(|_| "created_at".to_string())
 }

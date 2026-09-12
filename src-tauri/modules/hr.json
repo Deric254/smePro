@@ -21,7 +21,8 @@
       "name": "salary",
       "type": "money",
       "required": false,
-      "default": 0
+      "default": 0,
+      "min": 0
     },
     {
       "name": "hire_date",
@@ -57,9 +58,7 @@
       "update",
       "export"
     ],
-    "Staff": [
-      "read"
-    ]
+    "Staff": []
   },
   "dashboard_metric": {
     "aggregation": "count",
