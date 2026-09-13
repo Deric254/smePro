@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 27;
+const CURRENT_VERSION: i32 = 28;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -71,7 +71,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 25 { v25_created_by_column(conn)?; }
     if current < 26 { v26_field_min_floors(conn)?; }
     if current < 27 { v27_idempotency_keys(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 27, "bump this alongside the last `if current < N` check above");
+    if current < 28 { v28_price_floor_schema_driven(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 28, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -1792,6 +1793,65 @@ fn v27_idempotency_keys(conn: &mut Connection) -> Result<()> {
         [],
     )?;
     tx.execute("INSERT INTO _schema_version (version) VALUES (27)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+// THE GAP THIS CLOSES: the "selling price can never be saved below
+// cost price" business rule used to be hardcoded in Rust to the
+// literal module id "inventory" (crud::create, crud::update,
+// excel_import.rs's insert path) — so it silently never applied to
+// any other module, built-in or a business's own custom one, even
+// one that defined its own price/cost-style field pair. The engine
+// fix is `ModuleDef::price_floor` / `check_price_floor` (see their own
+// doc comments for the full reasoning) — a module now opts into this
+// protection via its own JSON, the same way `date_field` already lets
+// a module opt into backdating without an engine change. This
+// migration is the other half, same technique as v26 just above:
+// patching every already-provisioned business's stored
+// `modules.schema_json` snapshot to actually carry the new
+// `price_floor` key on inventory, since a snapshot captured before
+// this version shipped has no way to know about it otherwise. A
+// business enabling Inventory for the first time AFTER this version
+// already gets it from the shipped `modules/inventory.json` directly —
+// this migration exists purely for snapshots that predate it.
+fn v28_price_floor_schema_driven(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT business_id, schema_json FROM modules WHERE id = 'inventory' AND enabled = 1",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    for (business_id, schema_json) in rows {
+        let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+            Ok(v) => v,
+            // Corrupt snapshot pre-dating this migration is out of
+            // scope to repair here; leave it untouched rather than
+            // risk making it worse — same discipline as v26 above.
+            Err(_) => continue,
+        };
+        let already_set = parsed.get("price_floor").is_some();
+        if already_set {
+            continue;
+        }
+        if let Some(obj) = parsed.as_object_mut() {
+            obj.insert(
+                "price_floor".to_string(),
+                serde_json::json!({"price_field": "unit_price", "cost_field": "unit_cost"}),
+            );
+            let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+            tx.execute(
+                "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'inventory'",
+                rusqlite::params![new_json, business_id],
+            )?;
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (28)", [])?;
     tx.commit()?;
     Ok(())
 }

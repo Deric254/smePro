@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import {
   listModules, getModuleSchema, getBusinessInfo, getDebtSummary, getGrossProfitSummary,
-  getBasketAffinity, getProfitByItem, getDebtAging, getSlowMovers, getStockRunway, getUnpricedItems, getZeroCostPurchases,
+  getBasketAffinity, getProfitByItem, getDebtAging, getSlowMovers, getStockRunway, getUnpricedItems,
   getRefundRateByItem, getDayOfWeekPattern, getHourOfDayPattern, getMonthlyTrend, getSeasonalPattern, runReport,
 } from '../api';
 import type {
   DebtSummary, GrossProfitSummary, BasketPair, ItemProfit, DebtAgingSummary,
-  SlowMover, StockRunway, UnpricedItem, ZeroCostPurchase, RefundRate, DayOfWeekPattern, HourOfDayPattern, PeriodTrendPoint, SeasonalMonthPattern,
+  SlowMover, StockRunway, UnpricedItem, RefundRate, DayOfWeekPattern, HourOfDayPattern, PeriodTrendPoint, SeasonalMonthPattern,
 } from '../api';
 import type { ModuleListItem, ModuleSchema } from '../types';
 import { formatMoney } from '../lib/money';
@@ -95,7 +95,6 @@ export default function Reports() {
   const [slowMovers, setSlowMovers] = useState<SlowMover[] | null>(null);
   const [stockRunway, setStockRunway] = useState<StockRunway[] | null>(null);
   const [unpricedItems, setUnpricedItems] = useState<UnpricedItem[] | null>(null);
-  const [zeroCostPurchases, setZeroCostPurchases] = useState<ZeroCostPurchase[] | null>(null);
   const [stockLoading, setStockLoading] = useState(false);
 
   const [debtAging, setDebtAging] = useState<DebtAgingSummary | null>(null);
@@ -156,8 +155,7 @@ export default function Reports() {
     Promise.allSettled([
       getSlowMovers(30, 10).then((r) => setSlowMovers(r.items)),
       getStockRunway(30, 15).then((r) => setStockRunway(r.items)),
-      getUnpricedItems(50).then((r) => setUnpricedItems(r.items)),
-      getZeroCostPurchases(50).then((r) => setZeroCostPurchases(r.items)),
+      getUnpricedItems(20).then((r) => setUnpricedItems(r.items)),
     ]).finally(() => setStockLoading(false));
   }
 
@@ -226,9 +224,7 @@ export default function Reports() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: '0.9rem' }}>
           {stockRunway && <StockRunwayCard items={stockRunway} />}
           {slowMovers && <SlowMoversCard items={slowMovers} currency={currency} />}
-          {(unpricedItems || zeroCostPurchases) && (
-            <UnpricedItemsCard items={unpricedItems ?? []} zeroCostPurchases={zeroCostPurchases ?? []} currency={currency} />
-          )}
+          {unpricedItems && <UnpricedItemsCard items={unpricedItems} currency={currency} />}
         </div>
       </CollapsibleSection>
 

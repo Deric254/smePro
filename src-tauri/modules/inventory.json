@@ -42,9 +42,7 @@
       "type": "money",
       "required": true,
       "default": 0,
-      "min": 0,
-      "min_field": "unit_cost",
-      "min_field_message": "selling price cannot be lower than the cost price — this would sell at a loss"
+      "min": 0
     },
     {
       "name": "currency",
@@ -64,6 +62,10 @@
       "required": false
     }
   ],
+  "price_floor": {
+    "price_field": "unit_price",
+    "cost_field": "unit_cost"
+  },
   "actions": [
     "create",
     "read",
