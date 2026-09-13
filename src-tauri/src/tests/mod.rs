@@ -43,6 +43,8 @@ mod receipt_tests;
 #[cfg(test)]
 mod receiving_tests;
 #[cfg(test)]
+mod batches_tests;
+#[cfg(test)]
 mod refund_tests;
 #[cfg(test)]
 mod repack_tests;

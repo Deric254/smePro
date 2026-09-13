@@ -10,6 +10,16 @@
 //! Sales, not a combination of Sales-update plus Inventory-update),
 //! and validation computed fresh from the real, current state of the
 //! database every time — never from a number the caller supplies.
+//!
+//! BATCH REWRITE: restocking now credits the SAME batch a sale
+//! actually drew from, when there is one — see decision #6 of the
+//! spec this implements and `batches::restore_to_batch_in_tx`. A sale
+//! made before batches existed (or one that drew from legacy stock)
+//! has no `source_batch_id`, and restocks exactly as this function
+//! always has: straight onto `Inventory.quantity`, which correctly
+//! grows the legacy pool (see batches.rs's own doc comment on why
+//! legacy is computed, never stored). Old refunds of old sales are
+//! completely unaffected by any of this.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -21,10 +31,10 @@ use serde_json::{json, Value};
 /// (item_name, quantity, order_id, customer, cost_at_sale — the
 /// CURRENT stored value, already reduced by any earlier refunds on
 /// this same sale, not the original amount from the moment it was
-/// sold). Named here purely to satisfy clippy's type-complexity lint
-/// on a bare 5-tuple — no other behavior implied, just a label for
-/// what's destructured immediately below.
-type SaleRow = (String, i64, Option<String>, Option<String>, i64);
+/// sold — unit_price, source_batch_id). Named here purely to satisfy
+/// clippy's type-complexity lint on a bare tuple — no other behavior
+/// implied, just a label for what's destructured immediately below.
+type SaleRow = (String, i64, Option<String>, Option<String>, i64, i64, Option<String>);
 
 #[derive(Debug, Deserialize)]
 pub struct RefundRequest {
@@ -82,14 +92,14 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
     let sale_row: Option<SaleRow> = tx
         .query_row(
             &format!(
-                "SELECT item_name, quantity, order_id, customer, cost_at_sale
+                "SELECT item_name, quantity, order_id, customer, cost_at_sale, unit_price, source_batch_id
                  FROM {sales_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
             ),
             params![req.sale_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )
         .optional()?;
-    let Some((item_name, original_qty, order_id, customer, current_cost_at_sale)) = sale_row else {
+    let Some((item_name, original_qty, order_id, customer, current_cost_at_sale, sale_unit_price, source_batch_id)) = sale_row else {
         return Err(anyhow!("sale not found: {}", req.sale_id));
     };
 
@@ -248,6 +258,41 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
                 "cannot restock — no Inventory item named '{item_name}' was found to credit the return to"
             ));
         };
+
+        // BATCH REWRITE: a sale made after batches existed carries its
+        // own `source_batch_id` — which specific batch (or `NULL`,
+        // meaning legacy stock) this exact sales row was drawn from
+        // (see pos.rs::checkout and decision #6 of the spec this
+        // implements). A `NULL` source_batch_id — either a legacy-
+        // stock sale, or any sale made before this feature existed at
+        // all — restocks exactly as this function always has: credit
+        // straight onto Inventory.quantity, which correctly grows the
+        // legacy pool (see batches.rs's own doc comment on why legacy
+        // is computed, never stored).
+        if let Some(batch_id) = &source_batch_id {
+            // The batch's original per-unit cost/price, recovered from
+            // this sale's own frozen numbers — needed only for the
+            // fallback case where the batch itself was deleted since
+            // the sale (see batches::restore_to_batch_in_tx). Exact,
+            // not approximate: this sales row is always the product of
+            // exactly ONE batch (or legacy) portion (see pos.rs's own
+            // "one sales row per portion" comment), so
+            // original_cost_at_sale is always an exact multiple of
+            // original_qty — no remainder, no rounding needed here.
+            let original_unit_cost = if original_qty > 0 { original_cost_at_sale / original_qty } else { 0 };
+            let today = chrono::Utc::now().to_rfc3339();
+            crate::batches::restore_to_batch_in_tx(
+                &tx,
+                business_id,
+                &inv_id,
+                batch_id,
+                req.quantity,
+                original_unit_cost,
+                sale_unit_price,
+                &today,
+            )?;
+        }
+
         let new_qty = current_qty + req.quantity;
         tx.execute(
             &format!("UPDATE {inventory_table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
@@ -330,6 +375,7 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
         "restocked": req.restock,
         "inventory_record_id": inventory_record_id,
         "new_stock_level": new_stock_level,
+        "restocked_to_batch_id": if req.restock { source_batch_id.clone() } else { None },
     });
 
     let _ = crate::audit::log(conn, business_id, Some(user_id), "_refunds", "refund", Some(&refund_id), Some(&summary));

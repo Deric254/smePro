@@ -31,7 +31,17 @@ fn make_purchase_order(conn: &mut rusqlite::Connection, biz: &str, uid: &str, in
 }
 
 #[test]
-fn test_receiving_computes_real_weighted_average_cost() {
+fn test_receiving_creates_a_batch_at_the_po_cost_and_never_touches_legacy_cost() {
+    // BATCH REWRITE: this test used to be named
+    // test_receiving_computes_real_weighted_average_cost and asserted a
+    // blended (50*2000 + 50*3000) / 100 = 2500 cost got written onto
+    // the Inventory row. That behavior is gone on purpose — see
+    // batches.rs's own module doc comment: every receipt now creates
+    // its own independent batch at EXACTLY the PO's cost, and the
+    // Inventory row's own unit_cost/unit_price are frozen legacy
+    // history from the moment any batch exists for that item. This
+    // test now proves both halves of that: the new batch carries the
+    // PO's exact, unblended cost, and legacy stays untouched.
     let mut conn = test_db();
     let biz = test_food_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -41,18 +51,35 @@ fn test_receiving_computes_real_weighted_average_cost() {
     // Receiving 50 more, this time at $30.00 (3000 cents) each (price went up).
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Sugar", 50, 3000);
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
-    // (50*2000 + 50*3000) / 100 = 2500 cents ($25.00) exactly.
-    assert_eq!(result["new_weighted_average_cost"].as_i64().unwrap(), 2500);
+    // Exactly this delivery's own cost — no averaging with the 50
+    // already on hand at 2000.
+    assert_eq!(result["batch_unit_cost"].as_i64().unwrap(), 3000);
+    // Defaults to the item's own (legacy) unit_price, since this call
+    // didn't override it.
+    assert_eq!(result["batch_unit_price"].as_i64().unwrap(), 3000);
+
+    // Inventory.quantity is still the single total everything else
+    // reads; unit_cost is frozen legacy history, exactly what it was
+    // before this receipt.
     let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
-    assert_eq!(list[0]["unit_cost"].as_i64().unwrap(), 2500);
     assert_eq!(list[0]["quantity"].as_i64().unwrap(), 100);
+    assert_eq!(list[0]["unit_cost"].as_i64().unwrap(), 2000, "legacy cost must never be touched by a receipt once batches exist");
+
+    // The new batch itself: 50 units at 3000, legacy still shows the
+    // other 50 at the original 2000.
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &inv_id).unwrap();
+    assert_eq!(summary["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["batches"][0]["quantity_remaining"].as_i64().unwrap(), 50);
+    assert_eq!(summary["batches"][0]["unit_cost"].as_i64().unwrap(), 3000);
+    assert_eq!(summary["legacy_quantity"].as_i64().unwrap(), 50);
+    assert_eq!(summary["legacy_unit_cost"].as_i64().unwrap(), 2000);
 }
 
 #[test]
-fn test_first_receipt_on_zero_stock_takes_the_new_cost_exactly() {
+fn test_first_receipt_on_zero_stock_creates_a_batch_at_exactly_the_po_cost() {
     let mut conn = test_db();
     let biz = test_food_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -64,11 +91,12 @@ fn test_first_receipt_on_zero_stock_takes_the_new_cost_exactly() {
     let inv_id = make_inventory_item(&conn, &biz, "RICE-002", "Basmati Rice", 0, 0, 6000);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Basmati Rice", 40, 4550);
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
-    // No distortion from the zero -- the new cost is exactly what was paid.
-    assert_eq!(result["new_weighted_average_cost"].as_i64().unwrap(), 4550);
+    // The new batch's cost is exactly what was paid — there is nothing
+    // left to blend against on a zero-stock item, batch or not.
+    assert_eq!(result["batch_unit_cost"].as_i64().unwrap(), 4550);
 }
 
 #[test]
@@ -81,7 +109,7 @@ fn test_partial_delivery_receives_less_than_ordered() {
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Sunflower Oil", 100, 11000);
 
     // Ordered 100, only 60 actually arrived.
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: Some(60) };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: Some(60), unit_price: None, expiry_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
     assert!(result["partial_delivery"].as_bool().unwrap());
@@ -97,11 +125,11 @@ fn test_cannot_receive_the_same_purchase_order_twice() {
     let inv_id = make_inventory_item(&conn, &biz, "SALT-001", "Salt", 20, 500, 800);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Salt", 30, 600);
 
-    let first = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None };
+    let first = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None, unit_price: None, expiry_date: None };
     crate::receiving::receive(&mut conn, &biz, &uid, first).unwrap();
 
     // Same PO again -- must be rejected, not silently double-count the stock.
-    let second = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
+    let second = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
     assert!(crate::receiving::receive(&mut conn, &biz, &uid, second).is_err());
 
     // Stock must reflect exactly one receipt, not two.
@@ -110,22 +138,27 @@ fn test_cannot_receive_the_same_purchase_order_twice() {
 }
 
 #[test]
-fn test_weighted_average_rounds_to_nearest_cent_on_uneven_division() {
+fn test_receiving_no_longer_blends_or_rounds_an_uneven_delivery() {
+    // BATCH REWRITE: this test used to prove the old weighted-average
+    // formula rounded (10*1000 + 7*1333) / 17 to 1137 rather than
+    // truncating to 1136. There is no blending step left on this path
+    // at all to round — a batch's cost is stored exactly as the PO's
+    // own unit_cost — so this now asserts the opposite: an uneven
+    // delivery against uneven existing stock produces a batch at
+    // exactly 1333, untouched by the 10 units already on hand at 1000.
     let mut conn = test_db();
     let biz = test_food_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    // 10 on hand at 1000 cents, receiving 7 more at 1333 cents.
-    // (10*1000 + 7*1333) / 17 = (10000 + 9331) / 17 = 19331 / 17 =
-    // 1137.117... which must round to 1137, not truncate to 1136 the
-    // way plain integer division would.
     let inv_id = make_inventory_item(&conn, &biz, "FLOUR-001", "Flour", 10, 1000, 1500);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Flour", 7, 1333);
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
-    assert_eq!(result["new_weighted_average_cost"].as_i64().unwrap(), 1137);
+    assert_eq!(result["batch_unit_cost"].as_i64().unwrap(), 1333);
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(list[0]["unit_cost"].as_i64().unwrap(), 1000, "legacy cost must stay exactly what it was, no blending");
 }
 
 #[test]
@@ -164,7 +197,7 @@ fn test_purchase_order_without_inventory_link_is_rejected() {
     )
     .unwrap();
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
     assert!(crate::receiving::receive(&mut conn, &biz, &uid, req).is_err());
 }
 
@@ -185,7 +218,7 @@ fn test_receiving_rejects_a_delivery_that_would_price_the_item_below_cost() {
     let inv_id = make_inventory_item(&conn, &biz, "SUGAR-002", "Sugar", 10, 2000, 3000);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Sugar", 10, 5000);
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None, unit_price: None, expiry_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req);
     assert!(result.is_err(), "must reject a receipt that would price the item below its own cost");
 

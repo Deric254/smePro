@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, ai_chat, audit, auth, backup, crud, debt_settlement, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, stock_take, users, xlsx_export};
+use crate::{ai_assistant, ai_chat, audit, auth, backup, batches, crud, debt_settlement, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, stock_take, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -1148,6 +1148,59 @@ fn route(
         };
     }
 
+    // ---- Batch-costed inventory / FEFO: see batches.rs. Route shape
+    // matches the spec this implements: GET /inventory/:id/batches,
+    // POST /inventory/:id/batches/:batchId/price, GET
+    // /inventory/expiring-batches — same "module id first, then the
+    // sub-resource path" convention as stocktake's own
+    // /inventory/stocktake/:id above. ----
+    if let [module_seg, id, "batches"] = parts.as_slice() {
+        if *module_seg == "inventory" && *method == Method::Get {
+            return match batches::list_batches(conn, &business_id, &user_id, id) {
+                Ok(summary) => ApiResponse::Json(200, summary),
+                Err(e) => crud_error(&e),
+            };
+        }
+    }
+    if let [module_seg, _id, "batches", batch_id, "price"] = parts.as_slice() {
+        if *module_seg == "inventory" && *method == Method::Post {
+            #[derive(serde::Deserialize)]
+            struct PriceBody {
+                unit_price: i64,
+                #[serde(default)]
+                unit_cost: Option<i64>,
+            }
+            let parsed: PriceBody = match serde_json::from_str(body) {
+                Ok(r) => r,
+                Err(e) => return json_err(400, &format!("invalid batch price request: {e}")),
+            };
+            let req = batches::UpdateBatchPriceRequest {
+                batch_id: (*batch_id).to_string(),
+                unit_price: parsed.unit_price,
+                unit_cost: parsed.unit_cost,
+            };
+            return match batches::update_batch_price(conn, &business_id, &user_id, req) {
+                Ok(summary) => ApiResponse::Json(200, summary),
+                Err(e) => crud_error(&e),
+            };
+        }
+    }
+    // Reports-gated, same reasoning/convention as slow-movers/
+    // stock-runway/unpriced-items below — this is the new report
+    // decision #7 of the spec adds alongside those three (which
+    // themselves stay unchanged by this feature).
+    if parts.as_slice() == ["inventory", "expiring-batches"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let within_days = q.get("within_days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
+        return match crate::stock_health::expiring_batches(conn, &business_id, &user_id, &today, within_days, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
     // ---- Stock Take: initiate -> count -> close. See stock_take.rs. ----
     if parts.as_slice() == ["inventory", "stocktake", "initiate"] && *method == Method::Post {
         return match stock_take::initiate(conn, &business_id, &user_id) {
@@ -1314,15 +1367,29 @@ fn route(
         };
     }
 
-    // ---- Unpriced items: /inventory/unpriced-items?limit= — in-stock
-    // items still sitting at the unit_price default of zero. See
+    // ---- Unpriced items: /inventory/unpriced-items?limit= — items
+    // with a zero unit_cost, zero unit_price, or both. See
     // stock_health::unpriced_items. Reports-gated, same reasoning as
     // slow-movers/stock-runway above.
     if parts.as_slice() == ["inventory", "unpriced-items"] && *method == Method::Get {
         if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
         let q = query_params(url);
-        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
         return match crate::stock_health::unpriced_items(conn, &business_id, &user_id, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
+    // ---- Zero-cost purchases: /purchasing/zero-cost?limit= —
+    // Purchasing order lines recorded with unit_cost = 0. See
+    // stock_health::zero_cost_purchases. Reports-gated, same reasoning
+    // as unpriced-items above.
+    if parts.as_slice() == ["purchasing", "zero-cost"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
+        return match crate::stock_health::zero_cost_purchases(conn, &business_id, &user_id, limit) {
             Ok(items) => ApiResponse::Json(200, json!({"items": items})),
             Err(e) => crud_error(&e),
         };

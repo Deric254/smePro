@@ -20,42 +20,47 @@
 //! of the caller's role or permissions, for every single-record update.
 //! The only way `received` becomes true is through this function.
 //!
-//! SECOND FIX, same file: `receive()` used to update Inventory's
+//! SECOND FIX, same file (HISTORICAL — see BATCH REWRITE below for the
+//! current behavior): `receive()` used to update Inventory's
 //! `quantity` but never touch `unit_cost` at all — the recorded cost
 //! silently went stale the moment a supplier's price changed on any
-//! repeat order, with nothing to warn anyone it had. It now computes a
-//! real weighted average across the stock already on hand and what
-//! just arrived, the same correctness this crate already applies to
-//! stock and money everywhere else.
+//! repeat order. It used to compute a weighted average across the
+//! stock already on hand and what just arrived.
 //!
-//! THIRD FIX, same file, same shape as repack.rs's own rounding fix:
-//! blending two costs into one rounded-to-the-cent `new_unit_cost` and
-//! multiplying it back out by `new_qty` doesn't always land on the
-//! exact value that was actually on hand plus actually paid for — a
-//! few cents can appear or vanish from the stock valuation on every
-//! receipt, purely from rounding. The exact remainder is now computed
-//! and, when nonzero, posted to Bookkeeping as its own "Stock
-//! Revaluation" entry (a rounding gain as income, a loss as an
-//! expense) — never silently absorbed. Note this is separate from the
-//! Purchasing expense entry below, which was already exact (it's
-//! quantity received × the PO's own unit cost, not the blended
-//! average) — this fix is specifically for the inventory *valuation*
-//! side, not the cash side.
+//! THIRD FIX, same file (ALSO HISTORICAL): blending two costs into one
+//! rounded-to-the-cent `new_unit_cost` needed its own rounding-
+//! reconciliation Bookkeeping post, since a blended average doesn't
+//! always land on the exact value actually on hand plus actually paid
+//! for.
 //!
-//! FOURTH FIX, same file: the core of this logic is now split out into
-//! `receive_in_tx`, which runs against a `Transaction` the CALLER
-//! already owns, rather than only ever being reachable through
-//! `receive()`'s own newly-opened one. This is what lets
+//! FOURTH FIX, same file (STILL CURRENT): the core of this logic is
+//! split out into `receive_in_tx`, which runs against a `Transaction`
+//! the CALLER already owns, rather than only ever being reachable
+//! through `receive()`'s own newly-opened one. This is what lets
 //! `excel_import::import()` call it directly, once per newly-created
 //! Purchasing row, inside the single big transaction the whole import
 //! already runs in — so a bulk-imported purchase order and its stock
 //! arriving are one atomic step, not "import creates it unreceived,
 //! then someone has to click Receive on each of what might be 150
-//! rows." `receive()` itself is now a thin wrapper: open a
-//! transaction, call `receive_in_tx`, commit, audit-log. Same math,
-//! same Bookkeeping posting, same rounding reconciliation, whichever
-//! caller reaches it — one implementation, so there's no way for the
-//! two paths to quietly drift out of sync with each other.
+//! rows." `receive()` itself is a thin wrapper: open a transaction,
+//! call `receive_in_tx`, commit, audit-log.
+//!
+//! BATCH REWRITE (supersedes the SECOND/THIRD fixes above): this file
+//! no longer blends a receipt's cost into Inventory's own `unit_cost`/
+//! `unit_price` at all. Every receipt now creates its own independent,
+//! FEFO-tracked batch (see `batches.rs`) — its own quantity, its own
+//! cost, its own selling price, its own optional expiry date. Because
+//! a batch's `unit_cost` is stored exactly as this delivery's own PO
+//! cost (no averaging), the rounding-reconciliation "Stock
+//! Revaluation" Bookkeeping post the THIRD FIX above introduced no
+//! longer has anything to catch on this path — there's no remainder
+//! left to lose. `Inventory.unit_cost`/`unit_price` are left
+//! completely untouched by this file from now on; they remain frozen
+//! at whatever they were the moment this feature shipped for any item
+//! that already existed, and are what a batch's own selling price
+//! defaults to when the caller doesn't override it — see
+//! `ReceiveRequest`'s own doc comment on `unit_price` and
+//! `batches.rs`'s module doc comment for the full reasoning.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -94,6 +99,21 @@ pub struct ReceiveRequest {
     /// arrived isn't forced to match what was ordered.
     #[serde(default)]
     pub quantity_received: Option<i64>,
+    /// This delivery's own selling price — batches.rs's own module doc
+    /// comment explains why this creates an independent batch instead
+    /// of blending into Inventory's single `unit_price`. Defaults to
+    /// whatever the Inventory item's own `unit_price` currently is
+    /// when omitted, so an existing caller that never sends this gets
+    /// the same price it always would have shown, on the new batch.
+    /// Integer minor units (cents) — see money.rs.
+    #[serde(default)]
+    pub unit_price: Option<i64>,
+    /// This specific delivery's expiry date, if any — what makes FEFO
+    /// consumption possible at all for this batch. `None` means this
+    /// batch never expires (sells after every dated batch, ahead of
+    /// nothing but legacy stock — see batches.rs's FEFO ordering).
+    #[serde(default)]
+    pub expiry_date: Option<String>,
 }
 
 /// Runs the whole receive-stock operation as one atomic transaction.
@@ -118,6 +138,9 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
         &inventory_table,
         &req.purchase_record_id,
         req.quantity_received,
+        req.unit_price,
+        req.expiry_date.as_deref(),
+        Some(user_id),
     )?;
     // Same discipline as checkout() and repack(): nothing above is
     // durable until this line.
@@ -152,18 +175,21 @@ pub(crate) fn receive_in_tx(
     inventory_table: &str,
     purchase_record_id: &str,
     quantity_received_override: Option<i64>,
+    unit_price_override: Option<i64>,
+    expiry_date: Option<&str>,
+    created_by: Option<&str>,
 ) -> Result<Value> {
-    let row: Option<(String, i64, bool, Option<String>, String, i64)> = tx
+    let row: Option<(String, i64, bool, Option<String>, String, i64, Option<String>)> = tx
         .query_row(
             &format!(
-                "SELECT item_name, quantity, received, inventory_record_id, supplier, unit_cost
+                "SELECT item_name, quantity, received, inventory_record_id, supplier, unit_cost, po_number
                  FROM {purchasing_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
             ),
             params![purchase_record_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )
         .optional()?;
-    let Some((item_name, ordered_qty, already_received, inventory_record_id, supplier, po_unit_cost)) = row else {
+    let Some((item_name, ordered_qty, already_received, inventory_record_id, supplier, po_unit_cost, po_number)) = row else {
         return Err(anyhow!("purchase order not found: {purchase_record_id}"));
     };
 
@@ -189,66 +215,47 @@ pub(crate) fn receive_in_tx(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((inventory_name, current_qty, current_unit_cost, current_unit_price)) = inv_row else {
+    let Some((inventory_name, current_qty, _legacy_unit_cost, legacy_unit_price)) = inv_row else {
         return Err(anyhow!("linked inventory item not found: {inventory_record_id}"));
     };
 
     let new_qty = current_qty + quantity_received;
-    // A real weighted average, not a silent overwrite -- if this
-    // exact item was already in stock at one cost and this delivery
-    // came in at a different one (supplier price changes, a different
-    // batch, anything), the recorded cost after this needs to reflect
-    // both quantities fairly, not just whichever one was written most
-    // recently. When current_qty is 0 (first-ever receipt, or fully
-    // sold out before now), this naturally reduces to exactly the new
-    // delivery's cost -- no special case needed, the zero contributes
-    // nothing to the weighted sum.
-    // Integer cents throughout (see money.rs) — the weighted-average
-    // numerator is an exact i64 product-sum, no float ever involved.
-    // Plain integer division truncates toward zero, which would
-    // silently shave fractions of a cent off the recorded cost every
-    // single time this runs; adding half the divisor before dividing
-    // rounds to the nearest cent instead, the one deliberate rounding
-    // point in this calculation.
-    let numerator = current_qty * current_unit_cost + quantity_received * po_unit_cost;
-    let new_unit_cost = (numerator + new_qty / 2) / new_qty;
 
-    // THE ACTUAL FIX Deric asked for: this receive can raise an item's
-    // weighted-average cost (a supplier price increase, most commonly)
-    // without ever touching its selling price — nothing here used to
-    // stop that from silently pushing the item's cost above what it's
-    // still priced to sell at. Every other cost-affecting write in the
-    // app (crud::create, crud::update, repack) already refuses to
-    // leave price under cost; this is likely the single MOST common
-    // real way an item would actually end up in that state (supplier
-    // prices change far more often than someone repacks something),
-    // so it needs the exact same guarantee. Checked before any write
-    // below, so a rejected receive changes nothing at all — the
-    // purchase order stays unreceived, exactly as if this had never
-    // been attempted, rather than leaving stock partially updated with
-    // no matching price fix.
-    if current_unit_price < new_unit_cost {
-        // Format for the human reading this error — same fix as
-        // pos.rs's "cannot sell" message: `current_unit_price`/
-        // `new_unit_cost` stay raw integer cents everywhere else in
-        // this function, but printing those raw cents straight into
-        // the message (previously "11000" instead of "110.00") was
-        // exactly this bug, just in Receiving instead of Repack.
+    // THE ACTUAL FIX Deric asked for, unchanged in spirit from the
+    // weighted-average version this replaced: a receipt can never
+    // leave stock priced below what it cost. Batch-costed instead of
+    // blended now (see batches.rs's own module doc comment for why
+    // Inventory.unit_cost/unit_price are never touched here anymore) —
+    // this delivery's OWN batch gets its OWN price, defaulting to
+    // whatever the item's legacy unit_price currently displays when
+    // the caller doesn't override it, and that price (whichever it
+    // ends up being) can never be lower than this delivery's own cost.
+    // Checked here, with a message naming this specific item, before
+    // `batches::create_batch_in_tx`'s own (more generic) version of
+    // the identical guard runs as a second, defense-in-depth check.
+    let batch_unit_price = unit_price_override.unwrap_or(legacy_unit_price);
+    if batch_unit_price < po_unit_cost {
         let business_currency: String = tx
             .query_row("SELECT currency FROM businesses WHERE id = ?1", params![business_id], |r| r.get(0))
             .unwrap_or_else(|_| "USD".to_string());
-        let cost_display = crate::money::format_money(new_unit_cost, &business_currency);
-        let price_display = crate::money::format_money(current_unit_price, &business_currency);
+        let cost_display = crate::money::format_money(po_unit_cost, &business_currency);
+        let price_display = crate::money::format_money(batch_unit_price, &business_currency);
         return Err(anyhow!(
-            "receiving this would leave '{inventory_name}' costing {cost_display} per unit while \
-             it's still priced at {price_display} — raise the item's price to at least \
-             {cost_display} in Inventory first, then receive this order"
+            "receiving this would create a batch of '{inventory_name}' costing {cost_display} per unit while \
+             priced at {price_display} — pass a higher unit_price for this delivery, or raise the item's price \
+             in Inventory first, then receive this order"
         ));
     }
 
+    // Inventory.quantity is still the one number every other part of
+    // this app reads — it just now gets there via a batch's own
+    // quantity_received rather than a blended weighted-average.
+    // unit_cost/unit_price are deliberately NOT touched here anymore —
+    // see batches.rs's own doc comment for why those two columns stay
+    // frozen legacy history from this point on.
     tx.execute(
-        &format!("UPDATE {inventory_table} SET quantity = ?1, unit_cost = ?2, updated_at = datetime('now') WHERE id = ?3 AND business_id = ?4"),
-        params![new_qty, new_unit_cost, inventory_record_id, business_id],
+        &format!("UPDATE {inventory_table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
+        params![new_qty, inventory_record_id, business_id],
     )?;
 
     tx.execute(
@@ -256,11 +263,26 @@ pub(crate) fn receive_in_tx(
         params![purchase_record_id, business_id],
     )?;
 
-    // Same Bookkeeping auto-post as checkout() and process_refund(),
-    // same reasoning: one expense entry for what was actually paid to
-    // the supplier for this delivery (quantity received × the PO's
-    // unit cost, not the new weighted-average — this is the real cash
-    // outlay, not the recalculated stock valuation). Best-effort: a
+    let received_at = chrono::Utc::now().to_rfc3339();
+    let batch_id = crate::batches::create_batch_in_tx(
+        tx,
+        business_id,
+        &inventory_record_id,
+        po_number.as_deref(),
+        quantity_received,
+        po_unit_cost,
+        batch_unit_price,
+        expiry_date,
+        &received_at,
+        created_by,
+    )?;
+
+    // Same Bookkeeping auto-post as before this feature, same
+    // reasoning: one expense entry for what was actually paid to the
+    // supplier for this delivery (quantity received × the PO's own
+    // unit cost — the real cash outlay, unaffected by batching, since
+    // a batch's own unit_cost IS exactly this PO's unit_cost, no
+    // averaging involved to ever drift from it). Best-effort: a
     // business without Bookkeeping enabled can still receive stock.
     if let Ok(accounting_module) = crud::load_module(&tx, business_id, "accounting") {
         let mut entry: HashMap<String, Value> = HashMap::new();
@@ -280,47 +302,15 @@ pub(crate) fn receive_in_tx(
         crud::insert_validated_record(&tx, business_id, &accounting_module, &entry)?;
     }
 
-    // Same reconciliation discipline as repack.rs: `new_qty *
-    // new_unit_cost` (what actually gets stored) doesn't always equal
-    // `numerator` (what was actually on hand plus actually paid for) —
-    // rounding the blended cost to the nearest cent can land a few
-    // cents above or below the exact value. Positive means the stored
-    // valuation came in LOWER than the true value (an unrecorded
-    // loss); negative means it came in HIGHER (value from nowhere).
-    // Posted as its own labeled Bookkeeping entry whenever nonzero, so
-    // the stock ledger and the books always reconcile to the cent.
-    let stored_inventory_value = new_qty * new_unit_cost;
-    let rounding_adjustment_cents = numerator - stored_inventory_value;
-    if rounding_adjustment_cents != 0 {
-        if let Ok(accounting_module) = crud::load_module(&tx, business_id, "accounting") {
-            let (entry_type, amount) = if rounding_adjustment_cents > 0 {
-                ("expense", rounding_adjustment_cents)
-            } else {
-                ("income", -rounding_adjustment_cents)
-            };
-            let mut entry: HashMap<String, Value> = HashMap::new();
-            entry.insert(
-                "description".into(),
-                json!(format!(
-                    "Receiving rounding {} — {inventory_name}",
-                    if rounding_adjustment_cents > 0 { "loss" } else { "gain" }
-                )),
-            );
-            entry.insert("entry_type".into(), json!(entry_type));
-            entry.insert("category".into(), json!("Stock Revaluation"));
-            entry.insert("amount".into(), json!(amount));
-            for f in &accounting_module.fields {
-                if !entry.contains_key(&f.name) {
-                    if let Some(d) = &f.default {
-                        entry.insert(f.name.clone(), d.clone());
-                    }
-                }
-            }
-            accounting_module.validate(&entry)?;
-            crate::reference_data::validate_field_references(&tx, business_id, &accounting_module, &entry)?;
-            crud::insert_validated_record(&tx, business_id, &accounting_module, &entry)?;
-        }
-    }
+    // NOTE: the weighted-average rounding-reconciliation Bookkeeping
+    // post ("Stock Revaluation") that used to live here is gone,
+    // deliberately, not merely removed by oversight — it existed ONLY
+    // to catch the cents lost/gained when a blended weighted-average
+    // cost got rounded to the nearest cent. A batch's own unit_cost IS
+    // exactly this PO's own unit_cost, stored exactly, with no
+    // averaging and therefore no rounding step of any kind — there is
+    // no remainder left for this mechanism to ever need to catch on
+    // this code path anymore.
 
     let summary = json!({
         "purchase_record_id": purchase_record_id,
@@ -332,12 +322,10 @@ pub(crate) fn receive_in_tx(
         "quantity_received": quantity_received,
         "new_stock_level": new_qty,
         "partial_delivery": quantity_received != ordered_qty,
-        "received_at_unit_cost": po_unit_cost,
-        "new_weighted_average_cost": new_unit_cost,
-        "exact_value_on_hand": numerator,
-        "stored_inventory_value": stored_inventory_value,
-        "rounding_adjustment_cents": rounding_adjustment_cents,
-        "rounding_adjustment_posted_to_bookkeeping": rounding_adjustment_cents != 0,
+        "batch_id": batch_id,
+        "batch_unit_cost": po_unit_cost,
+        "batch_unit_price": batch_unit_price,
+        "batch_expiry_date": expiry_date,
     });
 
     // Committing and audit-logging are each caller's own responsibility

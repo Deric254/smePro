@@ -68,6 +68,11 @@
       "type": "money",
       "required": true,
       "default": 0
+    },
+    {
+      "name": "source_batch_id",
+      "type": "text",
+      "required": false
     }
   ],
   "actions": [

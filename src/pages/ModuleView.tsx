@@ -3,9 +3,9 @@ import {
   getModuleSchema, listRecords, createRecord, updateRecord, deleteRecord, exportModule,
   downloadImportTemplate, importExcel,
   runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, getBusinessInfo,
-  receiveStock, repackStock, settleDebt, ApiError,
+  receiveStock, repackStock, settleDebt, getBatches, updateBatchPrice, ApiError,
 } from '../api';
-import type { NewInvoiceItem, ImportExcelResult } from '../api';
+import type { NewInvoiceItem, ImportExcelResult, BatchSummary } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
 import InvoiceView from '../components/InvoiceView';
@@ -247,6 +247,14 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
   const [receivingId, setReceivingId] = useState<string | null>(null);
   const [receiveQtyText, setReceiveQtyText] = useState('');
+  // Optional per-delivery overrides — see batches.rs's module doc
+  // comment: every receipt now becomes its own batch, so THIS is the
+  // one place a business can set a real expiry date (essential for
+  // FEFO to mean anything) or price this specific delivery differently
+  // from the item's existing price, instead of everything defaulting
+  // to the item's legacy price forever.
+  const [receivePriceText, setReceivePriceText] = useState('');
+  const [receiveExpiryDate, setReceiveExpiryDate] = useState('');
   const [receiveError, setReceiveError] = useState<string | null>(null);
   const [receiveSubmitting, setReceiveSubmitting] = useState(false);
   const [actionResult, setActionResult] = useState<string | null>(null);
@@ -278,6 +286,74 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // would need an extra click before Confirm even does anything.
   const [settlePaymentMethod, setSettlePaymentMethod] = useState('cash');
 
+  // Viewing/editing an item's batches. See batches.rs. Loaded fresh
+  // every time the modal opens rather than kept in sync with the main
+  // records list, since a batch's own quantity/cost/price live in a
+  // separate table this page never otherwise fetches.
+  const [viewingBatchesId, setViewingBatchesId] = useState<string | null>(null);
+  const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
+  const [batchesLoading, setBatchesLoading] = useState(false);
+  const [batchesError, setBatchesError] = useState<string | null>(null);
+  const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
+  const [batchPriceText, setBatchPriceText] = useState('');
+  const [batchCostText, setBatchCostText] = useState('');
+  const [batchSaveError, setBatchSaveError] = useState<string | null>(null);
+  const [batchSaving, setBatchSaving] = useState(false);
+
+  async function openBatches(id: string) {
+    setViewingBatchesId(id);
+    setBatchesLoading(true);
+    setBatchesError(null);
+    setBatchSummary(null);
+    try {
+      setBatchSummary(await getBatches(id));
+    } catch (err) {
+      setBatchesError(err instanceof ApiError ? err.message : 'Could not load batches for this item');
+    } finally {
+      setBatchesLoading(false);
+    }
+  }
+
+  function startEditBatch(b: { id: string; unit_price: number; unit_cost: number }) {
+    setEditingBatchId(b.id);
+    setBatchPriceText((b.unit_price / 100).toFixed(2));
+    setBatchCostText((b.unit_cost / 100).toFixed(2));
+    setBatchSaveError(null);
+  }
+
+  async function submitBatchPrice() {
+    if (!editingBatchId || !viewingBatchesId) return;
+    const price = parseMoneyInput(batchPriceText, businessCurrency);
+    if (price === null) {
+      setBatchSaveError('Selling price must be a valid amount.');
+      return;
+    }
+    // Only sent when it's actually being changed from what the batch
+    // already carries — same "omit unless changing" reasoning as
+    // api.ts's updateBatchPrice itself: a Manager who never touches
+    // cost should never trip the Owner-only check just because a cost
+    // value was present in the form.
+    const originalCost = batchSummary?.batches.find((b) => b.id === editingBatchId)?.unit_cost;
+    const parsedCost = batchCostText.trim() === '' ? null : parseMoneyInput(batchCostText, businessCurrency);
+    if (batchCostText.trim() !== '' && parsedCost === null) {
+      setBatchSaveError('Cost must be a valid amount.');
+      return;
+    }
+    const costOverride = parsedCost !== null && parsedCost !== originalCost ? parsedCost : undefined;
+    setBatchSaving(true);
+    setBatchSaveError(null);
+    try {
+      await updateBatchPrice(viewingBatchesId, editingBatchId, price, costOverride);
+      setEditingBatchId(null);
+      setBatchSummary(await getBatches(viewingBatchesId));
+      await refreshRecords();
+    } catch (err) {
+      setBatchSaveError(err instanceof ApiError ? err.message : 'Could not update this batch');
+    } finally {
+      setBatchSaving(false);
+    }
+  }
+
   useEffect(() => {
     if (moduleId === 'inventory') return; // schema.my_permissions already covers this case directly
     if (moduleId !== 'purchasing') return; // receiving only ever gets triggered from the Purchasing list
@@ -293,15 +369,26 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       setReceiveError('Quantity received must be a positive whole number.');
       return;
     }
+    let priceOverride: number | undefined;
+    if (receivePriceText.trim() !== '') {
+      const parsed = parseMoneyInput(receivePriceText, businessCurrency);
+      if (parsed === null) {
+        setReceiveError('Selling price must be a valid amount.');
+        return;
+      }
+      priceOverride = parsed;
+    }
     setReceiveSubmitting(true);
     setReceiveError(null);
     try {
-      const summary = await receiveStock(receivingId, qty);
+      const summary = await receiveStock(receivingId, qty, priceOverride, receiveExpiryDate.trim() || undefined);
       setActionResult(
-        `Received ${summary.quantity_received} of "${summary.inventory_name}". New stock: ${summary.new_stock_level}. New average cost: ${formatMoney(summary.new_weighted_average_cost, businessCurrency)}.`
+        `Received ${summary.quantity_received} of "${summary.inventory_name}". New stock: ${summary.new_stock_level}. This delivery's own cost: ${formatMoney(summary.batch_unit_cost, businessCurrency)}.`
       );
       setReceivingId(null);
       setReceiveQtyText('');
+      setReceivePriceText('');
+      setReceiveExpiryDate('');
       await refreshRecords();
     } catch (err) {
       setReceiveError(err instanceof ApiError ? err.message : 'Could not receive this purchase order');
@@ -601,6 +688,16 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // situation the inventoryCanRepack comment above already describes
   // for "repack", so no separate schema fetch is needed here either.
   const canSettle = moduleId === 'debt_credit' && !!schema?.my_permissions.includes('settle');
+  // "update_batch_price" lives on inventory's own actions list — same
+  // situation as "settle" above, checked directly off this page's own
+  // schema since it's only ever relevant when moduleId is inventory
+  // itself. Granted to both Owner and Manager; a Manager attempting to
+  // ALSO edit a batch's cost (not just its price) is still caught
+  // server-side by batches::update_batch_price's own Owner-only check
+  // — the cost input isn't hidden from Manager here, since this page
+  // has no cheap way to tell Owner and Manager apart yet, so the
+  // server's rejection message is what actually enforces it.
+  const canEditBatchPrice = moduleId === 'inventory' && !!schema?.my_permissions.includes('update_batch_price');
 
   if (loading) return <div style={{ padding: '1rem', color: 'var(--ink-soft)' }}>Loading…</div>;
   if (!schema) return <div style={{ padding: '1rem' }}>{error || 'Module not found'}</div>;
@@ -703,7 +800,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                       {moduleId === 'invoice' && c === 'tax_amount' ? 'tax' : c.replace(/_/g, ' ')}
                     </th>
                   ))}
-                  {(canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || (moduleId === 'inventory' && inventoryCanRepack) || canSettle) && moduleId !== 'invoice' && <th style={styles.th} />}
+                  {(canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || moduleId === 'inventory' || canSettle) && moduleId !== 'invoice' && <th style={styles.th} />}
                 </tr>
               </thead>
               <tbody>
@@ -735,17 +832,22 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                         </div>
                       </td>
                     )}
-                    {moduleId !== 'invoice' && (canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || (moduleId === 'inventory' && inventoryCanRepack) || canSettle) && (
+                    {moduleId !== 'invoice' && (canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || moduleId === 'inventory' || canSettle) && (
                       <td style={styles.td}>
                         <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                           {moduleId === 'purchasing' && inventoryCanReceive && !r.received && (
-                            <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setReceivingId(r.id); setReceiveQtyText(''); setReceiveError(null); }}>
+                            <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setReceivingId(r.id); setReceiveQtyText(''); setReceivePriceText(''); setReceiveExpiryDate(''); setReceiveError(null); }}>
                               Receive
                             </button>
                           )}
                           {moduleId === 'inventory' && inventoryCanRepack && (
                             <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setRepackSourceId(r.id); setRepackTargetId(''); setRepackTargetMode('existing'); setRepackNewTargetName(''); setRepackNewTargetPriceText(''); setRepackSourceQtyText('1'); setRepackTargetQtyText(''); setRepackNotes(''); setRepackError(null); }}>
                               Repack
+                            </button>
+                          )}
+                          {moduleId === 'inventory' && (
+                            <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => openBatches(r.id)}>
+                              Batches
                             </button>
                           )}
                           {canSettle && !r.settled && (
@@ -800,12 +902,104 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               onChange={(e) => setReceiveQtyText(e.target.value)}
               style={{ width: '100%' }}
             />
+            <label style={{ marginTop: '0.6rem', display: 'block' }}>Selling price for this delivery (optional)</label>
+            <input
+              type="text"
+              inputMode="decimal"
+              placeholder="Defaults to the item's current price"
+              value={receivePriceText}
+              onChange={(e) => setReceivePriceText(e.target.value)}
+              style={{ width: '100%' }}
+            />
+            <label style={{ marginTop: '0.6rem', display: 'block' }}>Expiry date (optional)</label>
+            <input
+              type="date"
+              value={receiveExpiryDate}
+              onChange={(e) => setReceiveExpiryDate(e.target.value)}
+              style={{ width: '100%' }}
+            />
+            <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
+              This delivery becomes its own batch — set an expiry date here if it has one, so it sells before older or undated stock.
+            </div>
             {receiveError && <div style={styles.error}>{receiveError}</div>}
             <div style={styles.modalActions}>
               <button className="btn btn-outline" onClick={() => setReceivingId(null)} disabled={receiveSubmitting}>Cancel</button>
               <button className="btn btn-stamp" onClick={submitReceive} disabled={receiveSubmitting}>
                 {receiveSubmitting ? 'Receiving…' : 'Confirm receipt'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {viewingBatchesId && (
+        <div style={styles.overlay} onClick={() => { setViewingBatchesId(null); setEditingBatchId(null); }}>
+          <div className="card" style={{ ...styles.modal, maxWidth: '620px' }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>Batches — {String(records.find((r) => r.id === viewingBatchesId)?.name ?? 'this item')}</h3>
+            {batchesLoading && <div style={{ color: 'var(--ink-soft)' }}>Loading…</div>}
+            {batchesError && <div style={styles.error}>{batchesError}</div>}
+            {batchSummary && (
+              <>
+                <div style={{ fontSize: '0.82rem', color: 'var(--ink-soft)', marginBottom: '0.6rem' }}>
+                  Sells in this order — soonest-expiring batches first, then undated batches, then legacy stock last.
+                </div>
+                {batchSummary.legacy_quantity > 0 && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', borderBottom: '1px solid var(--paper-line)', fontSize: '0.86rem' }}>
+                    <div>
+                      <div>Legacy stock (pre-batch)</div>
+                      <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>{batchSummary.legacy_quantity} units · no expiry · sells last</div>
+                    </div>
+                    <div style={{ textAlign: 'right', fontSize: '0.8rem', color: 'var(--ink-soft)' }}>
+                      <div>cost {formatMoney(batchSummary.legacy_unit_cost, businessCurrency)}</div>
+                      <div>price {formatMoney(batchSummary.legacy_unit_price, businessCurrency)}</div>
+                    </div>
+                  </div>
+                )}
+                {batchSummary.batches.length === 0 && batchSummary.legacy_quantity === 0 && (
+                  <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No stock on hand.</div>
+                )}
+                {batchSummary.batches.map((b) => (
+                  <div key={b.id} style={{ padding: '0.5rem 0', borderBottom: '1px solid var(--paper-line)', fontSize: '0.86rem' }}>
+                    {editingBatchId === b.id ? (
+                      <div>
+                        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.3rem' }}>
+                          {b.quantity_remaining} units remaining{b.expiry_date ? ` · expires ${b.expiry_date}` : ' · no expiry'}
+                        </div>
+                        <label style={{ fontSize: '0.78rem' }}>Selling price</label>
+                        <input type="text" inputMode="decimal" value={batchPriceText} onChange={(e) => setBatchPriceText(e.target.value)} style={{ width: '100%' }} />
+                        <label style={{ fontSize: '0.78rem', marginTop: '0.4rem', display: 'block' }}>Cost (Owner only)</label>
+                        <input type="text" inputMode="decimal" value={batchCostText} onChange={(e) => setBatchCostText(e.target.value)} style={{ width: '100%' }} />
+                        {batchSaveError && <div style={styles.error}>{batchSaveError}</div>}
+                        <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.5rem' }}>
+                          <button className="btn btn-outline" style={{ padding: '0.25em 0.6em', fontSize: '0.78rem' }} onClick={() => setEditingBatchId(null)} disabled={batchSaving}>Cancel</button>
+                          <button className="btn btn-stamp" style={{ padding: '0.25em 0.6em', fontSize: '0.78rem' }} onClick={submitBatchPrice} disabled={batchSaving}>
+                            {batchSaving ? 'Saving…' : 'Save'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.6rem' }}>
+                        <div>
+                          <div>{b.quantity_remaining} units{b.source_po_number ? ` · PO ${b.source_po_number}` : ''}</div>
+                          <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>
+                            {b.expiry_date ? `Expires ${b.expiry_date}` : 'No expiry'} · received {b.received_at.slice(0, 10)}
+                          </div>
+                        </div>
+                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)' }}>cost {formatMoney(b.unit_cost, businessCurrency)}</div>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)' }}>price {formatMoney(b.unit_price, businessCurrency)}</div>
+                          {canEditBatchPrice && (
+                            <button className="btn btn-outline" style={{ padding: '0.2em 0.5em', fontSize: '0.74rem', marginTop: '0.2rem' }} onClick={() => startEditBatch(b)}>Edit price</button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </>
+            )}
+            <div style={styles.modalActions}>
+              <button className="btn btn-outline" onClick={() => { setViewingBatchesId(null); setEditingBatchId(null); }}>Close</button>
             </div>
           </div>
         </div>

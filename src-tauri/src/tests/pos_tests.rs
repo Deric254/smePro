@@ -94,10 +94,16 @@ fn test_checkout_of_a_repacked_item_costs_the_sale_correctly() {
     crate::repack::repack(&mut conn, &biz, &uid, repack_req).unwrap();
 
     // 400 consumed / 4 produced = 100 per quarter-pack — sanity check
-    // this is really what landed on the target before selling it.
+    // this is really what landed on the target's new batch before
+    // selling it (BATCH REWRITE: the target's own Inventory row cost
+    // stays frozen legacy — 0, exactly as seeded — the real cost lives
+    // on the batch repack just created; see batches.rs's own module
+    // doc comment).
     let inv_after_repack = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
     let target_after_repack = inv_after_repack.iter().find(|r| r["id"] == json!(target_id)).unwrap();
-    assert_eq!(target_after_repack["unit_cost"], json!(100));
+    assert_eq!(target_after_repack["unit_cost"], json!(0), "legacy cost is frozen — the target started at 0 and this repack must not touch it");
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &target_id).unwrap();
+    assert_eq!(summary["batches"][0]["unit_cost"].as_i64().unwrap(), 100);
 
     let req = crate::pos::CheckoutRequest {
         idempotency_key: None,
@@ -119,14 +125,18 @@ fn test_checkout_of_a_repacked_item_costs_the_sale_correctly() {
 }
 
 #[test]
-fn test_checkout_of_a_blended_repack_costs_the_sale_at_the_true_weighted_average() {
-    // Same proof as the test above, for the harder case: the target
-    // already had its own stock at its own cost BEFORE the repack (see
-    // repack_tests.rs's test_repack_blends_with_existing_target_stock_
-    // at_a_different_cost, which this reuses the exact numbers from).
-    // A sale after a blended repack must cost at the real blended
-    // figure — not the pre-repack cost, and not the source's own cost
-    // either.
+fn test_checkout_after_a_repack_costs_the_sale_from_the_new_batch_not_the_pre_existing_legacy_stock() {
+    // BATCH REWRITE: this test used to be named
+    // test_checkout_of_a_blended_repack_costs_the_sale_at_the_true_
+    // weighted_average and proved a sale costed at a blended 97/unit
+    // (see repack_tests.rs's own equivalent rewrite for why that
+    // blending no longer happens at all). What actually happens now:
+    // the pre-existing 5kg at 90 stays untouched as legacy stock, the
+    // repack produces a brand-new, undated batch of 10kg at exactly
+    // 100/unit (1000 consumed / 10 produced, no blending input from
+    // the 5kg), and FEFO always sells legacy stock LAST — so a sale of
+    // 3kg right after this repack draws entirely from the new batch,
+    // at 100, not from the older legacy stock at 90.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -143,12 +153,13 @@ fn test_checkout_of_a_blended_repack_costs_the_sale_at_the_true_weighted_average
         new_target_unit_price: None,
         notes: None,
     };
-    crate::repack::repack(&mut conn, &biz, &uid, repack_req).unwrap();
+    let repack_result = crate::repack::repack(&mut conn, &biz, &uid, repack_req).unwrap();
+    assert_eq!(repack_result["new_batch_unit_cost"].as_i64().unwrap(), 100, "1000 consumed / 10 produced, exactly — nothing to blend with the pre-existing 5kg");
 
-    // (5*90 + 1*1000) / 15 = 96.67 -> 97 rounded, same as repack_tests.rs.
     let inv_after = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
     let loose_after = inv_after.iter().find(|r| r["id"] == json!(loose_id)).unwrap();
-    assert_eq!(loose_after["unit_cost"], json!(97));
+    assert_eq!(loose_after["unit_cost"], json!(90), "the pre-existing legacy cost is frozen, untouched by this repack");
+    assert_eq!(loose_after["quantity"], json!(15), "5 legacy + 10 newly produced");
 
     let req = crate::pos::CheckoutRequest {
         idempotency_key: None,
@@ -165,7 +176,7 @@ fn test_checkout_of_a_blended_repack_costs_the_sale_at_the_true_weighted_average
 
     let sales = crate::crud::list(&conn, &biz, &uid, "sales", None, 50, 0).unwrap();
     let sale = sales.iter().find(|r| r["item_name"] == json!("Rice (loose kg)")).unwrap();
-    assert_eq!(sale["cost_at_sale"], json!(97 * 3), "must use the real blended cost, not the pre-repack 90 or the source's 1000");
+    assert_eq!(sale["cost_at_sale"], json!(100 * 3), "must draw from the new batch (FEFO: undated batches sell before legacy), not the older 90 legacy stock");
 }
 
 #[test]
@@ -196,9 +207,10 @@ fn test_checkout_after_a_two_level_repack_chain_costs_correctly() {
         new_target_unit_price: None,
         notes: None,
     }).unwrap();
-    // 500 / 10 = 50 per 100g bag.
-    let inv_1 = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
-    assert_eq!(inv_1.iter().find(|r| r["id"] == json!(bag100_id)).unwrap()["unit_cost"], json!(50));
+    // 500 / 10 = 50 per 100g bag — lands on a new batch now, not the
+    // Inventory row's own (frozen, still-0) unit_cost.
+    let batches_1 = crate::batches::list_batches(&conn, &biz, &uid, &bag100_id).unwrap();
+    assert_eq!(batches_1["batches"][0]["unit_cost"].as_i64().unwrap(), 50);
 
     crate::repack::repack(&mut conn, &biz, &uid, crate::repack::RepackRequest {
         source_record_id: bag100_id,
@@ -211,12 +223,16 @@ fn test_checkout_after_a_two_level_repack_chain_costs_correctly() {
     }).unwrap();
     // 50 / 4 = 12.5 -> rounds to 13 (repack.rs rounds up, per its own
     // "never silently lose value" rule) or 12 depending on rounding
-    // direction — read the real value back rather than assume, then
-    // assert the sale matches THAT, since the point of this test is
-    // the sale matching Inventory, not re-deriving repack's own
-    // rounding rule a second time.
-    let inv_2 = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
-    let sachet_cost = inv_2.iter().find(|r| r["id"] == json!(sachet_id)).unwrap()["unit_cost"].as_i64().unwrap();
+    // direction — read the real value back from the new batch rather
+    // than assume, then assert the sale matches THAT, since the point
+    // of this test is the sale matching the batch, not re-deriving
+    // repack's own rounding rule a second time. This second repack
+    // itself consumes the FIRST repack's own batch (source_quantity: 1
+    // drawn via FEFO from bag100_id's one live batch, not from any
+    // flat item-level cost) — proving the cost basis survives two
+    // hops of batch-to-batch consumption, not just one.
+    let batches_2 = crate::batches::list_batches(&conn, &biz, &uid, &sachet_id).unwrap();
+    let sachet_cost = batches_2["batches"][0]["unit_cost"].as_i64().unwrap();
     assert!(sachet_cost > 0, "the cost basis must have survived two repack hops, not landed on 0");
 
     let req = crate::pos::CheckoutRequest {

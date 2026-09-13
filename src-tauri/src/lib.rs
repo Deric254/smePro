@@ -6,6 +6,7 @@ pub mod audit;
 pub mod auth;
 pub mod backup;
 pub mod basket_analysis;
+pub mod batches;
 pub mod business_branding;
 pub mod business_panel;
 pub mod business_pulse;

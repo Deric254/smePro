@@ -71,7 +71,7 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 25 { v25_created_by_column(conn)?; }
     if current < 26 { v26_field_min_floors(conn)?; }
     if current < 27 { v27_idempotency_keys(conn)?; }
-    if current < 28 { v28_price_floor_schema_driven(conn)?; }
+    if current < 28 { v28_inventory_batches(conn)?; }
     debug_assert_eq!(CURRENT_VERSION, 28, "bump this alongside the last `if current < N` check above");
 
     Ok(())
@@ -1797,57 +1797,212 @@ fn v27_idempotency_keys(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-// THE GAP THIS CLOSES: the "selling price can never be saved below
-// cost price" business rule used to be hardcoded in Rust to the
-// literal module id "inventory" (crud::create, crud::update,
-// excel_import.rs's insert path) — so it silently never applied to
-// any other module, built-in or a business's own custom one, even
-// one that defined its own price/cost-style field pair. The engine
-// fix is `ModuleDef::price_floor` / `check_price_floor` (see their own
-// doc comments for the full reasoning) — a module now opts into this
-// protection via its own JSON, the same way `date_field` already lets
-// a module opt into backdating without an engine change. This
-// migration is the other half, same technique as v26 just above:
-// patching every already-provisioned business's stored
-// `modules.schema_json` snapshot to actually carry the new
-// `price_floor` key on inventory, since a snapshot captured before
-// this version shipped has no way to know about it otherwise. A
-// business enabling Inventory for the first time AFTER this version
-// already gets it from the shipped `modules/inventory.json` directly —
-// this migration exists purely for snapshots that predate it.
-fn v28_price_floor_schema_driven(conn: &mut Connection) -> Result<()> {
+/// Batch-costed inventory with FEFO consumption — see the spec this
+/// implements for the full design. Three independent things happen
+/// here, each idempotent and each safe to run even if a previous
+/// partial attempt already did some of it (checked-before-applied,
+/// same discipline as every other migration in this file):
+///
+/// 1. A brand-new table, `inventory_batches` — one row per receipt
+///    going forward. Nothing about this touches or migrates existing
+///    Inventory rows: every item's current `quantity`/`unit_cost`/
+///    `unit_price` stays exactly as-is (this is "legacy" stock from
+///    the moment this ships) — see batches.rs's own module doc comment
+///    for how legacy and batches coexist under one `Inventory.quantity`
+///    total, and why `unit_cost`/`unit_price` are deliberately left
+///    untouched by this migration and by every batch operation
+///    afterward (they remain the frozen legacy cost/price — batches.rs
+///    computes a live FEFO-aware display price separately rather than
+///    overwriting the one place the legacy value lives, which would
+///    make it unrecoverable the moment any batch is created for an
+///    item).
+///
+/// 2. `sales` gains an optional `source_batch_id` column — which
+///    specific batch (or `NULL`, meaning legacy stock) a given sales
+///    row was drawn from. Existing sales rows all get `NULL`, correctly:
+///    they were sold before batches existed, so "which batch" has no
+///    answer other than "none, this was legacy stock" — refund.rs
+///    already treats a `NULL` source_batch_id as "restock the legacy
+///    pool", so old sales refund exactly as they always have.
+///
+/// 3. `inventory` gains a new `update_batch_price` action, scoped like
+///    `receive`/`repack` — granted to this business's existing
+///    Owner/Manager roles directly, the same two-part fix (schema
+///    snapshot + real permission rows) v11's `stocktake` action and
+///    v12's payment_method column both already establish the pattern
+///    for.
+fn v28_inventory_batches(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
 
-    let rows: Vec<(String, String)> = {
-        let mut stmt = tx.prepare(
-            "SELECT business_id, schema_json FROM modules WHERE id = 'inventory' AND enabled = 1",
-        )?;
-        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        mapped.collect::<rusqlite::Result<Vec<_>>>()?
-    };
+    // --- Part 1: the new table itself. Genuinely new, so a plain
+    // CREATE TABLE IF NOT EXISTS is all this needs — no existing rows
+    // to preserve, no rebuild-migration machinery required. ---
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS inventory_batches (
+            id                   TEXT PRIMARY KEY,
+            business_id          TEXT NOT NULL,
+            inventory_record_id  TEXT NOT NULL,
+            source_po_number     TEXT,
+            quantity_received    INTEGER NOT NULL,
+            quantity_remaining   INTEGER NOT NULL,
+            unit_cost            INTEGER NOT NULL,
+            unit_price           INTEGER NOT NULL,
+            expiry_date          TEXT,
+            received_at          TEXT NOT NULL,
+            created_by           TEXT,
+            created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
+            deleted_at           TEXT
+        )",
+        [],
+    )?;
+    // FEFO ordering itself (expiry_date ASC, nulls-last, then
+    // received_at ASC as the tiebreak/no-expiry ordering) is expressed
+    // in the SQL `ORDER BY` at query time (see batches.rs) — SQLite
+    // has no partial-order index that captures "nulls sort last"
+    // directly, so this index exists to make the WHERE clause every
+    // FEFO query and every batch-list query actually shares
+    // (`inventory_record_id = ? AND business_id = ? AND deleted_at IS
+    // NULL`) fast, not to pre-sort the result itself.
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inventory_batches_fefo
+         ON inventory_batches (inventory_record_id, business_id)
+         WHERE deleted_at IS NULL",
+        [],
+    )?;
+    // Business-wide scan for the \"Expiring batches\" report — every
+    // live batch across the whole business, ordered by how soon it
+    // expires, without an inventory_record_id filter narrowing it
+    // first.
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inventory_batches_business_expiry
+         ON inventory_batches (business_id, expiry_date)
+         WHERE deleted_at IS NULL",
+        [],
+    )?;
 
-    for (business_id, schema_json) in rows {
-        let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
-            Ok(v) => v,
-            // Corrupt snapshot pre-dating this migration is out of
-            // scope to repair here; leave it untouched rather than
-            // risk making it worse — same discipline as v26 above.
-            Err(_) => continue,
-        };
-        let already_set = parsed.get("price_floor").is_some();
-        if already_set {
-            continue;
+    // --- Part 2: sales.source_batch_id ---
+    // Same two-step shape as v17_sales_cost_at_sale: a real column on
+    // the physical table (ALTER TABLE ADD COLUMN — safe and cheap,
+    // no rebuild needed since this is a brand-new NULLABLE column,
+    // not a type change or anything already-required data needs to
+    // backfill), plus a patch to every existing business's own
+    // `modules.schema_json` snapshot (crud::load_module reads THAT,
+    // never the on-disk modules/*.json directly — see that function's
+    // own comment).
+    let sales_table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_sales'",
+        [],
+        |r| r.get(0),
+    )?;
+    if sales_table_exists == 1 {
+        let already_has_column: i64 = tx.query_row(
+            "SELECT count(*) FROM pragma_table_info('module_sales') WHERE name='source_batch_id'",
+            [],
+            |r| r.get(0),
+        )?;
+        if already_has_column == 0 {
+            tx.execute("ALTER TABLE module_sales ADD COLUMN source_batch_id TEXT", [])?;
         }
-        if let Some(obj) = parsed.as_object_mut() {
-            obj.insert(
-                "price_floor".to_string(),
-                serde_json::json!({"price_field": "unit_price", "cost_field": "unit_cost"}),
-            );
-            let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
-            tx.execute(
-                "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'inventory'",
-                rusqlite::params![new_json, business_id],
+    }
+    {
+        let rows: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT business_id, schema_json FROM modules WHERE id = 'sales' AND enabled = 1",
             )?;
+            let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (business_id, schema_json) in rows {
+            let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+                Ok(v) => v,
+                Err(_) => continue, // corrupt snapshot pre-dating this migration is out of scope to repair here; leave it untouched rather than risk making it worse
+            };
+            let mut changed = false;
+            if let Some(fields) = parsed.get_mut("fields").and_then(|f| f.as_array_mut()) {
+                let already_present = fields.iter().any(|f| f.get("name").and_then(|n| n.as_str()) == Some("source_batch_id"));
+                if !already_present {
+                    fields.push(serde_json::json!({
+                        "name": "source_batch_id",
+                        "type": "text",
+                        "required": false,
+                        "unique": false,
+                    }));
+                    changed = true;
+                }
+            }
+            if changed {
+                let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+                tx.execute(
+                    "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'sales'",
+                    rusqlite::params![new_json, business_id],
+                )?;
+            }
+        }
+    }
+
+    // --- Part 3: inventory.update_batch_price action ---
+    // Same shape as v11's "stocktake" action backfill: patch the
+    // stored schema snapshot (so Roles screen can show/check it) AND
+    // grant the real permission row directly to this business's
+    // existing Owner/Manager roles — the one-time seeding function
+    // that would normally do this only runs at first-enable, and every
+    // business here enabled Inventory long before this action existed.
+    {
+        let rows: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT business_id, schema_json FROM modules WHERE id = 'inventory' AND enabled = 1",
+            )?;
+            let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (business_id, schema_json) in rows {
+            let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let mut changed = false;
+            if let Some(actions) = parsed.get_mut("actions").and_then(|a| a.as_array_mut()) {
+                if !actions.iter().any(|a| a.as_str() == Some("update_batch_price")) {
+                    actions.push(serde_json::Value::String("update_batch_price".to_string()));
+                    changed = true;
+                }
+            }
+            if let Some(default_roles) = parsed.get_mut("default_roles").and_then(|d| d.as_object_mut()) {
+                for role_name in ["Owner", "Manager"] {
+                    if let Some(actions) = default_roles.get_mut(role_name).and_then(|a| a.as_array_mut()) {
+                        if !actions.iter().any(|a| a.as_str() == Some("update_batch_price")) {
+                            actions.push(serde_json::Value::String("update_batch_price".to_string()));
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+                tx.execute(
+                    "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'inventory'",
+                    rusqlite::params![new_json, business_id],
+                )?;
+            }
+
+            for role_name in ["Owner", "Manager"] {
+                let role_id: Option<String> = tx
+                    .query_row(
+                        "SELECT id FROM roles WHERE business_id = ?1 AND name = ?2",
+                        rusqlite::params![business_id, role_name],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(role_id) = role_id {
+                    tx.execute(
+                        "INSERT INTO permissions (id, role_id, module_id, action)
+                         VALUES (lower(hex(randomblob(16))), ?1, 'inventory', 'update_batch_price')
+                         ON CONFLICT(role_id, module_id, action) DO NOTHING",
+                        rusqlite::params![role_id],
+                    )?;
+                }
+            }
         }
     }
 

@@ -40,7 +40,13 @@ fn test_repack_a_dozen_eggs_into_singles_produces_the_exact_correct_cost() {
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req).unwrap();
 
-    assert_eq!(result["target_unit_cost_after"].as_i64().unwrap(), 25);
+    // BATCH REWRITE: repack now produces a brand-new batch on the
+    // target rather than writing a blended cost onto its Inventory
+    // row — see repack.rs's own module doc comment and decision #5 of
+    // the batch-costing spec. The target's own unit_cost/unit_price
+    // stay exactly as seeded (frozen legacy); the produced units'
+    // real cost lives on the new batch instead.
+    assert_eq!(result["new_batch_unit_cost"].as_i64().unwrap(), 25);
 
     let dozen = get_item(&conn, &biz, &uid, &dozen_id);
     assert_eq!(dozen["quantity"].as_i64().unwrap(), 4, "4 dozens left after breaking 1");
@@ -48,21 +54,32 @@ fn test_repack_a_dozen_eggs_into_singles_produces_the_exact_correct_cost() {
 
     let single = get_item(&conn, &biz, &uid, &single_id);
     assert_eq!(single["quantity"].as_i64().unwrap(), 12);
-    assert_eq!(single["unit_cost"].as_i64().unwrap(), 25);
+    assert_eq!(single["unit_cost"].as_i64().unwrap(), 0, "the target's own (legacy) cost is frozen — it was 0 before this repack and stays 0");
     assert_eq!(single["unit_price"].as_i64().unwrap(), 35, "price untouched by repack — it was already comfortably above the real cost");
+
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &single_id).unwrap();
+    assert_eq!(summary["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["batches"][0]["quantity_remaining"].as_i64().unwrap(), 12);
+    assert_eq!(summary["batches"][0]["unit_cost"].as_i64().unwrap(), 25);
 }
 
 #[test]
-fn test_repack_blends_with_existing_target_stock_at_a_different_cost() {
-    // The target item already has stock on hand at its own cost —
-    // the new cost must be a genuine weighted average of the two,
-    // not just overwritten by the incoming repack's cost.
+fn test_repack_never_blends_with_existing_target_stock() {
+    // BATCH REWRITE: this test used to be named
+    // test_repack_blends_with_existing_target_stock_at_a_different_cost
+    // and asserted a blended (5*90 + 1*1000)/15 = 97 landed on the
+    // target's Inventory row. That's gone on purpose — see decision #5
+    // of the spec: repack always produces a brand-new, independent
+    // batch on the target, at the cost of exactly what THIS repack
+    // consumed, and never touches whatever the target already had.
+    // This now proves the opposite of what it used to: the existing
+    // 5kg at 90 stays completely untouched (still legacy, still 90),
+    // and the new 10kg lands as its own batch at 100 (1000 consumed /
+    // 10 produced — no blending input from the 5kg at all).
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    // 10kg sack costing 1000 cents, broken into loose kg already
-    // holding 5kg at 90 cents/kg.
     let sack_id = make_inventory_item(&conn, &biz, "RICE-SACK", "Rice (10kg sack)", 3, 1000, 1500);
     let loose_id = make_inventory_item(&conn, &biz, "RICE-LOOSE", "Rice (loose kg)", 5, 90, 120);
 
@@ -77,11 +94,20 @@ fn test_repack_blends_with_existing_target_stock_at_a_different_cost() {
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req).unwrap();
 
-    // (5*90 + 1*1000) / 15 = (450 + 1000) / 15 = 1450/15 = 96.67 -> 97 rounded
-    assert_eq!(result["target_unit_cost_after"].as_i64().unwrap(), 97);
+    // 1000 consumed / 10 produced = 100 exactly — nothing to round here,
+    // unlike the old blended formula.
+    assert_eq!(result["new_batch_unit_cost"].as_i64().unwrap(), 100);
+
     let loose = get_item(&conn, &biz, &uid, &loose_id);
-    assert_eq!(loose["quantity"].as_i64().unwrap(), 15);
-    assert_eq!(loose["unit_cost"].as_i64().unwrap(), 97);
+    assert_eq!(loose["quantity"].as_i64().unwrap(), 15, "5 legacy + 10 newly produced");
+    assert_eq!(loose["unit_cost"].as_i64().unwrap(), 90, "the target's own legacy cost is frozen, untouched by this repack");
+
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &loose_id).unwrap();
+    assert_eq!(summary["legacy_quantity"].as_i64().unwrap(), 5);
+    assert_eq!(summary["legacy_unit_cost"].as_i64().unwrap(), 90);
+    assert_eq!(summary["batches"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["batches"][0]["quantity_remaining"].as_i64().unwrap(), 10);
+    assert_eq!(summary["batches"][0]["unit_cost"].as_i64().unwrap(), 100);
 }
 
 #[test]

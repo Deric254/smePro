@@ -303,10 +303,20 @@ export const processRefund = (req: RefundRequest) =>
   request('/sales/refund', { method: 'POST', body: JSON.stringify(req) });
 
 // ---- Receiving stock — the buying-side counterpart. See receiving.rs. ----
-export const receiveStock = (purchaseRecordId: string, quantityReceived?: number) =>
+export const receiveStock = (
+  purchaseRecordId: string,
+  quantityReceived?: number,
+  unitPrice?: number,
+  expiryDate?: string,
+) =>
   request('/purchasing/receive', {
     method: 'POST',
-    body: JSON.stringify({ purchase_record_id: purchaseRecordId, quantity_received: quantityReceived }),
+    body: JSON.stringify({
+      purchase_record_id: purchaseRecordId,
+      quantity_received: quantityReceived,
+      unit_price: unitPrice,
+      expiry_date: expiryDate,
+    }),
   });
 
 // ---- Repacking / breaking bulk. See repack.rs. ----
@@ -469,15 +479,79 @@ export interface StockRunway {
 export const getStockRunway = (days = 30, limit = 15): Promise<{ items: StockRunway[] }> =>
   request(`/inventory/stock-runway?days=${days}&limit=${limit}`);
 
-// Unpriced items — in-stock items still at the unit_price default of
-// zero. See stock_health::unpriced_items.
+// Unpriced items — zero unit_cost, zero unit_price, or both. See
+// stock_health::unpriced_items.
 export interface UnpricedItem {
   item_name: string;
   quantity: number;
   unit_cost_cents: number;
+  unit_price_cents: number;
+  missing: 'cost' | 'price' | 'both';
 }
-export const getUnpricedItems = (limit = 20): Promise<{ items: UnpricedItem[] }> =>
+export const getUnpricedItems = (limit = 50): Promise<{ items: UnpricedItem[] }> =>
   request(`/inventory/unpriced-items?limit=${limit}`);
+
+// Zero-cost purchase orders — unit_cost = 0 on Purchasing. See
+// stock_health::zero_cost_purchases.
+export interface ZeroCostPurchase {
+  po_number: string;
+  supplier: string;
+  item_name: string;
+  quantity: number;
+  received: boolean;
+}
+export const getZeroCostPurchases = (limit = 50): Promise<{ items: ZeroCostPurchase[] }> =>
+  request(`/purchasing/zero-cost?limit=${limit}`);
+
+// ---- Batch-costed inventory / FEFO. See batches.rs. ----
+export interface InventoryBatch {
+  id: string;
+  inventory_record_id: string;
+  source_po_number: string | null;
+  quantity_received: number;
+  quantity_remaining: number;
+  unit_cost: number;
+  unit_price: number;
+  expiry_date: string | null;
+  received_at: string;
+}
+export interface BatchSummary {
+  inventory_record_id: string;
+  item_name: string;
+  total_quantity: number;
+  legacy_quantity: number;
+  legacy_unit_cost: number;
+  legacy_unit_price: number;
+  batches: InventoryBatch[];
+  front_of_queue_unit_cost: number;
+  front_of_queue_unit_price: number;
+  front_of_queue_source: 'batch' | 'legacy';
+}
+export const getBatches = (inventoryRecordId: string): Promise<BatchSummary> =>
+  request(`/inventory/${inventoryRecordId}/batches`);
+
+// unit_cost is omitted entirely (not sent as undefined) unless the
+// caller is actually changing it — see batches.rs's own
+// update_batch_price: cost edits are Owner-only, gated separately from
+// the price-only edit every Manager can already make.
+export const updateBatchPrice = (inventoryRecordId: string, batchId: string, unitPrice: number, unitCost?: number) =>
+  request(`/inventory/${inventoryRecordId}/batches/${batchId}/price`, {
+    method: 'POST',
+    body: JSON.stringify(unitCost === undefined ? { unit_price: unitPrice } : { unit_price: unitPrice, unit_cost: unitCost }),
+  });
+
+export interface ExpiringBatch {
+  batch_id: string;
+  inventory_record_id: string;
+  item_name: string;
+  quantity_remaining: number;
+  unit_cost: number;
+  unit_price: number;
+  expiry_date: string;
+  days_to_expiry: number;
+}
+export const getExpiringBatches = (withinDays = 30, limit = 50): Promise<{ items: ExpiringBatch[] }> =>
+  request(`/inventory/expiring-batches?within_days=${withinDays}&limit=${limit}`);
 
 // Rollback — list real GitHub releases and check one tag's manifest
 // URL and database-schema compatibility. See rollback::list_releases /

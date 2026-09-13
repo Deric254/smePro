@@ -515,7 +515,7 @@ fn test_purchasing_import_creates_every_row_even_when_supplier_repeats() {
         &mut conn,
         &biz,
         &uid,
-        crate::receiving::ReceiveRequest { purchase_record_id: prior_id, quantity_received: None },
+        crate::receiving::ReceiveRequest { purchase_record_id: prior_id, quantity_received: None, unit_price: None, expiry_date: None },
     )
     .unwrap();
 

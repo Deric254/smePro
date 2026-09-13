@@ -120,6 +120,26 @@
 //! target is brand-new or already existed. See the check itself,
 //! right before the two UPDATEs it guards, for the full reasoning.
 
+//! BATCH REWRITE: the COST/ROUNDING/CONSISTENCY-CHECK paragraphs above
+//! describe this file's ORIGINAL, item-level weighted-average
+//! behavior — historical context, not the current implementation.
+//! Repack now treats consuming the source as a form of FEFO
+//! consumption (see `batches.rs`'s own module doc comment and decision
+//! #5 of the spec this implements): it draws from the source's live
+//! batches (soonest-expiring first), then legacy stock, exactly like a
+//! sale would, rather than reading one flat `unit_cost`. The units
+//! produced land in the target as a brand-new, independent batch — own
+//! cost (computed from exactly what this repack consumed), own price,
+//! own optional expiry — never blended into whatever the target
+//! already had. The rounding-reconciliation "Stock Revaluation"
+//! Bookkeeping post described above still exists and is still needed
+//! (dividing a consumed cost across a whole number of produced units
+//! still doesn't always land on an exact per-unit cent value), it's
+//! just scoped to this one new batch now rather than to the whole
+//! item's blended cost. The target Inventory item's own `unit_cost`/
+//! `unit_price` are never written by this file anymore — see
+//! `batches.rs`'s doc comment for why.
+//!
 use crate::crud;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -329,81 +349,98 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((target_name, target_current_qty, target_current_unit_cost, target_unit_price)) = target else {
+    let Some((target_name, target_current_qty, _target_current_unit_cost, target_unit_price)) = target else {
         return Err(anyhow!("target inventory item not found: {}", target_record_id));
     };
 
     let source_new_qty = source_current_qty - req.source_quantity;
+
+    // BATCH REWRITE: repack is a form of consumption, exactly like a
+    // sale — see batches.rs's module doc comment and decision #5 of
+    // the spec this implements. The source's stock is drawn via the
+    // same strict FEFO order a checkout would use (dated batches
+    // soonest-first, then undated batches, then legacy stock last),
+    // never a single flat `source_unit_cost` — a repack of an item
+    // that has more than one live batch now correctly attributes each
+    // slice of what it consumed to its own batch's own cost.
+    let source_portions = crate::batches::fefo_consume_in_tx(
+        &tx,
+        business_id,
+        &req.source_record_id,
+        req.source_quantity,
+        source_current_qty,
+        source_unit_cost,
+        source_unit_price,
+    )?;
+    // Exact — a sum of exact integer products, no rounding possible
+    // yet at this point (the rounding this function still has to
+    // guard against is the NEXT step: dividing this total across the
+    // discrete units actually produced).
+    let cost_consumed_from_source: i64 = source_portions.iter().map(|p| p.unit_cost * p.quantity).sum();
+    // What selling this exact consumed stock in bulk would have
+    // earned, at each portion's OWN price — more accurate than a
+    // single flat `source_unit_price` once a repack can span more than
+    // one batch.
+    let bulk_equivalent_value: i64 = source_portions.iter().map(|p| p.unit_price * p.quantity).sum();
+
     let target_new_qty = target_current_qty + req.target_quantity_produced;
 
-    // The real fix: without this, the target item's cost basis never
-    // reflects what was actually consumed to produce it — a dozen
-    // eggs bought for 300 broken into 12 single eggs would leave the
-    // "single egg" record at whatever cost it happened to have
-    // before (often 0, for a brand-new item), silently corrupting
-    // every margin/profit figure computed from it afterward. Instead:
-    // the total cost consumed from the source (source_quantity *
-    // source's own unit_cost) is distributed across the units
-    // produced, blended with whatever the target already had in
-    // stock at its existing cost — the exact same weighted-average
-    // formula receiving.rs uses for purchase orders, applied here to
-    // a repack instead. Integer cents throughout (see money.rs), so
-    // this is exact arithmetic; the one deliberate rounding point is
-    // the final division, rounded to the nearest cent rather than
-    // truncated, same as receiving.rs.
-    let cost_consumed_from_source = source_unit_cost * req.source_quantity;
-    let existing_target_value = target_current_qty * target_current_unit_cost;
-    // The exact, un-rounded total value the target record should now
-    // represent — everything below is reconciled against this number
-    // to the cent.
-    let numerator = existing_target_value + cost_consumed_from_source;
-    let target_new_unit_cost = if target_new_qty > 0 {
-        (numerator + target_new_qty / 2) / target_new_qty
+    // The real fix, same reasoning as before this rewrite, now scoped
+    // to a single NEW batch instead of a blended item-level cost —
+    // see decision #5 of the spec: the target gets its OWN batch, own
+    // cost, own expiry, never blended into whatever the target already
+    // had. `target_current_unit_cost`/existing target batches are
+    // completely untouched by this repack; this is purely the cost of
+    // the units THIS repack itself produced.
+    let numerator = cost_consumed_from_source;
+    let new_batch_unit_cost = if req.target_quantity_produced > 0 {
+        (numerator + req.target_quantity_produced / 2) / req.target_quantity_produced
     } else {
-        target_current_unit_cost // unreachable in practice (target_new_qty > 0 whenever target_quantity_produced > 0, already validated above), kept only so this can never divide by zero
+        0 // unreachable — target_quantity_produced > 0 already validated above
     };
 
-    // THE FIX: `target_new_qty * target_new_unit_cost` (what actually
-    // gets stored) is not guaranteed to equal `numerator` (what was
-    // actually consumed/already there) — rounding a blended per-unit
-    // cost to the nearest cent and multiplying back out can land a few
-    // cents above or below the exact value, in either direction.
-    // Positive here means the stored value came in LOWER than the true
-    // value consumed (a small loss that would otherwise vanish
-    // untracked); negative means it came in HIGHER (value that
-    // appeared from nowhere). Zero whenever target_new_qty divides
-    // numerator evenly — the common case for round conversion ratios.
-    let stored_target_value = target_new_qty * target_new_unit_cost;
-    let rounding_adjustment_cents = numerator - stored_target_value;
+    // THE FIX: `target_quantity_produced * new_batch_unit_cost` (what
+    // actually gets stored on the new batch) is not guaranteed to
+    // equal `numerator` (the exact value actually consumed from the
+    // source) — rounding a per-unit cost to the nearest cent and
+    // multiplying back out can land a few cents above or below.
+    // Positive means the new batch's stored value came in LOWER than
+    // what was actually consumed (an otherwise-untracked small loss);
+    // negative means it came in HIGHER (value from nowhere). Zero
+    // whenever the produced quantity divides the consumed value
+    // evenly — the common case for round conversion ratios.
+    let stored_batch_value = req.target_quantity_produced * new_batch_unit_cost;
+    let rounding_adjustment_cents = numerator - stored_batch_value;
 
-    // THE ACTUAL FIX Deric asked for (restored): the very same "never
-    // sell at a loss" rule `crud::create()`/`crud::update()` already
-    // hold every other cost-affecting write to. This was deliberately
-    // NOT enforced here for a time, on the reasoning that repack's
-    // cost is computed rather than typed, so blocking the write would
-    // hide the number a shopkeeper needs to see to re-price the
-    // target — but the explicit, current instruction is the opposite:
-    // the system must guarantee no item can ever end up priced below
-    // its own cost, full stop, repack included. Checked BEFORE either
-    // UPDATE below runs, so a rejected repack changes nothing at all —
-    // not even the source's stock — rather than leaving the source
-    // decremented with no matching target increase.
-    if target_unit_price < target_new_unit_cost {
-        // Format for the human reading this error — same fix as
-        // pos.rs's "cannot sell" message: `target_new_unit_cost`/
-        // `target_unit_price` stay raw integer cents everywhere else
-        // in this function, but printing those raw cents straight
-        // into the message (e.g. "11000" instead of "110.00") was
-        // exactly the bug — this message just never went through
-        // money::format_money like the others already did.
+    // This new batch's own selling price: for a brand-new target item,
+    // exactly the price supplied when it was created a few lines up
+    // (required, validated non-negative there). For an EXISTING
+    // target, the item's own current unit_price — same "existing
+    // item's price is its own, set through the ordinary edit form, not
+    // through a repack" rule this file has always held, just applied
+    // to the new batch's price instead of the whole item's price.
+    let new_batch_unit_price = if new_target_name.is_some() {
+        req.new_target_unit_price.unwrap()
+    } else {
+        target_unit_price
+    };
+
+    // THE ACTUAL FIX Deric asked for (restored), same rule as
+    // crud::create()/crud::update()/receiving.rs — held per BATCH now:
+    // a repack can never produce a batch priced below what it cost to
+    // produce. Checked BEFORE either UPDATE below runs, so a rejected
+    // repack changes nothing at all — not even the source's stock —
+    // rather than leaving the source decremented (and its batches
+    // already drawn down) with no matching target batch created.
+    if new_batch_unit_price < new_batch_unit_cost {
         let business_currency: String = tx
             .query_row("SELECT currency FROM businesses WHERE id = ?1", params![business_id], |r| r.get(0))
             .unwrap_or_else(|_| "USD".to_string());
-        let cost_display = crate::money::format_money(target_new_unit_cost, &business_currency);
-        let price_display = crate::money::format_money(target_unit_price, &business_currency);
+        let cost_display = crate::money::format_money(new_batch_unit_cost, &business_currency);
+        let price_display = crate::money::format_money(new_batch_unit_price, &business_currency);
         return Err(anyhow!(
-            "this repack would leave '{target_name}' costing {cost_display} per unit \
-             while it's still priced at {price_display} — raise the target's price to at \
+            "this repack would produce a batch of '{target_name}' costing {cost_display} per unit \
+             while it would be priced at {price_display} — raise the target's price to at \
              least {cost_display}, or adjust the repack quantities, before continuing"
         ));
     }
@@ -413,13 +450,27 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         params![source_new_qty, req.source_record_id, business_id],
     )?;
     tx.execute(
-        &format!("UPDATE {table} SET quantity = ?1, unit_cost = ?2, updated_at = datetime('now') WHERE id = ?3 AND business_id = ?4"),
-        params![target_new_qty, target_new_unit_cost, target_record_id, business_id],
+        &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
+        params![target_new_qty, target_record_id, business_id],
+    )?;
+
+    let repacked_at = chrono::Utc::now().to_rfc3339();
+    let new_batch_id = crate::batches::create_batch_in_tx(
+        &tx,
+        business_id,
+        &target_record_id,
+        None,
+        req.target_quantity_produced,
+        new_batch_unit_cost,
+        new_batch_unit_price,
+        None, // no expiry inherited from the source — the spec's default for this decision; a future pass could carry a source batch's own expiry through if that's wanted
+        &repacked_at,
+        Some(user_id),
     )?;
 
     // Never silently absorbed: whatever the rounding step couldn't
-    // represent exactly in the stock ledger gets posted to Bookkeeping
-    // as its own labeled entry, in the same transaction as the stock
+    // represent exactly in the new batch gets posted to Bookkeeping as
+    // its own labeled entry, in the same transaction as the stock
     // change itself — so the books and the stock ledger always
     // reconcile to the cent, and anyone can see exactly why. A loss
     // (stored value came in low) posts as an expense; a gain (stored
@@ -464,12 +515,12 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
 
     // The economics of breaking bulk, made visible rather than left
     // for someone to work out by hand: what selling the consumed
-    // source quantity in bulk would have earned, against what selling
-    // everything just produced will earn at the target's own price.
-    // Purely informational — computed from each item's current
-    // unit_price at this moment, never stored, never posted anywhere.
-    let bulk_equivalent_value = req.source_quantity * source_unit_price;
-    let repacked_realizable_value = req.target_quantity_produced * target_unit_price;
+    // source quantity would have earned (bulk_equivalent_value, now
+    // computed per-portion above), against what selling everything
+    // just produced will earn at the new batch's own price. Purely
+    // informational — computed at this moment, never stored, never
+    // posted anywhere.
+    let repacked_realizable_value = req.target_quantity_produced * new_batch_unit_price;
     let repack_profit_uplift = repacked_realizable_value - bulk_equivalent_value;
     let repack_margin_uplift_pct = if bulk_equivalent_value > 0 {
         Some((repack_profit_uplift as f64 / bulk_equivalent_value as f64) * 100.0)
@@ -482,24 +533,28 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         "source_name": source_name,
         "source_quantity_before": source_current_qty,
         "source_quantity_after": source_new_qty,
-        "source_unit_cost": source_unit_cost,
-        "source_unit_price": source_unit_price,
+        "source_portions": source_portions,
         "target_record_id": target_record_id,
         "target_created": new_target_name.is_some(),
         "target_name": target_name,
         "target_quantity_before": target_current_qty,
         "target_quantity_after": target_new_qty,
         "target_quantity_produced": req.target_quantity_produced,
-        "target_unit_cost_before": target_current_unit_cost,
-        "target_unit_cost_after": target_new_unit_cost,
-        "target_unit_price": target_unit_price,
-        // Reconciliation: exact value that went into the target record
-        // vs. what actually got stored after rounding, and the labeled
-        // adjustment (if any) that accounts for the difference. This
-        // triple should always satisfy: exact_value_consumed ==
-        // stored_target_value + rounding_adjustment_cents.
+        // NOTE: the target Inventory item's own unit_cost/unit_price
+        // are NOT touched by this repack (or by anything else, once
+        // any batch exists for an item) — see batches.rs's module doc
+        // comment. What this repack actually produced is entirely
+        // captured by the new batch below.
+        "new_batch_id": new_batch_id,
+        "new_batch_unit_cost": new_batch_unit_cost,
+        "new_batch_unit_price": new_batch_unit_price,
+        // Reconciliation: exact value consumed from the source vs.
+        // what actually got stored on the new batch after rounding,
+        // and the labeled adjustment (if any) that accounts for the
+        // difference. This triple should always satisfy:
+        // exact_value_consumed == stored_batch_value + rounding_adjustment_cents.
         "exact_value_consumed": numerator,
-        "stored_target_value": stored_target_value,
+        "stored_batch_value": stored_batch_value,
         "rounding_adjustment_cents": rounding_adjustment_cents,
         "rounding_adjustment_posted_to_bookkeeping": rounding_adjustment_cents != 0,
         // The profit case for repacking, at today's prices.
@@ -509,6 +564,7 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         "repack_margin_uplift_pct": repack_margin_uplift_pct,
         "notes": req.notes,
     });
+
 
     // Logged under BOTH records — this is what makes "nothing lost"
     // actually checkable from either direction later: looking up the

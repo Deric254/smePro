@@ -350,35 +350,9 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        let Some((name, current_qty, unit_price, unit_cost, sku)) = row else {
+        let Some((name, current_qty, legacy_unit_price, legacy_unit_cost, sku)) = row else {
             return Err(anyhow!("product not found: {}", item.inventory_record_id));
         };
-
-        // THE ACTUAL FIX Deric asked for: "the system must ensure no
-        // possibility of selling at a loss." Every write that can SET
-        // an item's cost or price (crud::create, crud::update, repack,
-        // receiving) already refuses to leave price under cost — this
-        // is the same rule held at the one place "selling" actually
-        // happens, as the last line of defense rather than trusting
-        // those upstream guards alone to have kept every item in a
-        // valid state forever. Checked before any write below, so a
-        // rejected sale changes nothing at all — not stock, not a
-        // sales record — same as every other rejection in this loop.
-        if unit_price < unit_cost {
-            // Format for the human reading this error — `unit_price`/
-            // `unit_cost` themselves stay raw integer cents everywhere
-            // else in this function; this is purely a display
-            // conversion at the point of surfacing the message, same
-            // as every other user-facing money string in the app goes
-            // through money::format_money / lib/money.ts's formatMoney
-            // rather than printing cents directly.
-            let price_display = crate::money::format_money(unit_price, &business_currency);
-            let cost_display = crate::money::format_money(unit_cost, &business_currency);
-            return Err(anyhow!(
-                "cannot sell '{name}': priced at {price_display} but costs {cost_display} — this would \
-                 sell at a loss. Raise the price in Inventory first."
-            ));
-        }
 
         if current_qty < item.quantity && !req.allow_oversell {
             return Err(anyhow!(
@@ -387,148 +361,206 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             ));
         }
         let new_qty = current_qty - item.quantity;
+
+        // BATCH REWRITE: a cart line no longer draws from one single
+        // (price, cost) pair — it draws from whichever batches are
+        // next in FEFO order, then legacy stock, and may span several
+        // of them. `batches::fefo_consume_in_tx` returns one priced,
+        // costed portion per source it actually drew from (almost
+        // always exactly one, in the common case of a line that fits
+        // inside its front batch) and has already decremented each
+        // batch's own `quantity_remaining` by the time it returns —
+        // this loop only still owns the single `Inventory.quantity`
+        // update below, same as before batches existed.
+        //
+        // Oversell (allow_oversell) is a pre-existing feature this
+        // rewrite has to keep working exactly as before: FEFO
+        // consumption can only ever draw from stock that genuinely
+        // exists (batches + legacy), so it's only ever asked for
+        // `min(item.quantity, current_qty)` here. Whatever's left
+        // beyond that — stock that, by definition, isn't backed by
+        // any batch or any legacy unit — is priced/costed at the
+        // item's own legacy unit_price/unit_cost, exactly the single
+        // basis an oversold line always used before this feature
+        // existed.
+        let coverable_qty = item.quantity.min(current_qty.max(0));
+        let mut portions: Vec<crate::batches::ConsumedPortion> = if coverable_qty > 0 {
+            crate::batches::fefo_consume_in_tx(
+                &tx,
+                business_id,
+                &item.inventory_record_id,
+                coverable_qty,
+                current_qty,
+                legacy_unit_cost,
+                legacy_unit_price,
+            )?
+        } else {
+            Vec::new()
+        };
+        let oversold_qty = item.quantity - coverable_qty;
+        if oversold_qty > 0 {
+            portions.push(crate::batches::ConsumedPortion {
+                from: crate::batches::ConsumedFrom::Legacy,
+                quantity: oversold_qty,
+                unit_cost: legacy_unit_cost,
+                unit_price: legacy_unit_price,
+            });
+        }
+
         tx.execute(
             &format!("UPDATE {inventory_table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
             params![new_qty, item.inventory_record_id, business_id],
         )?;
 
-        // Exact — integer cents times an integer quantity is still an
-        // exact integer, no rounding step needed or allowed here.
-        let original_line_total: i64 = unit_price * item.quantity;
+        // Per-portion totals, summed into this line's own totals below
+        // — see this block's own comment further down for why each
+        // portion gets its own sales row instead of being blended into
+        // one.
+        let mut line_original_total: i64 = 0;
+        let mut line_discount_total: i64 = 0;
+        let mut line_revenue_total: i64 = 0;
+        let mut line_cost_total: i64 = 0;
+        let mut portion_details: Vec<Value> = Vec::with_capacity(portions.len());
+        let mut sale_ids: Vec<String> = Vec::with_capacity(portions.len());
 
-        // THE ACTUAL FIX Deric asked for (discounts): applied
-        // identically to every line as a percentage of that line's own
-        // original total — mathematically the same result as
-        // discounting the whole cart's total at once (summing first
-        // then discounting, or discounting then summing, gives the same
-        // answer for a flat percentage), so this doesn't need a second
-        // "spread the discount across lines" step or its own rounding
-        // scheme. Reuses the exact same crate::money::apply_rate helper
-        // receipt.rs's own tax calculation already relies on, rather
-        // than writing a second, slightly different way to apply a
-        // percentage to a money amount.
-        let discount_amount: i64 = crate::money::apply_rate(original_line_total, discount_pct / 100.0);
-        let line_total: i64 = original_line_total - discount_amount;
-
-        // A discount is a SECOND, independent way this exact line could
-        // end up selling at a loss, on top of the plain listed-price
-        // check just above — that one only catches an item mispriced to
-        // begin with; this one catches a correctly-priced item that a
-        // discount pushes under cost anyway. Compared as line TOTALS,
-        // not per-unit prices, specifically so this never needs its own
-        // division/rounding rule distinct from the one above — no
-        // override exists for this, same as the check above: a sale
-        // that would go below cost is rejected outright, full stop.
-        let cost_total_for_check: i64 = unit_cost * item.quantity;
-        if line_total < cost_total_for_check {
-            let discounted_display = crate::money::format_money(line_total, &business_currency);
-            let cost_display = crate::money::format_money(cost_total_for_check, &business_currency);
-            return Err(anyhow!(
-                "cannot sell '{name}' at a {discount_pct}% discount: {} × {discounted_display} would be \
-                 below its {cost_display} cost. Lower the discount or raise the price first.",
-                item.quantity
-            ));
-        }
-
-        subtotal += line_total;
-        total_discount += discount_amount;
-
-        // THE ACTUAL FIX Deric asked for: snapshot what this item
-        // actually cost, right now, at the exact moment it's sold —
-        // `unit_cost` read fresh from the same row this line's price
-        // and stock deduction just came from, so it's always whatever
-        // Inventory's real weighted-average cost is at this instant,
-        // whether that cost basis came from a straight Purchasing
-        // receipt or from a repack (repack.rs already keeps
-        // `unit_cost` exact — see its own doc comment on rounding —
-        // so a repacked item's sale is costed correctly with zero
-        // special-casing needed here). Before this, Sales had no cost
-        // concept at all: "profit" could only ever be revenue, and a
-        // later price change on the item would have silently rewritten
-        // the apparent cost of every past sale of it, retroactively,
-        // every time the report ran. This makes every sale's margin a
-        // fixed historical fact from the moment it happens, immune to
-        // whatever Inventory's cost does afterward. See profit.rs for
-        // what reads this, and refund.rs for how a return reverses it.
-        let cost_total: i64 = unit_cost * item.quantity;
-
-        let mut record: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-        record.insert("item_name".into(), json!(name));
-        record.insert("quantity".into(), json!(item.quantity));
-        record.insert("revenue".into(), json!(line_total));
-        record.insert("unit_price".into(), json!(unit_price));
-        record.insert("order_id".into(), json!(order_id));
-        record.insert("cost_at_sale".into(), json!(cost_total));
-        // The discount actually applied to this exact line, frozen at
-        // sale time — see v23_sales_discount_amount's own comment on
-        // why this needs to be its own field rather than derived later
-        // from unit_price and revenue (refund.rs mutates revenue
-        // directly, which would make that derivation wrong after any
-        // refund).
-        record.insert("discount_amount".into(), json!(discount_amount));
-        // THE BUG THIS FIXES: `sale_date` is a real, declared field on
-        // the Sales schema (sales.json) that nothing ever actually
-        // wrote to — not checkout, not service_sale.rs, not Excel
-        // import. Every sale ever made through checkout had it
-        // silently blank. `created_at` (set automatically by
-        // crud::insert_validated_record below) already records exactly
-        // when this happened, but it's a full timestamp, not the same
-        // thing as this field's own documented purpose — a plain date
-        // the business can show, filter, or edit directly without
-        // pulling apart a timestamp. Same `today` computation
-        // http_api.rs and debt_settlement.rs already use elsewhere in
-        // this codebase.
-        record.insert("sale_date".into(), json!(chrono::Utc::now().date_naive().to_string()));
-        if let Some(c) = &req.customer {
-            record.insert("customer".into(), json!(c));
-        }
-        if let Some(phone) = &req.customer_phone {
-            // Same normalization as customers::find_or_create — this
-            // field is what customers::list/detail JOIN against
-            // customers.phone to compute lifetime value. Storing
-            // anything other than the identical normalized form here
-            // would silently break that join for this specific sale,
-            // even though the customer record itself was created
-            // correctly — the sale would just never show up in that
-            // customer's history or LTV total.
-            let normalized = crate::customers::normalize_phone(phone);
-            if !normalized.is_empty() {
-                record.insert("customer_phone".into(), json!(normalized));
+        for portion in &portions {
+            // THE ACTUAL FIX Deric asked for: "the system must ensure
+            // no possibility of selling at a loss" — held per portion
+            // now, not per line, since each portion can carry a
+            // different price/cost (a batch's own price/cost is
+            // already guaranteed price >= cost at the point it was
+            // created or last edited — see batches::create_batch_in_tx
+            // / update_batch_price — so this is defense-in-depth here,
+            // the same role it always played for the single-price
+            // case this replaced).
+            if portion.unit_price < portion.unit_cost {
+                let price_display = crate::money::format_money(portion.unit_price, &business_currency);
+                let cost_display = crate::money::format_money(portion.unit_cost, &business_currency);
+                return Err(anyhow!(
+                    "cannot sell '{name}': priced at {price_display} but costs {cost_display} — this would \
+                     sell at a loss. Raise the price first."
+                ));
             }
-        }
-        if let Some(p) = &req.payment_method {
-            record.insert("payment_method".into(), json!(p));
-        }
-        for f in &sales_module.fields {
-            if !record.contains_key(&f.name) {
-                if let Some(d) = &f.default {
-                    record.insert(f.name.clone(), d.clone());
+
+            let portion_original_total: i64 = portion.unit_price * portion.quantity;
+            let portion_discount: i64 = crate::money::apply_rate(portion_original_total, discount_pct / 100.0);
+            let portion_revenue: i64 = portion_original_total - portion_discount;
+            let portion_cost_total: i64 = portion.unit_cost * portion.quantity;
+
+            // Same discount-pushes-below-cost guard as before, held
+            // per portion now for the same reason as the check above.
+            if portion_revenue < portion_cost_total {
+                let discounted_display = crate::money::format_money(portion_revenue, &business_currency);
+                let cost_display = crate::money::format_money(portion_cost_total, &business_currency);
+                return Err(anyhow!(
+                    "cannot sell '{name}' at a {discount_pct}% discount: {} × {discounted_display} would be \
+                     below its {cost_display} cost. Lower the discount or raise the price first.",
+                    portion.quantity
+                ));
+            }
+
+            line_original_total += portion_original_total;
+            line_discount_total += portion_discount;
+            line_revenue_total += portion_revenue;
+            line_cost_total += portion_cost_total;
+
+            let source_batch_id = portion.source_batch_id().map(|s| s.to_string());
+
+            // One sales row PER PORTION, not one per cart line — see
+            // decision #3 of the spec this implements: a sale spanning
+            // more than one batch needs each slice priced/costed/
+            // attributed to its own batch, so refund.rs can later
+            // credit the exact right batch back (see its own
+            // source_batch_id handling), and so profit.rs's per-sale
+            // cost_at_sale stays an exact historical fact rather than
+            // a blended approximation. In the overwhelmingly common
+            // case (a line that fits inside one batch, or inside
+            // legacy stock alone), this is exactly one row, exactly as
+            // before this feature existed.
+            let mut record: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+            record.insert("item_name".into(), json!(name));
+            record.insert("quantity".into(), json!(portion.quantity));
+            record.insert("revenue".into(), json!(portion_revenue));
+            record.insert("unit_price".into(), json!(portion.unit_price));
+            record.insert("order_id".into(), json!(order_id));
+            record.insert("cost_at_sale".into(), json!(portion_cost_total));
+            record.insert("discount_amount".into(), json!(portion_discount));
+            record.insert("sale_date".into(), json!(chrono::Utc::now().date_naive().to_string()));
+            if let Some(batch_id) = &source_batch_id {
+                record.insert("source_batch_id".into(), json!(batch_id));
+            }
+            if let Some(c) = &req.customer {
+                record.insert("customer".into(), json!(c));
+            }
+            if let Some(phone) = &req.customer_phone {
+                let normalized = crate::customers::normalize_phone(phone);
+                if !normalized.is_empty() {
+                    record.insert("customer_phone".into(), json!(normalized));
                 }
             }
+            if let Some(p) = &req.payment_method {
+                record.insert("payment_method".into(), json!(p));
+            }
+            for f in &sales_module.fields {
+                if !record.contains_key(&f.name) {
+                    if let Some(d) = &f.default {
+                        record.insert(f.name.clone(), d.clone());
+                    }
+                }
+            }
+            sales_module.validate(&record)?;
+            crate::reference_data::validate_field_references(&tx, business_id, &sales_module, &record)?;
+            let sale_id = crud::insert_validated_record_by(&tx, business_id, &sales_module, &record, Some(user_id))?;
+
+            portion_details.push(json!({
+                "source": portion.from,
+                "quantity": portion.quantity,
+                "unit_price": portion.unit_price,
+                "unit_cost": portion.unit_cost,
+                "revenue": portion_revenue,
+                "discount_amount": portion_discount,
+                "sale_id": sale_id,
+            }));
+            sale_ids.push(sale_id);
+
+            // One invoice line item per portion too, so the
+            // auto-generated invoice reflects exactly what was
+            // charged, at whatever price each slice actually sold at
+            // — never a single blended per-unit price standing in for
+            // what were actually two (or more) different prices.
+            let description = if portions.len() > 1 {
+                match &portion.from {
+                    crate::batches::ConsumedFrom::Batch { expiry_date: Some(exp), .. } => format!("{name} (batch exp {exp})"),
+                    crate::batches::ConsumedFrom::Batch { expiry_date: None, .. } => format!("{name} (batch)"),
+                    crate::batches::ConsumedFrom::Legacy => format!("{name} (existing stock)"),
+                }
+            } else {
+                name.clone()
+            };
+            invoice_items.push(crate::invoice::InvoiceItem {
+                description,
+                quantity: portion.quantity,
+                unit_price: portion.unit_price,
+            });
         }
-        // Same validation a manually-typed sale goes through — no
-        // special-casing for POS-originated records.
-        sales_module.validate(&record)?;
-        crate::reference_data::validate_field_references(&tx, business_id, &sales_module, &record)?;
-        let sale_id = crud::insert_validated_record_by(&tx, business_id, &sales_module, &record, Some(user_id))?;
+
+        subtotal += line_revenue_total;
+        total_discount += line_discount_total;
 
         lines.push(json!({
             "sku": sku,
             "name": name,
             "quantity": item.quantity,
-            "unit_price": unit_price,
-            "line_total": line_total,
-            "discount_amount": discount_amount,
-            "unit_cost": unit_cost,
-            "cost_total": cost_total,
+            "unit_price": if item.quantity > 0 { line_original_total / item.quantity } else { 0 },
+            "line_total": line_revenue_total,
+            "discount_amount": line_discount_total,
+            "unit_cost": if item.quantity > 0 { line_cost_total / item.quantity } else { 0 },
+            "cost_total": line_cost_total,
             "remaining_stock": new_qty,
-            "sale_id": sale_id,
+            "sale_id": sale_ids.first().cloned(),
+            "sale_ids": sale_ids,
+            "batches": portion_details,
         }));
-        invoice_items.push(crate::invoice::InvoiceItem {
-            description: name,
-            quantity: item.quantity,
-            unit_price,
-        });
     }
 
     // If this is a credit sale, the debt is created here — still
