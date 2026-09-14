@@ -397,6 +397,48 @@ pub fn import(
         // already-received checks in the `Some(id)` branch below).
         let explicitly_provided: std::collections::HashSet<String> = record.keys().cloned().collect();
 
+        // THE BUG THIS FIXES: whether this row is an UPDATE to an
+        // existing record has to be known before validation runs, not
+        // just before the final Some/None branch below — a correction
+        // row (like the ones the `Some(id)` branch already handles
+        // leniently) is only ever going to be sent through
+        // `crud::update()`'s own `validate_partial` PATCH semantics,
+        // which — same as any single-record PATCH — never requires a
+        // required-with-no-default field (`purchasing.unit_price`,
+        // for one) to be present just because the row didn't happen to
+        // touch it. The full `module.validate(&record)` call further
+        // down used to run unconditionally, before this was known,
+        // which meant a hand-built correction sheet that legitimately
+        // omitted an untouched required-no-default column (exactly the
+        // scenario this whole importer exists to support — see the
+        // `Some(id)` branch's own comment on why a correction sheet
+        // "has no reason to carry every column the module defines")
+        // was rejected with a "missing required field" error before it
+        // ever reached the lenient handling that branch provides.
+        //
+        // Computed here, from the row's own raw cells (before the
+        // default-fill loop below can insert a defaulted or
+        // placeholder value for `key_field` itself, which would make a
+        // blank "new rows" template's `po_number`/`entry_number`
+        // column look like a real key to match against): only
+        // attempted when the sheet's own cells actually gave this row
+        // a value for `key_field` at all — a blank-template create row
+        // never does, so `existing_id` correctly stays `None` and gets
+        // the full, strict validation a genuinely new record needs.
+        // Reused, unchanged, by the Some/None branch at the bottom of
+        // this loop — computing it twice (once here, once there, as
+        // this used to) risked the two disagreeing if anything between
+        // them ever changed `record`'s value for `key_field`.
+        let existing_id: Option<String> = if key_field_is_unique && explicitly_provided.contains(key_field) {
+            record
+                .get(key_field)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .and_then(|kv| find_existing_by_key(&tx, business_id, module, key_field, &kv).ok().flatten())
+        } else {
+            None
+        };
+
         for f in &module.fields {
             if !record.contains_key(&f.name) {
                 if let Some(d) = &f.default {
@@ -439,7 +481,15 @@ pub fn import(
             record.insert("entry_number".to_string(), json!("PENDING"));
         }
 
-        if let Err(e) = module.validate(&record) {
+        // Full `validate()` (every required field must be present) for
+        // a genuinely new record; the same lenient `validate_partial()`
+        // `crud::update()` itself uses for a PATCH when this row is
+        // matching an existing one — see the comment on `existing_id`'s
+        // computation above for why this distinction has to be made
+        // before validation, not after.
+        let validate_result =
+            if existing_id.is_some() { module.validate_partial(&record) } else { module.validate(&record) };
+        if let Err(e) = validate_result {
             errors.push(json!({"row": row_num, "error": e.to_string()}));
             continue;
         }
@@ -574,24 +624,14 @@ pub fn import(
             }
         }
 
-        // See the `key_field_is_unique` comment above `import()`'s
-        // header check: matching against anything other than a truly
-        // unique field isn't a stricter-but-imperfect check, it's
-        // actively wrong, so it isn't attempted at all — `existing_id`
-        // just stays `None` and this row always creates. This is what
-        // makes a Purchasing (or any no-unique-field module) import
-        // always append new rows, matching what re-uploading a
-        // transaction log should actually do.
-        let existing_id = if key_field_is_unique {
-            record
-                .get(key_field)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .and_then(|kv| find_existing_by_key(&tx, business_id, module, key_field, &kv).ok().flatten())
-        } else {
-            None
-        };
-
+        // `existing_id` was already resolved above, before validation —
+        // see its own comment for why. Matching against anything other
+        // than a truly unique field isn't attempted at all (see the
+        // `key_field_is_unique` comment above `import()`'s header
+        // check), so a no-unique-field module (Purchasing on a blank
+        // template, or any future module in the same shape) always
+        // gets `None` here and every row creates, matching what
+        // re-uploading a transaction log should actually do.
         match existing_id {
             Some(id) => {
                 // THE BUG THIS FIXES: this row is an UPDATE to an

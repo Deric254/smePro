@@ -25,12 +25,29 @@ fn test_excel_import_parses_money_field_as_integer_cents() {
     // Proves a real gap is closed: cell_to_json had no "money" case at
     // all before this fix, so every money-field cell fell through to
     // a generic branch that produced a JSON STRING (e.g. "24.50")
-    // instead of an integer — which module.validate() then correctly
-    // rejected, meaning every row with a money value failed to import.
+    // instead of an integer — which module.validate()/validate_partial()
+    // then correctly rejected, meaning every row with a money value
+    // failed to import.
+    //
+    // Exercised here against an UPDATE to an item that already exists
+    // (seeded directly, not via this importer), not a brand-new row:
+    // a brand-new inventory row is deliberately forced to
+    // unit_cost/unit_price 0 on creation, same as crud::create() (see
+    // excel_import.rs's own comment on that None-branch block, and
+    // test_crud_create_forces_inventory_price_to_zero) — real price
+    // only ever enters through a batch (receiving.rs::receive()), so a
+    // create-path test can never actually observe cell_to_json's money
+    // parsing surviving into the stored row. An update is the one path
+    // where inventory.unit_cost/unit_price genuinely are writable
+    // (is_update_blocked_field has no special case for them), which is
+    // exactly what this test needs to prove the parsing itself is
+    // correct.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
     let module = crate::crud::load_module(&conn, &biz, "inventory").unwrap();
+
+    seed_inventory_item(&conn, &biz, "FLOUR-001", "Flour", 10, 0, 0);
 
     let xlsx = build_xlsx(
         &["sku", "name", "quantity", "unit_cost", "unit_price"],
@@ -38,7 +55,7 @@ fn test_excel_import_parses_money_field_as_integer_cents() {
     );
 
     let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "sku").unwrap();
-    assert_eq!(result.created, 1);
+    assert_eq!(result.updated, 1);
     assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
 
     let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
