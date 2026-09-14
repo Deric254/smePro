@@ -803,6 +803,34 @@ pub fn import(
                         }));
                         continue;
                     }
+                    // The loop above only ever lets these three fields
+                    // through when each one is either absent from this
+                    // row or equal to what's already stored — anything
+                    // that actually differed has already been rejected
+                    // and `continue`d past, above. But `crud::update()`
+                    // enforces its own version of this same freeze
+                    // (PURCHASING_FROZEN_AFTER_RECEIPT, see crud.rs) by
+                    // presence alone, with no way to tell "sent but
+                    // unchanged" from "sent and changed" — it wasn't
+                    // written to, since its only other caller (the
+                    // single-record PATCH form) never sends a field
+                    // the user didn't actually mean to edit. A bulk
+                    // re-upload isn't so selective: an
+                    // already-received order's own template still has
+                    // quantity/unit_cost/unit_price columns, so a
+                    // correction sheet that carries them through
+                    // unchanged (the ordinary case just validated
+                    // above) would otherwise still hit crud::update's
+                    // blanket presence check and fail a row this
+                    // importer just finished proving was fine. Strip
+                    // them here, once they're confirmed unchanged, so
+                    // crud::update only ever sees these three fields
+                    // when they're actually absent on a received order.
+                    if already_received {
+                        for field in ["quantity", "unit_cost", "unit_price"] {
+                            record.remove(field);
+                        }
+                    }
                 }
 
                 // `inventory`'s `quantity` is deliberately NOT filtered
