@@ -359,9 +359,11 @@ export interface StockTakeCloseResult {
   stock_take_id: string;
   items_counted: number;
   items_skipped: number;
+  items_needing_purchasing: number;
   total_variance_units: number;
   adjustments: { inventory_record_id: string; item_name: string; expected_qty: number; counted_qty: number; variance: number }[];
   skipped: { inventory_record_id: string; item_name: string; expected_qty: number }[];
+  needs_purchasing: { inventory_record_id: string; item_name: string; expected_qty: number; counted_qty: number; variance: number }[];
 }
 export const initiateStockTake = (): Promise<StockTake> =>
   request('/inventory/stocktake/initiate', { method: 'POST' });

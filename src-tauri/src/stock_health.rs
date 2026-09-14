@@ -60,16 +60,37 @@ pub fn slow_movers(
     let stale_after_days = stale_after_days.clamp(1, 365);
     let limit = limit.clamp(1, 100);
 
+    // Value at risk has to be blended, not a single flat unit_cost ×
+    // quantity: an item's on-hand quantity can be part live-batch
+    // stock (each batch at its own recorded unit_cost) and part
+    // legacy stock (Inventory's own frozen unit_cost) at the same
+    // time — exactly the legacy/batch split batches.rs computes as
+    // `(i.quantity - live_batches_total).max(0)` (see that file's own
+    // doc comment). Reading i.unit_cost alone for the whole quantity
+    // silently mispriced any item that had ever received a batch at a
+    // different cost than its original legacy figure.
     let sql = format!(
-        "WITH per_item AS (
-             SELECT i.id, i.name, i.quantity, i.unit_cost, MAX(s.created_at) AS last_sale_at
+        "WITH batch_totals AS (
+             SELECT inventory_record_id,
+                    SUM(quantity_remaining) AS batches_qty,
+                    SUM(quantity_remaining * unit_cost) AS batches_value
+             FROM inventory_batches
+             WHERE business_id = ?1 AND deleted_at IS NULL
+             GROUP BY inventory_record_id
+         ),
+         per_item AS (
+             SELECT i.id, i.name, i.quantity, i.unit_cost,
+                    COALESCE(bt.batches_qty, 0) AS batches_qty,
+                    COALESCE(bt.batches_value, 0) AS batches_value,
+                    MAX(s.created_at) AS last_sale_at
              FROM {inv_table} i
+             LEFT JOIN batch_totals bt ON bt.inventory_record_id = i.id
              LEFT JOIN {sales_table} s
                ON s.business_id = i.business_id AND s.item_name = i.name AND s.deleted_at IS NULL
              WHERE i.business_id = ?1 AND i.deleted_at IS NULL AND i.quantity > 0
              GROUP BY i.id
          )
-         SELECT name, quantity, unit_cost, last_sale_at,
+         SELECT name, quantity, unit_cost, batches_qty, batches_value, last_sale_at,
                 CASE WHEN last_sale_at IS NULL THEN NULL
                      ELSE CAST(julianday(?2) - julianday(last_sale_at) AS INTEGER) END AS days_since
          FROM per_item
@@ -82,12 +103,16 @@ pub fn slow_movers(
     let rows = stmt.query_map(params![business_id, today, stale_after_days, limit], |r| {
         let quantity: f64 = r.get(1)?;
         let unit_cost: i64 = r.get::<_, Option<i64>>(2)?.unwrap_or(0);
+        let batches_qty: f64 = r.get(3)?;
+        let batches_value: i64 = r.get(4)?;
+        let legacy_qty = (quantity - batches_qty).max(0.0);
+        let legacy_value = (legacy_qty * unit_cost as f64).round() as i64;
         Ok(SlowMover {
             item_name: r.get(0)?,
             quantity,
-            value_at_risk_cents: (quantity * unit_cost as f64).round() as i64,
-            last_sale_at: r.get(3)?,
-            days_since_last_sale: r.get(4)?,
+            value_at_risk_cents: batches_value + legacy_value,
+            last_sale_at: r.get(5)?,
+            days_since_last_sale: r.get(6)?,
         })
     })?;
 
@@ -221,11 +246,32 @@ pub fn unpriced_items(
     let inv_table = inventory_module.table_name();
     let limit = limit.clamp(1, 500);
 
+    // Flag on the live front-of-queue cost/price (same FEFO join
+    // pos.rs::lookup_products uses), not the raw legacy columns: an
+    // item created at $0 that has only ever received stock via
+    // batches can have its legacy unit_cost/unit_price frozen at 0
+    // forever while a real, correctly-priced batch is what's actually
+    // selling. Checking the legacy columns directly flagged that item
+    // as unpriced even while it was pricing sales correctly.
+    let fefo = crate::batches::FEFO_ORDER_BY;
     let sql = format!(
-        "SELECT name, quantity, unit_cost, unit_price
-         FROM {inv_table}
-         WHERE business_id = ?1 AND deleted_at IS NULL AND (unit_cost = 0 OR unit_price = 0)
-         ORDER BY name ASC
+        "WITH front_batch AS (
+            SELECT inventory_record_id, unit_cost, unit_price,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY inventory_record_id
+                       ORDER BY {fefo}
+                   ) AS rn
+            FROM inventory_batches
+            WHERE business_id = ?1 AND deleted_at IS NULL AND quantity_remaining > 0
+         )
+         SELECT i.name, i.quantity,
+                COALESCE(fb.unit_cost, i.unit_cost) AS unit_cost,
+                COALESCE(fb.unit_price, i.unit_price) AS unit_price
+         FROM {inv_table} i
+         LEFT JOIN front_batch fb ON fb.inventory_record_id = i.id AND fb.rn = 1
+         WHERE i.business_id = ?1 AND i.deleted_at IS NULL
+           AND (COALESCE(fb.unit_cost, i.unit_cost) = 0 OR COALESCE(fb.unit_price, i.unit_price) = 0)
+         ORDER BY i.name ASC
          LIMIT ?2"
     );
 
@@ -254,22 +300,24 @@ pub fn unpriced_items(
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
-/// Purchasing order lines recorded with a zero unit_cost. Purchasing
-/// has no unit_price field to compare against (it's a buying record,
-/// not a selling one), and its own `unit_cost` floor is `min: 0`, not
-/// `min: 1` — a genuinely free/donated delivery is real, legitimate
-/// data, so this stays a report, not a hard block (same choice as
-/// unpriced_items above, same reasoning).
+/// Purchasing order lines recorded with a zero unit_cost. Since
+/// v31_purchasing_unit_price, a PO's own `unit_price` is validated
+/// against its `unit_cost` at creation (`min_field` — price can never
+/// be entered below cost), so a $0 price can only ever exist on a row
+/// that already has a $0 cost too — checking `unit_cost = 0` alone
+/// still catches every zero-priced row as well, nothing slips through
+/// by only naming one field here. `unit_cost`'s own floor is `min: 0`,
+/// not `min: 1` — a genuinely free/donated delivery is real,
+/// legitimate data, so this stays a report, not a hard block (same
+/// choice as unpriced_items above, same reasoning).
 ///
-/// Why this matters beyond Purchasing itself: `receiving.rs`'s
-/// weighted-average cost recalculation folds a received PO's
-/// unit_cost straight into the matching Inventory item's cost basis.
-/// A $0 purchase — typo'd or genuine — pulls that cost basis toward
-/// zero, which can make Inventory's own "price can't be below cost"
-/// guard nearly meaningless on that item afterward (almost any price
-/// clears an almost-zero cost). `received` is included in the result
-/// so it's clear whether that cost-basis effect has already happened
-/// for a given row, or the order is still pending.
+/// Why this matters beyond Purchasing itself: `receiving.rs` creates
+/// a batch at exactly this PO's own unit_cost — a $0 purchase (typo'd
+/// or genuine) creates a $0-cost batch, which can make that batch's
+/// own "price can't be below cost" guard nearly meaningless (almost
+/// any price clears an almost-zero cost). `received` is included in
+/// the result so it's clear whether that's already happened for a
+/// given row, or the order is still pending.
 #[derive(Debug, Serialize)]
 pub struct ZeroCostPurchase {
     pub po_number: String,

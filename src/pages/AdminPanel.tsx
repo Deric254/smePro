@@ -938,6 +938,7 @@ function SettingsTab() {
   const [error, setError] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'none' | 'error' | 'preview'>('idle');
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+  const [updateErrorDetail, setUpdateErrorDetail] = useState<string | null>(null);
   const [businessType, setBusinessType] = useState('retail');
   const [changingType, setChangingType] = useState(false);
   const [typeChangedModules, setTypeChangedModules] = useState<string[] | null>(null);
@@ -986,6 +987,7 @@ function SettingsTab() {
 
   async function checkForUpdates() {
     setUpdateStatus('checking');
+    setUpdateErrorDetail(null);
     try {
       const { isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) {
@@ -1004,9 +1006,21 @@ function SettingsTab() {
       } else {
         setUpdateStatus('none');
       }
-    } catch {
-      // Genuinely running in the desktop app but the check itself
-      // failed (e.g. no network, update server unreachable).
+    } catch (err) {
+      // THE ACTUAL FIX Deric asked for: this used to be a bare `catch
+      // {}` that discarded whatever the updater plugin actually threw
+      // and always showed the same generic "no connection to the
+      // update server" message — indistinguishable from a real network
+      // outage whether the true cause was a dropped connection, a 404
+      // because no release has ever actually been published yet (see
+      // the release workflow's own "publish-release" job — this is
+      // exactly the failure mode that was happening, on every version,
+      // for every user, until that job existed), a signature mismatch,
+      // or anything else. Logged to the console and kept for display
+      // below, so the real cause is never silently lost again.
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error('Update check failed:', err);
+      setUpdateErrorDetail(detail);
       setUpdateStatus('error');
     }
   }
@@ -1134,7 +1148,12 @@ function SettingsTab() {
         )}
         {updateStatus === 'error' && (
           <div style={{ marginTop: '0.7rem', color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
-            Couldn't check right now — no connection to the update server. Try again shortly.
+            Couldn't check for updates.
+            {updateErrorDetail && (
+              <div style={{ marginTop: '0.3rem', fontFamily: 'monospace', fontSize: '0.78rem', color: 'var(--ink-faint, var(--ink-soft))' }}>
+                {updateErrorDetail}
+              </div>
+            )}
           </div>
         )}
         {updateStatus === 'preview' && (

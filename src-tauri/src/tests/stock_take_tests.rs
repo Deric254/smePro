@@ -296,6 +296,36 @@ fn test_history_lists_past_stock_takes_most_recent_first() {
 }
 
 #[test]
+fn test_close_does_not_apply_a_positive_variance_and_reports_it_separately() {
+    // THE ACTUAL FIX Deric asked for: "found" stock (counted > expected)
+    // must never be silently priced at nothing. This is the negative
+    // test to the shrinkage test above — same feature, opposite
+    // direction, must NOT touch quantity.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let rice_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
+
+    // Physically found MORE than the system expected.
+    crate::stock_take::record_count(
+        &conn, &biz, &uid,
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 47 },
+    ).unwrap();
+
+    let summary = crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+    assert_eq!(summary["items_counted"].as_i64().unwrap(), 0, "a positive variance is never counted as an applied adjustment");
+    assert_eq!(summary["items_needing_purchasing"].as_i64().unwrap(), 1);
+    assert_eq!(summary["total_variance_units"].as_i64().unwrap(), 0, "nothing was actually applied, so total variance stays 0");
+
+    let rice = get_item(&conn, &biz, &uid, &rice_id);
+    assert_eq!(rice["quantity"].as_i64().unwrap(), 40, "quantity must be completely untouched by a rejected positive variance");
+}
+
+#[test]
 fn test_staff_role_cannot_initiate_a_stock_take() {
     // "stocktake" is granted to Owner/Manager by default, not Staff —
     // matching the same trust boundary as sell/receive/repack.

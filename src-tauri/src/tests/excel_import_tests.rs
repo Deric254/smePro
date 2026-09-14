@@ -54,13 +54,12 @@ fn test_excel_import_updates_existing_record_by_key_field() {
     let (uid, _) = test_owner(&mut conn, &biz);
     let module = crate::crud::load_module(&conn, &biz, "inventory").unwrap();
 
-    let mut record = serde_json::Map::new();
-    record.insert("sku".into(), json!("RICE-001"));
-    record.insert("name".into(), json!("Rice"));
-    record.insert("quantity".into(), json!(5));
-    record.insert("unit_cost".into(), json!(1000));
-    record.insert("unit_price".into(), json!(1500));
-    crate::crud::create(&conn, &biz, &uid, "inventory", &record).unwrap();
+    // Seeded directly, not via crud::create(): create() now forces a
+    // brand-new item's unit_cost/unit_price to 0 (real price only
+    // enters through a purchase — see crud.rs), so this needs to seed
+    // a genuinely nonzero starting price to prove the reimport doesn't
+    // wipe it.
+    seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 5, 1000, 1500);
 
     // Re-importing the same SKU with a corrected price must UPDATE the
     // existing row, not create a duplicate.
@@ -96,13 +95,11 @@ fn test_excel_import_stock_take_sheet_omitting_cost_and_price_leaves_them_untouc
     let (uid, _) = test_owner(&mut conn, &biz);
     let module = crate::crud::load_module(&conn, &biz, "inventory").unwrap();
 
-    let mut record = serde_json::Map::new();
-    record.insert("sku".into(), json!("BEANS-001"));
-    record.insert("name".into(), json!("Beans"));
-    record.insert("quantity".into(), json!(20));
-    record.insert("unit_cost".into(), json!(800));
-    record.insert("unit_price".into(), json!(1200));
-    crate::crud::create(&conn, &biz, &uid, "inventory", &record).unwrap();
+    // Seeded directly, not via crud::create() — same reasoning as the
+    // update test above: create() now forces a new item's price to 0,
+    // so this needs a genuinely nonzero starting cost/price to prove
+    // an omitted column doesn't wipe it.
+    seed_inventory_item(&conn, &biz, "BEANS-001", "Beans", 20, 800, 1200);
 
     let xlsx = build_xlsx(
         &["sku", "name", "quantity"],
@@ -375,8 +372,8 @@ fn test_purchasing_import_resolves_inventory_record_id_from_item_name() {
 
     let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
     let xlsx = build_xlsx(
-        &["supplier", "item_name", "quantity", "unit_cost"],
-        &[vec!["Acme Distributors", "Rice", "50", "9.50"]],
+        &["supplier", "item_name", "quantity", "unit_cost", "unit_price"],
+        &[vec!["Acme Distributors", "Rice", "50", "9.50", "15.00"]],
     );
     let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "supplier").unwrap();
     assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
@@ -403,8 +400,8 @@ fn test_purchasing_import_rejects_item_name_with_no_matching_inventory_item() {
     let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
 
     let xlsx = build_xlsx(
-        &["supplier", "item_name", "quantity", "unit_cost"],
-        &[vec!["Acme Distributors", "Nonexistent Widget", "10", "5.00"]],
+        &["supplier", "item_name", "quantity", "unit_cost", "unit_price"],
+        &[vec!["Acme Distributors", "Nonexistent Widget", "10", "5.00", "8.00"]],
     );
     let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "supplier").unwrap();
     assert_eq!(result.created, 0);
@@ -448,8 +445,8 @@ fn test_purchasing_import_cannot_mark_a_new_order_received_via_a_hand_added_colu
 
     let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
     let xlsx = build_xlsx(
-        &["supplier", "item_name", "quantity", "unit_cost", "received"],
-        &[vec!["Acme Distributors", "Cooking Oil", "20", "18.00", "true"]],
+        &["supplier", "item_name", "quantity", "unit_cost", "unit_price", "received"],
+        &[vec!["Acme Distributors", "Cooking Oil", "20", "18.00", "25.00", "true"]],
     );
     let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "supplier").unwrap();
     assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
@@ -509,6 +506,7 @@ fn test_purchasing_import_creates_every_row_even_when_supplier_repeats() {
     prior_po.insert("item_name".into(), json!("item1"));
     prior_po.insert("quantity".into(), json!(20));
     prior_po.insert("unit_cost".into(), json!(1000));
+    prior_po.insert("unit_price".into(), json!(1200));
     let prior_id = crate::crud::create(&conn, &biz, &uid, "purchasing", &prior_po).unwrap();
     let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
     crate::receiving::receive(
@@ -523,11 +521,11 @@ fn test_purchasing_import_creates_every_row_even_when_supplier_repeats() {
     // supplier, no `received` column at all (matching the real
     // download template — see generate_template).
     let xlsx = build_xlsx(
-        &["supplier", "item_name", "quantity", "unit_cost", "order_date"],
+        &["supplier", "item_name", "quantity", "unit_cost", "unit_price", "order_date"],
         &[
-            vec!["sup1", "item1", "20", "10", "2026-08-31"],
-            vec!["sup1", "item2", "20", "10", "2026-08-31"],
-            vec!["sup1", "item3", "20", "10", "2026-08-31"],
+            vec!["sup1", "item1", "20", "10", "15", "2026-08-31"],
+            vec!["sup1", "item2", "20", "10", "15", "2026-08-31"],
+            vec!["sup1", "item3", "20", "10", "15", "2026-08-31"],
         ],
     );
     // Passing "supplier" explicitly, matching what the buggy frontend
@@ -585,11 +583,11 @@ fn test_purchasing_po_number_generated_sequentially_and_usable_for_correction() 
     // Blank "new orders" template shape — no po_number column, exactly
     // what generate_template() actually produces.
     let new_orders = build_xlsx(
-        &["supplier", "item_name", "quantity", "unit_cost", "order_date"],
+        &["supplier", "item_name", "quantity", "unit_cost", "unit_price", "order_date"],
         &[
-            vec!["Acme", "widget", "10", "500", "2026-08-01"],
-            vec!["Acme", "gadget", "5", "1200", "2026-08-01"],
-            vec!["Beta Co", "widget", "20", "480", "2026-08-02"],
+            vec!["Acme", "widget", "10", "500", "700", "2026-08-01"],
+            vec!["Acme", "gadget", "5", "1200", "1500", "2026-08-01"],
+            vec!["Beta Co", "widget", "20", "480", "650", "2026-08-02"],
         ],
     );
     let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, new_orders, "po_number").unwrap();
@@ -692,8 +690,8 @@ fn test_purchasing_partial_correction_sheet_omitting_received_and_quantity_still
 
     let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
     let new_order = build_xlsx(
-        &["supplier", "item_name", "quantity", "unit_cost", "order_date"],
-        &[vec!["Acem Distributors", "Nails", "40", "3.00", "2026-08-01"]], // supplier deliberately misspelled
+        &["supplier", "item_name", "quantity", "unit_cost", "unit_price", "order_date"],
+        &[vec!["Acem Distributors", "Nails", "40", "3.00", "5.00", "2026-08-01"]], // supplier deliberately misspelled
     );
     let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, new_order, "po_number").unwrap();
     assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
@@ -756,6 +754,7 @@ fn test_purchasing_po_number_cannot_be_hand_edited() {
     po.insert("item_name".into(), json!("widget"));
     po.insert("quantity".into(), json!(10));
     po.insert("unit_cost".into(), json!(500));
+    po.insert("unit_price".into(), json!(700));
     let id = crate::crud::create(&conn, &biz, &uid, "purchasing", &po).unwrap();
 
     let mut edit = serde_json::Map::new();

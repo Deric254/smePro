@@ -43,7 +43,7 @@ pub fn list_releases(conn: &Connection, user_id: &str) -> Result<Vec<ReleaseOpti
 
     let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=30");
     let client = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
-    let response = client
+    let call_result = client
         .get(&url)
         // GitHub's REST API rejects every request with no User-Agent
         // header (403), independent of and in addition to normal rate
@@ -51,8 +51,48 @@ pub fn list_releases(conn: &Connection, user_id: &str) -> Result<Vec<ReleaseOpti
         // not assumed from the error alone.
         .set("User-Agent", "smePro-app")
         .set("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e| anyhow!("couldn't reach GitHub: {e}"))?;
+        .call();
+
+    let response = match call_result {
+        Ok(r) => r,
+        // THE ACTUAL FIX Deric asked for: a bare "status code 403"
+        // conflates two genuinely different situations that need
+        // different responses from a person reading it — an
+        // unauthenticated GitHub REST API request is capped at 60/hour
+        // per IP, and GitHub returns exactly this status (403, not the
+        // more usual 429) once that's exhausted, with
+        // `X-RateLimit-Remaining: 0` on the response — versus a repo
+        // that's genuinely inaccessible for some other reason. Checked
+        // here, from the actual response headers, rather than guessed
+        // from the status code alone, so the message can say which one
+        // this actually is.
+        Err(ureq::Error::Status(403, resp)) => {
+            let remaining = resp.header("x-ratelimit-remaining");
+            let reset_display = resp
+                .header("x-ratelimit-reset")
+                .and_then(|s| s.parse::<i64>().ok())
+                .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0))
+                .map(|dt| dt.format("%H:%M UTC").to_string());
+            if remaining == Some("0") {
+                return Err(match reset_display {
+                    Some(t) => anyhow!(
+                        "GitHub's API rate limit was hit (this app checks unauthenticated, capped at 60 \
+                         requests/hour per network) — it resets at {t}. Try again after that."
+                    ),
+                    None => anyhow!(
+                        "GitHub's API rate limit was hit (this app checks unauthenticated, capped at 60 \
+                         requests/hour per network) — wait a few minutes and try again."
+                    ),
+                });
+            }
+            return Err(anyhow!(
+                "GitHub refused this request (403) for a reason other than rate-limiting — the repo may be \
+                 private, or GitHub is blocking this network. Response: {}",
+                resp.into_string().unwrap_or_default()
+            ));
+        }
+        Err(e) => return Err(anyhow!("couldn't reach GitHub: {e}")),
+    };
 
     let body = response.into_string().map_err(|e| anyhow!("failed to read GitHub's response: {e}"))?;
     let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| anyhow!("invalid response from GitHub: {e}"))?;

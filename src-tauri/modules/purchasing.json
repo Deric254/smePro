@@ -38,6 +38,14 @@
       "min": 0
     },
     {
+      "name": "unit_price",
+      "type": "money",
+      "required": true,
+      "min": 0,
+      "min_field": "unit_cost",
+      "min_field_message": "selling price cannot be lower than the cost price — this would sell at a loss"
+    },
+    {
       "name": "order_date",
       "type": "date",
       "required": false

@@ -738,3 +738,40 @@ jobs:
           tag_name: ${{ needs.bump-version.outputs.new_tag }}
           draft: true
           files: ${{ steps.find-apk.outputs.apk_paths }}
+
+  # ------------------------------------------------------------------
+  # THE ACTUAL FIX Deric asked for: nothing in this workflow ever
+  # published the release it creates. create-release makes it as a
+  # draft on purpose (so neither the desktop nor the android job races
+  # to create a second one — see that job's own doc comment), and both
+  # of those jobs leave it as `draft: true` when they attach their own
+  # assets, also on purpose (so the updater can't see a half-finished
+  # release missing one platform's files while the other is still
+  # building). But nothing ever came along afterward to flip it back
+  # to published once BOTH were actually done — so every release this
+  # workflow has ever produced has stayed a draft forever. A draft
+  # release is invisible to `/releases/latest`, which is exactly the
+  # endpoint tauri.conf.json's updater endpoint (and every desktop
+  # app's "Check for updates") depends on — so the auto-updater has
+  # never once found anything to update to, for any version, for any
+  # user, not just in local testing.
+  #
+  # This job is the missing last step: once BOTH desktop and android
+  # have succeeded (the `needs:` below — if either fails, this never
+  # runs, and the release stays a draft exactly as today, which is the
+  # safe failure mode: an incomplete release should never go live),
+  # publish the one release create-release made, by id, using the
+  # GitHub CLI (`gh`, preinstalled on every GitHub-hosted runner) with
+  # the same repo-scoped GITHUB_TOKEN every other step here already
+  # uses — no new secret needed.
+  publish-release:
+    needs: [bump-version, create-release, desktop, android]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish the release (draft -> published)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ needs.bump-version.outputs.new_tag }}" \
+            --repo "${{ github.repository }}" \
+            --draft=false

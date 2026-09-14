@@ -234,13 +234,12 @@ fn test_crud_update_rejects_float_into_money_field() {
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    let mut record = serde_json::Map::new();
-    record.insert("sku".into(), json!("EDIT-002"));
-    record.insert("name".into(), json!("Item"));
-    record.insert("quantity".into(), json!(5));
-    record.insert("unit_cost".into(), json!(300));
-    record.insert("unit_price".into(), json!(600));
-    let id = crate::crud::create(&conn, &biz, &uid, "inventory", &record).unwrap();
+    // Seeded directly, not via crud::create(): create() now forces a
+    // brand-new item's unit_cost/unit_price to 0 (price only enters
+    // through a purchase — see crud::create()'s own comment), so
+    // going through create() here would no longer give this test a
+    // genuinely nonzero starting price to prove stays untouched.
+    let id = seed_inventory_item(&conn, &biz, "EDIT-002", "Item", 5, 300, 600);
 
     let mut bad_patch = serde_json::Map::new();
     bad_patch.insert("unit_price".into(), json!(19.99)); // float — must be rejected
@@ -268,8 +267,9 @@ fn test_crud_update_does_not_require_absent_required_fields() {
 
     let id = seed_inventory_item(&conn, &biz, "EDIT-003", "Item", 2, 100, 150);
 
-    // "name" and "unit_cost" are both required on inventory, but this
-    // patch only touches reorder_level — must succeed.
+    // "name" is required on inventory (unit_cost/unit_price no longer
+    // are — see inventory.json/crud::create()'s forced-zero rule), but
+    // this patch only touches reorder_level — must succeed either way.
     let mut patch = serde_json::Map::new();
     patch.insert("reorder_level".into(), json!(3));
     let result = crate::crud::update(&conn, &biz, &uid, "inventory", &id, &patch, false);
@@ -300,6 +300,52 @@ fn test_crud_create_forces_inventory_quantity_to_zero() {
     let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
     let created = list.iter().find(|r| r["id"] == json!(id)).unwrap();
     assert_eq!(created["quantity"].as_i64().unwrap(), 0, "quantity must be forced to 0 regardless of what was supplied");
+}
+
+#[test]
+fn test_crud_create_forces_inventory_price_to_zero() {
+    // The other half of "price only exists at purchase time": exactly
+    // the same forced-zero treatment as quantity above, now applied to
+    // unit_cost/unit_price too — see crud::create()'s own comment.
+    // Real cost/price for a brand-new item enters only through
+    // receiving.rs::receive() (or repack.rs producing a new target),
+    // each creating its own priced batch; this generic create call
+    // must silently discard whatever it was sent for these two
+    // fields, not honor it and not reject it.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut record = serde_json::Map::new();
+    record.insert("sku".into(), json!("NOPRICE-001"));
+    record.insert("name".into(), json!("Attempted Priced Item"));
+    record.insert("unit_cost".into(), json!(500)); // must be ignored, not honored
+    record.insert("unit_price".into(), json!(900)); // must be ignored, not honored
+    let id = crate::crud::create(&conn, &biz, &uid, "inventory", &record).unwrap();
+
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let created = list.iter().find(|r| r["id"] == json!(id)).unwrap();
+    assert_eq!(created["unit_cost"].as_i64().unwrap(), 0, "unit_cost must be forced to 0 regardless of what was supplied");
+    assert_eq!(created["unit_price"].as_i64().unwrap(), 0, "unit_price must be forced to 0 regardless of what was supplied");
+}
+
+#[test]
+fn test_crud_create_no_longer_requires_a_price() {
+    // Companion to the force-to-zero test above, from the "required
+    // field" angle: unit_cost/unit_price used to be required: true in
+    // inventory.json, which meant omitting them entirely failed
+    // validation before this. Now that price lives at the batch level,
+    // a create call that mentions neither field must succeed — same as
+    // quantity already not being required to name explicitly.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut record = serde_json::Map::new();
+    record.insert("sku".into(), json!("NOPRICE-002"));
+    record.insert("name".into(), json!("Priceless Until Purchased"));
+    let result = crate::crud::create(&conn, &biz, &uid, "inventory", &record);
+    assert!(result.is_ok(), "creating an item without a price must succeed: {result:?}");
 }
 
 #[test]

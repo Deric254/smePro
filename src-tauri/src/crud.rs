@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -243,6 +243,22 @@ pub fn create(
     // scoped to updates of existing records only, never creates.
     if module_id == "inventory" {
         record.insert("quantity".to_string(), json!(0));
+        // Same reasoning, same treatment, as the quantity forced-zero
+        // rule directly above: a price only ever enters through an
+        // actual purchase now — receiving.rs::receive() (or
+        // repack.rs producing a brand-new target item) creating its
+        // own priced batch — never through this generic "create a new
+        // item" call. Whatever the caller sent for unit_cost/unit_price
+        // is discarded here, not validated-then-rejected, exactly like
+        // quantity: this is the normal, expected shape of creating an
+        // item post-batches, not an error condition. These two columns
+        // are kept on the Inventory row purely as the frozen record of
+        // whatever a genuinely pre-batch item's price used to be (see
+        // batches.rs's own module doc comment) — a brand-new item
+        // created after batches existed has no such history to
+        // freeze, so it starts at zero, same as everything else here.
+        record.insert("unit_cost".to_string(), json!(0));
+        record.insert("unit_price".to_string(), json!(0));
     }
     // A brand-new debt/credit record is, by definition, not yet
     // settled — same "starts at a forced, correct baseline, no
@@ -609,6 +625,32 @@ pub fn update(
     let valid_fields: std::collections::HashSet<&str> =
         module.fields.iter().map(|f| f.name.as_str()).collect();
 
+    // Purchasing's quantity/unit_cost/unit_price are frozen the
+    // instant a PO is received — receiving.rs::receive_in_tx already
+    // created a real batch from whatever these said at that moment,
+    // so hand-editing them afterward would silently make the PO
+    // disagree with the batch that was actually created from its old
+    // values, with no error and nothing re-applied to stock or
+    // Bookkeeping. excel_import.rs's own bulk-reconciliation path has
+    // always guarded against exactly this for itself (see its own
+    // comment on this same three-field list) — this closes the same
+    // gap for the plain single-record edit form/API, which never had
+    // an equivalent check. Only queried when it's actually relevant
+    // (purchasing, and one of these three fields is present) so this
+    // costs nothing on every other update.
+    const PURCHASING_FROZEN_AFTER_RECEIPT: [&str; 3] = ["quantity", "unit_cost", "unit_price"];
+    let purchasing_received: bool = if module_id == "purchasing" && body.keys().any(|k| PURCHASING_FROZEN_AFTER_RECEIPT.contains(&k.as_str())) {
+        conn.query_row(
+            &format!("SELECT received FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+            params![record_id, business_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false)
+    } else {
+        false
+    };
+
     let mut sets = vec![];
     let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![];
     let mut idx = 1;
@@ -620,6 +662,38 @@ pub fn update(
             return Err(anyhow!(
                 "'{k}' cannot be edited directly on '{module_id}' — use the sell, receive, refund, or repack action instead"
             ));
+        }
+        if purchasing_received && PURCHASING_FROZEN_AFTER_RECEIPT.contains(&k.as_str()) {
+            return Err(anyhow!(
+                "'{k}' cannot be edited on a purchase order that's already been received — the batch it created keeps its own record of what was actually paid and charged; correct that batch directly instead (see Inventory's batch list for this item), or use the refund/repack actions if stock has already moved"
+            ));
+        }
+        // Companion to stock_take.rs::close()'s own version of this
+        // same rule (see its comment): a bulk-import quantity
+        // correction is a stock-take by spreadsheet instead of by the
+        // guided UI, so it needs the exact same guard, or it becomes
+        // the one remaining door left open to exactly what that fix
+        // just closed — "found" stock priced at nothing. Only
+        // RAISING quantity is a problem; a same-or-lower re-count
+        // (shrinkage, damage, correcting an overcount) needs no price
+        // and is untouched by this.
+        if bulk_import && module_id == "inventory" && k == "quantity" {
+            if let Some(new_qty) = v.as_i64() {
+                let current_qty: Option<i64> = conn
+                    .query_row(
+                        &format!("SELECT quantity FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+                        params![record_id, business_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(current_qty) = current_qty {
+                    if new_qty > current_qty {
+                        return Err(anyhow!(
+                            "quantity cannot be increased by reconciliation ({current_qty} -> {new_qty}) — a stock-take can only confirm stock is missing, never add stock that was never priced; record this as a Purchasing receipt instead so it gets a real cost and price"
+                        ));
+                    }
+                }
+            }
         }
         sets.push(format!("{k} = ?{idx}"));
         values.push(value_to_sql(v));

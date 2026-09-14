@@ -722,29 +722,30 @@ pub fn import(
                 // (see the `None` branch below): a purchasing row is
                 // now received the moment it's first created by this
                 // importer, which means by the time anyone re-imports
-                // a correction, `quantity`/`unit_cost` have almost
-                // always already been consumed into Inventory's stock
-                // level and weighted-average cost. Neither of those
-                // two fields is in the permanently-blocked list above
-                // (they're ordinary editable columns on an UNRECEIVED
-                // order, same as before this change), but editing
-                // either one AFTER receipt would silently rewrite what
-                // the purchase order claims happened without touching
-                // the Inventory numbers that were already derived from
-                // the old values — exactly the kind of drift this
-                // importer exists to prevent elsewhere. Checked the
-                // same way the blocked-field comparison just above is:
-                // only rejected if the incoming value actually differs
-                // from what's stored, so a re-upload that merely
-                // carries the same received order's existing figures
-                // unchanged (the ordinary case) still goes through.
+                // a correction, `quantity`/`unit_cost`/`unit_price`
+                // have almost always already been consumed into a real
+                // batch (Inventory's stock level, and that batch's own
+                // frozen cost/price). None of those three fields is in
+                // the permanently-blocked list above (they're ordinary
+                // editable columns on an UNRECEIVED order, same as
+                // before this change), but editing any of them AFTER
+                // receipt would silently rewrite what the purchase
+                // order claims happened without touching the batch
+                // that was already created from the old values —
+                // exactly the kind of drift this importer exists to
+                // prevent elsewhere. Checked the same way the blocked-
+                // field comparison just above is: only rejected if the
+                // incoming value actually differs from what's stored,
+                // so a re-upload that merely carries the same received
+                // order's existing figures unchanged (the ordinary
+                // case) still goes through.
                 if module.id == "purchasing" {
                     let already_received = stored_field_value(&tx, &table, business_id, &id, "received", true)
                         .unwrap_or(Value::Bool(false))
                         == Value::Bool(true);
                     let mut rejected_field: Option<&str> = None;
                     if already_received {
-                        for field in ["quantity", "unit_cost"] {
+                        for field in ["quantity", "unit_cost", "unit_price"] {
                             let Some(incoming) = record.get(field) else { continue };
                             let stored = stored_field_value(&tx, &table, business_id, &id, field, false).unwrap_or(Value::Null);
                             if incoming != &stored {
@@ -803,6 +804,17 @@ pub fn import(
                 // other.
                 if module.id == "inventory" {
                     record.insert("quantity".to_string(), json!(0));
+                    // Same reasoning as crud::create()'s own forced-zero
+                    // treatment of these two fields (see that function's
+                    // comment): a brand-new item created by this bulk
+                    // importer has no purchase history to freeze either,
+                    // so whatever the spreadsheet's cost/price columns
+                    // say for a NEW row is discarded here, not applied —
+                    // real price now only ever enters through a batch
+                    // (receiving.rs::receive()), same as every other
+                    // creation path in this app.
+                    record.insert("unit_cost".to_string(), json!(0));
+                    record.insert("unit_price".to_string(), json!(0));
                 }
                 // Same "starts at a forced, correct baseline, no
                 // exceptions" rule crud::create() applies to a brand-new

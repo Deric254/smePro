@@ -7,13 +7,15 @@ use serde_json::json;
 // splitting, repack consuming across batches, and refund re-crediting
 // as required test coverage.
 
-fn make_purchase_order(conn: &mut rusqlite::Connection, biz: &str, uid: &str, inv_id: &str, item_name: &str, qty: i64, unit_cost_cents: i64) -> String {
+fn make_purchase_order(conn: &mut rusqlite::Connection, biz: &str, uid: &str, inv_id: &str, item_name: &str, qty: i64, unit_cost_cents: i64, unit_price_cents: i64) -> String {
     let mut po = serde_json::Map::new();
     po.insert("supplier".into(), json!("Test Supplier"));
     po.insert("item_name".into(), json!(item_name));
     po.insert("inventory_record_id".into(), json!(inv_id));
     po.insert("quantity".into(), json!(qty));
     po.insert("unit_cost".into(), json!(unit_cost_cents));
+    // Required since v31_purchasing_unit_price.
+    po.insert("unit_price".into(), json!(unit_price_cents));
     crate::crud::create(conn, biz, uid, "purchasing", &po).unwrap()
 }
 
@@ -76,15 +78,15 @@ fn test_fefo_consumes_soonest_expiry_first_then_undated_then_legacy_last() {
     let inv_id = seed_inventory_item(&conn, &biz, "YOG-001", "Yogurt", 5, 10, 20);
 
     // Batch A: expires far in the future.
-    let po_a = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Yogurt", 5, 12);
+    let po_a = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Yogurt", 5, 12, 22);
     receive(&mut conn, &biz, &uid, &po_a, Some(22), Some("2030-01-01"));
     // Batch B: expires soonest — must sell FIRST, ahead of A even
     // though A was received first.
-    let po_b = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Yogurt", 5, 14);
+    let po_b = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Yogurt", 5, 14, 25);
     receive(&mut conn, &biz, &uid, &po_b, Some(25), Some("2025-01-01"));
     // Batch C: no expiry at all — sells after every dated batch, but
     // still ahead of legacy.
-    let po_c = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Yogurt", 5, 16);
+    let po_c = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Yogurt", 5, 16, 28);
     receive(&mut conn, &biz, &uid, &po_c, Some(28), None);
 
     assert_quantity_invariant(&conn, &biz, &uid, &inv_id);
@@ -121,7 +123,7 @@ fn test_update_batch_price_enforces_price_floor_and_owner_only_cost_edits() {
     let manager_id = crate::business_panel::add_user(&conn, &biz, "manager", &hash, "Manager").unwrap();
 
     let inv_id = seed_inventory_item(&conn, &biz, "SOAP-100", "Soap", 0, 0, 500);
-    let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Soap", 20, 100);
+    let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Soap", 20, 100, 150);
     let receive_result = receive(&mut conn, &biz, &uid, &po_id, Some(150), None);
     let batch_id = receive_result["batch_id"].as_str().unwrap().to_string();
 
@@ -158,7 +160,7 @@ fn test_refund_credits_back_the_exact_batch_it_was_sold_from() {
     let (uid, _) = test_owner(&mut conn, &biz);
 
     let inv_id = seed_inventory_item(&conn, &biz, "JUICE-001", "Juice", 0, 0, 800);
-    let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Juice", 10, 500);
+    let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Juice", 10, 500, 800);
     receive(&mut conn, &biz, &uid, &po_id, Some(800), None);
     assert_quantity_invariant(&conn, &biz, &uid, &inv_id);
 
@@ -196,7 +198,7 @@ fn test_repack_consumes_source_batches_via_fefo_and_produces_an_independent_targ
     // Source: 2 legacy units at cost 200, plus a batch of 3 at cost 300
     // (soonest-expiring, so it must be consumed before legacy).
     let source_id = seed_inventory_item(&conn, &biz, "CHEESE-WHEEL", "Cheese (wheel)", 2, 200, 900);
-    let po_id = make_purchase_order(&mut conn, &biz, &uid, &source_id, "Cheese (wheel)", 3, 300);
+    let po_id = make_purchase_order(&mut conn, &biz, &uid, &source_id, "Cheese (wheel)", 3, 300, 900);
     receive(&mut conn, &biz, &uid, &po_id, Some(900), Some("2026-01-01"));
 
     let target_id = seed_inventory_item(&conn, &biz, "CHEESE-SLICE", "Cheese (sliced)", 0, 0, 50);
@@ -227,4 +229,56 @@ fn test_repack_consumes_source_batches_via_fefo_and_produces_an_independent_targ
 
     assert_quantity_invariant(&conn, &biz, &uid, &source_id);
     assert_quantity_invariant(&conn, &biz, &uid, &target_id);
+}
+
+#[test]
+fn test_pos_lookup_products_reflects_live_front_of_queue_price_not_stale_legacy_price() {
+    // The bug this guards against: the POS product grid (pos::lookup_products)
+    // used to read Inventory's own `unit_price` column directly — correct
+    // only until an item's first batch exists, after which it could show a
+    // cashier a different price than checkout() would actually charge.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    // 5 legacy units at price 20 — this is what the OLD lookup_products
+    // would have kept showing forever, even once a differently-priced
+    // batch became the active FEFO tier.
+    let inv_id = seed_inventory_item(&conn, &biz, "SODA-001", "Soda", 5, 10, 20);
+
+    // Before any batch exists, lookup_products must show the legacy price.
+    let before = crate::pos::lookup_products(&conn, &biz, &uid, Some("Soda"), 10).unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0]["unit_price"].as_i64().unwrap(), 20, "no batch yet — legacy price");
+
+    // A new delivery arrives, priced differently from legacy and with an
+    // expiry date, so it's now the front-of-queue batch.
+    let po = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Soda", 5, 12, 35);
+    receive(&mut conn, &biz, &uid, &po, Some(35), Some("2030-01-01"));
+
+    let after = crate::pos::lookup_products(&conn, &biz, &uid, Some("Soda"), 10).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(
+        after[0]["unit_price"].as_i64().unwrap(),
+        35,
+        "a live batch now exists and must be reflected immediately, not the stale legacy price"
+    );
+
+    // And it must be the SAME number an actual sale would charge for the
+    // very next unit — the whole point of this fix.
+    let sale = checkout_one(&mut conn, &biz, &uid, &inv_id, 1);
+    assert_eq!(sale["subtotal"].as_i64().unwrap(), 35, "checkout must charge exactly what the grid displayed");
+
+    // Sell out the entire front batch — the grid must fall back to
+    // legacy's price the instant the batch is exhausted, again matching
+    // exactly what the next sale would actually charge.
+    let _ = checkout_one(&mut conn, &biz, &uid, &inv_id, 4);
+    let after_exhausted = crate::pos::lookup_products(&conn, &biz, &uid, Some("Soda"), 10).unwrap();
+    assert_eq!(
+        after_exhausted[0]["unit_price"].as_i64().unwrap(),
+        20,
+        "batch fully consumed — must fall back to legacy price, not keep showing the exhausted batch's price"
+    );
+
+    assert_quantity_invariant(&conn, &biz, &uid, &inv_id);
 }

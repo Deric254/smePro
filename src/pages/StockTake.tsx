@@ -208,9 +208,24 @@ function CloseSummary({ result, onDismiss }: { result: StockTakeCloseResult; onD
         <button className="btn btn-outline" onClick={onDismiss} style={{ fontSize: '0.78rem', padding: '0.2rem 0.6rem' }}>Dismiss</button>
       </div>
       <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', marginBottom: '0.6rem' }}>
-        {result.items_counted} counted, {result.items_skipped} skipped ·
+        {result.items_counted} counted, {result.items_skipped} skipped
+        {result.items_needing_purchasing > 0 ? `, ${result.items_needing_purchasing} found extra (see below)` : ''} ·
         {' '}net change: {result.total_variance_units > 0 ? '+' : ''}{result.total_variance_units} units
       </div>
+      {result.needs_purchasing.length > 0 && (
+        <div style={{ fontSize: '0.82rem', background: 'var(--paper-highlight, #fff8e6)', border: '1px solid var(--paper-line)', borderRadius: '6px', padding: '0.6rem 0.7rem', marginBottom: '0.6rem' }}>
+          <div style={{ fontWeight: 600, marginBottom: '0.3rem' }}>Not applied — counted higher than expected</div>
+          <div style={{ color: 'var(--ink-soft)', marginBottom: '0.4rem' }}>
+            A stock take can only confirm stock is missing, never add stock that was never priced. These items were physically counted higher than the system expected; record a Purchasing receipt for the difference instead, so it gets a real cost and price.
+          </div>
+          {result.needs_purchasing.map((a) => (
+            <div key={a.inventory_record_id} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.2rem 0' }}>
+              <span>{a.item_name}</span>
+              <span>{a.expected_qty} expected · {a.counted_qty} counted (+{a.variance})</span>
+            </div>
+          ))}
+        </div>
+      )}
       {changed.length === 0 ? (
         <div style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>No discrepancies found.</div>
       ) : (

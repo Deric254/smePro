@@ -150,10 +150,34 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
             "inventory" => {
                 let places = crate::money::decimal_places_for(&currency);
                 let scale = 10_i64.pow(places) as f64;
+                // Live front-of-queue cost/price, not Inventory's own
+                // frozen unit_cost/unit_price — same FEFO-ordered
+                // front_batch CTE pos.rs::lookup_products uses, reused
+                // here rather than re-derived, so the assistant's
+                // margin/pricing answers can never drift from what a
+                // sale actually charges (see that function's own doc
+                // comment for the full reasoning; this was previously
+                // reading the frozen columns directly, the exact same
+                // class of bug lookup_products had before its fix).
+                let fefo = crate::batches::FEFO_ORDER_BY;
                 let mut detail_stmt = conn.prepare(&format!(
-                    "SELECT sku, name, quantity, unit_cost, unit_price, reorder_level
-                     FROM {table} WHERE business_id = ?1 AND deleted_at IS NULL
-                     ORDER BY name LIMIT 100"
+                    "WITH front_batch AS (
+                        SELECT inventory_record_id, unit_cost, unit_price,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY inventory_record_id
+                                   ORDER BY {fefo}
+                               ) AS rn
+                        FROM inventory_batches
+                        WHERE business_id = ?1 AND deleted_at IS NULL AND quantity_remaining > 0
+                     )
+                     SELECT i.sku, i.name, i.quantity,
+                            COALESCE(fb.unit_cost, i.unit_cost) AS unit_cost,
+                            COALESCE(fb.unit_price, i.unit_price) AS unit_price,
+                            i.reorder_level
+                     FROM {table} i
+                     LEFT JOIN front_batch fb ON fb.inventory_record_id = i.id AND fb.rn = 1
+                     WHERE i.business_id = ?1 AND i.deleted_at IS NULL
+                     ORDER BY i.name LIMIT 100"
                 ))?;
                 let items: Vec<Value> = detail_stmt
                     .query_map(rusqlite::params![business_id], |r| {

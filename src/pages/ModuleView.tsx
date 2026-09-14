@@ -370,6 +370,13 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       return;
     }
     let priceOverride: number | undefined;
+    // Blank is a valid, ordinary choice now, not an error: it means
+    // "use this delivery's own price, exactly as declared on the
+    // purchase order" — receive_in_tx defaults to that itself (see its
+    // updated comment). The field is pre-filled from the PO's own
+    // unit_price when this modal opens specifically so the common case
+    // needs no typing at all; only override it here if today's actual
+    // price genuinely differs from what was planned at order time.
     if (receivePriceText.trim() !== '') {
       const parsed = parseMoneyInput(receivePriceText, businessCurrency);
       if (parsed === null) {
@@ -768,7 +775,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               )}
               {editingId === null && moduleId === 'inventory' && (
                 <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginBottom: '0.6rem' }}>
-                  New items start at 0 in stock — receive them through Purchasing to bring stock in.
+                  New items start at 0 in stock with no price — receive them through Purchasing to bring stock in and set what they cost/sell for.
                 </div>
               )}
               <div style={styles.formGrid}>
@@ -780,7 +787,24 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                     onChange={(id, name) => setFormValues((p) => ({ ...p, inventory_record_id: id, item_name: name }))}
                   />
                 )}
-                {schema.fields.filter((f) => !isActionManagedField(moduleId, f.name) && !(moduleId === 'purchasing' && (f.name === 'item_name' || f.name === 'inventory_record_id'))).map((f) => (
+                {schema.fields.filter((f) => !isActionManagedField(moduleId, f.name)
+                  && !(moduleId === 'purchasing' && (f.name === 'item_name' || f.name === 'inventory_record_id'))
+                  // unit_cost/unit_price: hidden on CREATE only, not
+                  // edit — unlike quantity above, these aren't always-
+                  // action-managed. crud::create() now silently forces
+                  // both to 0 regardless of what's submitted (price
+                  // only ever enters through a real purchase/batch —
+                  // see crud.rs), so showing an editable input here
+                  // would let someone type a price that's then quietly
+                  // thrown away, the exact "looks like it worked, isn't
+                  // what actually happened" problem this session's
+                  // other fixes were about. Editing an EXISTING item's
+                  // legacy unit_cost/unit_price is still a supported,
+                  // deliberate path (manually correcting historical
+                  // figures), so this only applies while editingId is
+                  // null.
+                  && !(moduleId === 'inventory' && editingId === null && (f.name === 'unit_cost' || f.name === 'unit_price'))
+                ).map((f) => (
                   <FieldInput key={f.name} field={f} value={formValues[f.name] ?? ''} units={units} currencies={currencies} businessCurrency={businessCurrency} onChange={(v) => setFormValues((p) => ({ ...p, [f.name]: v }))} />
                 ))}
               </div>
@@ -836,7 +860,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                       <td style={styles.td}>
                         <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                           {moduleId === 'purchasing' && inventoryCanReceive && !r.received && (
-                            <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setReceivingId(r.id); setReceiveQtyText(''); setReceivePriceText(''); setReceiveExpiryDate(''); setReceiveError(null); }}>
+                            <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setReceivingId(r.id); setReceiveQtyText(''); setReceivePriceText(typeof r.unit_price === 'number' ? (r.unit_price / 100).toFixed(2) : ''); setReceiveExpiryDate(''); setReceiveError(null); }}>
                               Receive
                             </button>
                           )}
@@ -902,15 +926,18 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               onChange={(e) => setReceiveQtyText(e.target.value)}
               style={{ width: '100%' }}
             />
-            <label style={{ marginTop: '0.6rem', display: 'block' }}>Selling price for this delivery (optional)</label>
+            <label style={{ marginTop: '0.6rem', display: 'block' }}>Selling price for this delivery</label>
             <input
               type="text"
               inputMode="decimal"
-              placeholder="Defaults to the item's current price"
+              placeholder="Defaults to this purchase order's own price"
               value={receivePriceText}
               onChange={(e) => setReceivePriceText(e.target.value)}
               style={{ width: '100%' }}
             />
+            <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
+              Pre-filled from this purchase order's own price — change it only if today's actual price is different.
+            </div>
             <label style={{ marginTop: '0.6rem', display: 'block' }}>Expiry date (optional)</label>
             <input
               type="date"

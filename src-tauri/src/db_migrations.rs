@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 28;
+const CURRENT_VERSION: i32 = 31;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -72,7 +72,10 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 26 { v26_field_min_floors(conn)?; }
     if current < 27 { v27_idempotency_keys(conn)?; }
     if current < 28 { v28_inventory_batches(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 28, "bump this alongside the last `if current < N` check above");
+    if current < 29 { v29_legacy_batch_backfill(conn)?; }
+    if current < 30 { v30_inventory_price_not_required(conn)?; }
+    if current < 31 { v31_purchasing_unit_price(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 31, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2007,6 +2010,246 @@ fn v28_inventory_batches(conn: &mut Connection) -> Result<()> {
     }
 
     tx.execute("INSERT INTO _schema_version (version) VALUES (28)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Backfills every Inventory item's remaining legacy (pre-batch) stock
+/// into a real row in `inventory_batches`, so "current cost/price" has
+/// exactly one representation — a batch — instead of two (a batch, or
+/// Inventory's own frozen `unit_cost`/`unit_price` when an item has no
+/// batch yet). This is the data half of that change; see
+/// `batches::FEFO_ORDER_BY` for the query half — a synthetic row here
+/// changes nothing about consumption order by itself, only in
+/// combination with every FEFO query being told to sort it dead last
+/// via its own dedicated column, which is why this migration and that
+/// constant ship together, not separately.
+///
+/// "Legacy stock left to migrate" is computed exactly the way
+/// batches.rs has always computed it — `quantity - SUM(existing live
+/// batch quantity_remaining)` — never trusted from anywhere else. An
+/// item with nothing left outside its batches (brand-new, or already
+/// fully batch-tracked) gets no synthetic row; there is nothing to
+/// represent.
+///
+/// `received_at` is pinned to a fixed, obviously-synthetic sentinel
+/// rather than "now" or the item's own creation date — it plays no
+/// role in ordering once `is_legacy_migration` exists (that column
+/// alone already puts every synthetic row after every real batch,
+/// dated or not), but a value that can never be mistaken for a real
+/// receipt timestamp is easier to recognize later in an export, an
+/// audit, or a support ticket.
+///
+/// `NOT EXISTS` guards this against ever double-inserting if this
+/// migration is somehow re-run against a partially migrated database —
+/// same "checked-before-applied" discipline as every other migration
+/// in this file.
+fn v29_legacy_batch_backfill(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let already_has_column: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('inventory_batches') WHERE name='is_legacy_migration'",
+        [],
+        |r| r.get(0),
+    )?;
+    if already_has_column == 0 {
+        tx.execute(
+            "ALTER TABLE inventory_batches ADD COLUMN is_legacy_migration INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inventory_batches_legacy_migration
+         ON inventory_batches (inventory_record_id, is_legacy_migration)",
+        [],
+    )?;
+
+    let table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_inventory'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists == 1 {
+        tx.execute(
+            "INSERT INTO inventory_batches (
+                id, business_id, inventory_record_id, source_po_number,
+                quantity_received, quantity_remaining, unit_cost, unit_price,
+                expiry_date, received_at, created_by, is_legacy_migration
+             )
+             SELECT
+                lower(hex(randomblob(16))),
+                i.business_id,
+                i.id,
+                'LEGACY-MIGRATION',
+                (i.quantity - COALESCE(bt.batches_qty, 0)),
+                (i.quantity - COALESCE(bt.batches_qty, 0)),
+                i.unit_cost,
+                i.unit_price,
+                NULL,
+                '1970-01-01T00:00:00Z',
+                NULL,
+                1
+             FROM module_inventory i
+             LEFT JOIN (
+                 SELECT inventory_record_id, SUM(quantity_remaining) AS batches_qty
+                 FROM inventory_batches
+                 WHERE deleted_at IS NULL
+                 GROUP BY inventory_record_id
+             ) bt ON bt.inventory_record_id = i.id
+             WHERE i.deleted_at IS NULL
+               AND (i.quantity - COALESCE(bt.batches_qty, 0)) > 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM inventory_batches lb
+                   WHERE lb.inventory_record_id = i.id AND lb.is_legacy_migration = 1
+               )",
+            [],
+        )?;
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (29)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Second half of "price only exists at purchase time": Inventory's
+/// own `unit_cost`/`unit_price` stop being required at item-creation
+/// time — see crud::create()'s own updated comment, which now forces
+/// both to 0 on every new item exactly like it already forces
+/// `quantity` to 0, real price only ever entering afterward through a
+/// purchase (a batch). That backend change alone doesn't touch what
+/// the create/edit form on the frontend requires, though: ModuleView.tsx
+/// renders `required` straight from each business's own stored
+/// `modules.schema_json` snapshot (crud::load_module reads that, never
+/// the on-disk `modules/*.json` template directly — same reason v28's
+/// Part 2/3 patches existed), so a business that enabled Inventory
+/// before this shipped would still see the create form demand a price
+/// value the backend was silently going to discard anyway. This
+/// migration patches that snapshot for every already-enabled business,
+/// same shape as v28's Part 2/3.
+///
+/// `unit_price`'s `min_field: unit_cost` cross-check is deliberately
+/// left in place, required or not — manually correcting an existing
+/// item's frozen legacy figures (still a supported, "correct as-is"
+/// path, never touched by this pass) shouldn't be able to leave price
+/// under cost any more than it could before.
+fn v30_inventory_price_not_required(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT business_id, schema_json FROM modules WHERE id = 'inventory' AND enabled = 1",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (business_id, schema_json) in rows {
+        let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+            Ok(v) => v,
+            Err(_) => continue, // corrupt snapshot pre-dating this migration is out of scope to repair here; leave it untouched rather than risk making it worse
+        };
+        let mut changed = false;
+        if let Some(fields) = parsed.get_mut("fields").and_then(|f| f.as_array_mut()) {
+            for field in fields.iter_mut() {
+                let name = field.get("name").and_then(|n| n.as_str());
+                if name == Some("unit_cost") || name == Some("unit_price") {
+                    let currently_required = field.get("required").and_then(|r| r.as_bool()).unwrap_or(false);
+                    if currently_required {
+                        field["required"] = serde_json::json!(false);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+            tx.execute(
+                "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'inventory'",
+                rusqlite::params![new_json, business_id],
+            )?;
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (30)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Moves the selling price itself onto the purchase order, alongside
+/// `unit_cost` — "I'm paying this, and I will sell this for that,
+/// period," decided together at purchase time, not asked for again as
+/// a separate step when the delivery physically arrives. This is what
+/// makes receiving (and Excel-import auto-receive, which has no modal
+/// to ask anything in) able to actually run with zero extra prompts:
+/// see receiving.rs::receive_in_tx's updated comment for the other
+/// half of this change — it now defaults to a PO's own `unit_price`
+/// instead of requiring a value be supplied at receive time.
+///
+/// Same two-part shape as every other schema change in this file: a
+/// real `unit_price` column on the physical `module_purchasing` table
+/// (`NOT NULL DEFAULT 0` — safe for existing rows, since a PO created
+/// before this shipped never had a selling price to preserve; its
+/// eventual batch's own `unit_price`, captured at the time it actually
+/// was received under the old flow, remains the accurate historical
+/// record regardless), plus the matching patch to every existing
+/// business's stored `modules.schema_json` snapshot so the create form
+/// and the importer's own field validation both pick it up without
+/// needing to re-enable the module.
+fn v31_purchasing_unit_price(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_purchasing'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table_exists == 1 {
+        let already_has_column: i64 = tx.query_row(
+            "SELECT count(*) FROM pragma_table_info('module_purchasing') WHERE name='unit_price'",
+            [],
+            |r| r.get(0),
+        )?;
+        if already_has_column == 0 {
+            tx.execute("ALTER TABLE module_purchasing ADD COLUMN unit_price INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+    }
+
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT business_id, schema_json FROM modules WHERE id = 'purchasing' AND enabled = 1",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (business_id, schema_json) in rows {
+        let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+            Ok(v) => v,
+            Err(_) => continue, // corrupt snapshot pre-dating this migration is out of scope to repair here; leave it untouched rather than risk making it worse
+        };
+        let mut changed = false;
+        if let Some(fields) = parsed.get_mut("fields").and_then(|f| f.as_array_mut()) {
+            let already_present = fields.iter().any(|f| f.get("name").and_then(|n| n.as_str()) == Some("unit_price"));
+            if !already_present {
+                fields.push(serde_json::json!({
+                    "name": "unit_price",
+                    "type": "money",
+                    "required": true,
+                    "min": 0,
+                    "min_field": "unit_cost",
+                    "min_field_message": "selling price cannot be lower than the cost price — this would sell at a loss"
+                }));
+                changed = true;
+            }
+        }
+        if changed {
+            let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+            tx.execute(
+                "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'purchasing'",
+                rusqlite::params![new_json, business_id],
+            )?;
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (31)", [])?;
     tx.commit()?;
     Ok(())
 }

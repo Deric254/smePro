@@ -33,14 +33,14 @@
     {
       "name": "unit_cost",
       "type": "money",
-      "required": true,
+      "required": false,
       "default": 0,
       "min": 0
     },
     {
       "name": "unit_price",
       "type": "money",
-      "required": true,
+      "required": false,
       "default": 0,
       "min": 0,
       "min_field": "unit_cost",

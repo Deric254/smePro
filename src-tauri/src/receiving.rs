@@ -57,10 +57,11 @@
 //! left to lose. `Inventory.unit_cost`/`unit_price` are left
 //! completely untouched by this file from now on; they remain frozen
 //! at whatever they were the moment this feature shipped for any item
-//! that already existed, and are what a batch's own selling price
-//! defaults to when the caller doesn't override it — see
-//! `ReceiveRequest`'s own doc comment on `unit_price` and
-//! `batches.rs`'s module doc comment for the full reasoning.
+//! that already existed — including never being read as a fallback
+//! price for a new batch anymore (see `ReceiveRequest`'s own doc
+//! comment on `unit_price`: a batch's price is REQUIRED, on purpose,
+//! never silently inherited from anywhere) — and
+//! `batches.rs`'s module doc comment has the full reasoning.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -101,10 +102,15 @@ pub struct ReceiveRequest {
     pub quantity_received: Option<i64>,
     /// This delivery's own selling price — batches.rs's own module doc
     /// comment explains why this creates an independent batch instead
-    /// of blending into Inventory's single `unit_price`. Defaults to
-    /// whatever the Inventory item's own `unit_price` currently is
-    /// when omitted, so an existing caller that never sends this gets
-    /// the same price it always would have shown, on the new batch.
+    /// of blending into Inventory's single `unit_price`. Genuinely
+    /// optional now: since v31_purchasing_unit_price, the purchase
+    /// order itself already carries a selling price (decided at the
+    /// same time as its cost), and `receive_in_tx` defaults to that
+    /// when this is omitted — never to Inventory's frozen legacy
+    /// price, only to this specific purchase's own. Supply a value
+    /// here only to override what was planned at order time (a
+    /// supplier price change between ordering and delivery, a manual
+    /// correction) — the ordinary case needs nothing here at all.
     /// Integer minor units (cents) — see money.rs.
     #[serde(default)]
     pub unit_price: Option<i64>,
@@ -179,17 +185,17 @@ pub(crate) fn receive_in_tx(
     expiry_date: Option<&str>,
     created_by: Option<&str>,
 ) -> Result<Value> {
-    let row: Option<(String, i64, bool, Option<String>, String, i64, Option<String>)> = tx
+    let row: Option<(String, i64, bool, Option<String>, String, i64, i64, Option<String>)> = tx
         .query_row(
             &format!(
-                "SELECT item_name, quantity, received, inventory_record_id, supplier, unit_cost, po_number
+                "SELECT item_name, quantity, received, inventory_record_id, supplier, unit_cost, unit_price, po_number
                  FROM {purchasing_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"
             ),
             params![purchase_record_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
         )
         .optional()?;
-    let Some((item_name, ordered_qty, already_received, inventory_record_id, supplier, po_unit_cost, po_number)) = row else {
+    let Some((item_name, ordered_qty, already_received, inventory_record_id, supplier, po_unit_cost, po_unit_price, po_number)) = row else {
         return Err(anyhow!("purchase order not found: {purchase_record_id}"));
     };
 
@@ -208,32 +214,39 @@ pub(crate) fn receive_in_tx(
         return Err(anyhow!("quantity received must be greater than zero"));
     }
 
-    let inv_row: Option<(String, i64, i64, i64)> = tx
+    let inv_row: Option<(String, i64)> = tx
         .query_row(
-            &format!("SELECT name, quantity, unit_cost, unit_price FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+            &format!("SELECT name, quantity FROM {inventory_table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
             params![inventory_record_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some((inventory_name, current_qty, _legacy_unit_cost, legacy_unit_price)) = inv_row else {
+    let Some((inventory_name, current_qty)) = inv_row else {
         return Err(anyhow!("linked inventory item not found: {inventory_record_id}"));
     };
 
     let new_qty = current_qty + quantity_received;
 
-    // THE ACTUAL FIX Deric asked for, unchanged in spirit from the
-    // weighted-average version this replaced: a receipt can never
-    // leave stock priced below what it cost. Batch-costed instead of
-    // blended now (see batches.rs's own module doc comment for why
-    // Inventory.unit_cost/unit_price are never touched here anymore) —
-    // this delivery's OWN batch gets its OWN price, defaulting to
-    // whatever the item's legacy unit_price currently displays when
-    // the caller doesn't override it, and that price (whichever it
-    // ends up being) can never be lower than this delivery's own cost.
-    // Checked here, with a message naming this specific item, before
-    // `batches::create_batch_in_tx`'s own (more generic) version of
-    // the identical guard runs as a second, defense-in-depth check.
-    let batch_unit_price = unit_price_override.unwrap_or(legacy_unit_price);
+    // THE ACTUAL FIX Deric asked for (round two): a batch's selling
+    // price is now REQUIRED to be its own — it is never silently
+    // inherited from the item's frozen legacy `unit_price` anymore.
+    // "Its own" no longer means "must be typed again right now at the
+    // receive step", though: since v31_purchasing_unit_price, the
+    // purchase order itself carries a selling price, decided at the
+    // same moment as its cost — "I'm paying this, I will sell this,
+    // period." So the real default here is the PO's *own* declared
+    // price, not Inventory's frozen legacy field — that distinction is
+    // exactly what the original fix was protecting against, and it
+    // still holds: this is never a fallback to some OTHER record's
+    // price, only to this purchase's own. `unit_price_override` still
+    // exists for the case where today's actual delivery genuinely
+    // needs a different price than what was planned when it was
+    // ordered (a supplier price change, a manual correction) — supply
+    // it to override, omit it to just use what this PO already says.
+    let batch_unit_price = unit_price_override.unwrap_or(po_unit_price);
+    if batch_unit_price < 0 {
+        return Err(anyhow!("price cannot be negative"));
+    }
     if batch_unit_price < po_unit_cost {
         let business_currency: String = tx
             .query_row("SELECT currency FROM businesses WHERE id = ?1", params![business_id], |r| r.get(0))
@@ -242,8 +255,7 @@ pub(crate) fn receive_in_tx(
         let price_display = crate::money::format_money(batch_unit_price, &business_currency);
         return Err(anyhow!(
             "receiving this would create a batch of '{inventory_name}' costing {cost_display} per unit while \
-             priced at {price_display} — pass a higher unit_price for this delivery, or raise the item's price \
-             in Inventory first, then receive this order"
+             priced at {price_display} — set a higher price for this delivery before receiving it"
         ));
     }
 

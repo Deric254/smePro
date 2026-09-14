@@ -109,6 +109,26 @@ pub struct CheckoutRequest {
 ///    it," it's "the response literally does not contain it," so
 ///    there's no cost/margin data sitting in a browser dev-tools
 ///    network tab for a screen that never needed it.
+///
+/// 3. `unit_price` here is the live FEFO front-of-queue price, not
+///    Inventory's own (frozen legacy) `unit_price` column — the exact
+///    same number checkout() will actually charge for the very next
+///    unit of this item sold, computed by the identical FEFO ordering
+///    expression `batches::fefo_consume_in_tx`/`list_batches` use
+///    (`(expiry_date IS NULL) ASC, expiry_date ASC, received_at ASC,
+///    id ASC`), reused here — not re-derived — so this can never drift
+///    from what a sale actually charges. This used to read Inventory's
+///    own `unit_price` column directly, which is correct only until an
+///    item's first batch is created; from that point on, a cashier
+///    browsing the product grid could see a different price than the
+///    one that actually gets charged at checkout, with no indication
+///    anything had changed. Computed fresh, in SQL, in the same single
+///    query as the rest of this list (a `LEFT JOIN` against each
+///    item's own front-of-queue batch, chosen with `ROW_NUMBER() OVER
+///    (PARTITION BY inventory_record_id ORDER BY ...)`) — not one extra
+///    round trip per item, and `Inventory.unit_cost`/`unit_price`
+///    themselves are still never written to by any of this (see
+///    batches.rs's own module doc comment for why that matters).
 pub fn lookup_products(
     conn: &Connection,
     business_id: &str,
@@ -120,23 +140,35 @@ pub fn lookup_products(
     let inventory_module = crud::load_module(conn, business_id, "inventory")
         .map_err(|_| anyhow!("the Inventory module isn't enabled for this business"))?;
     let table = inventory_module.table_name();
+    let fefo = crate::batches::FEFO_ORDER_BY;
     let limit = limit.clamp(1, 200);
 
     let mut sql = format!(
-        "SELECT id, name, sku, unit_price, quantity FROM {table}
-         WHERE business_id = ?1 AND deleted_at IS NULL"
+        "WITH front_batch AS (
+            SELECT inventory_record_id, unit_price,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY inventory_record_id
+                       ORDER BY {fefo}
+                   ) AS rn
+            FROM inventory_batches
+            WHERE business_id = ?1 AND deleted_at IS NULL AND quantity_remaining > 0
+         )
+         SELECT i.id, i.name, i.sku, COALESCE(fb.unit_price, i.unit_price) AS unit_price, i.quantity
+         FROM {table} i
+         LEFT JOIN front_batch fb ON fb.inventory_record_id = i.id AND fb.rn = 1
+         WHERE i.business_id = ?1 AND i.deleted_at IS NULL"
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(business_id.to_string())];
     if let Some(term) = search {
         if !term.trim().is_empty() {
             params.push(Box::new(format!("%{term}%")));
             let idx = params.len();
-            sql.push_str(&format!(" AND (name LIKE ?{idx} OR sku LIKE ?{idx})"));
+            sql.push_str(&format!(" AND (i.name LIKE ?{idx} OR i.sku LIKE ?{idx})"));
         }
     }
     params.push(Box::new(limit));
     let limit_idx = params.len();
-    sql.push_str(&format!(" ORDER BY quantity DESC LIMIT ?{limit_idx}"));
+    sql.push_str(&format!(" ORDER BY i.quantity DESC LIMIT ?{limit_idx}"));
 
     let mut stmt = conn.prepare(&sql)?;
     let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();

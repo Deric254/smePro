@@ -322,9 +322,16 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         new_record.insert("name".to_string(), json!(name));
         new_record.insert("quantity".to_string(), json!(0));
         new_record.insert("unit_cost".to_string(), json!(0));
-        // Safe to unwrap: validated as `Some` above whenever
-        // `new_target_name` is present.
-        new_record.insert("unit_price".to_string(), json!(req.new_target_unit_price.unwrap()));
+        // Deliberately 0, not req.new_target_unit_price: that price
+        // belongs to the batch this repack is about to create for this
+        // item (a few lines down), not to the item record itself — see
+        // crud::create()'s own forced-zero treatment of these two
+        // fields for the same reasoning. Writing it here too would
+        // resurrect exactly the two-sources-of-truth problem this file
+        // moved away from: a legacy `unit_price` sitting on the item
+        // that could silently go stale the moment a second batch at a
+        // different price is ever created for it.
+        new_record.insert("unit_price".to_string(), json!(0));
         for f in &inventory_module.fields {
             if !new_record.contains_key(&f.name) {
                 if let Some(d) = &f.default {
@@ -349,9 +356,31 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((target_name, target_current_qty, _target_current_unit_cost, target_unit_price)) = target else {
+    let Some((target_name, target_current_qty, _target_current_unit_cost, target_legacy_unit_price)) = target else {
         return Err(anyhow!("target inventory item not found: {}", target_record_id));
     };
+    // Live front-of-queue price for an EXISTING target — same FEFO
+    // join every other consumer of "current price" in this codebase
+    // now uses (see batches::FEFO_ORDER_BY) — not the item's own
+    // frozen unit_price column. This used to read that column
+    // directly: correct only for a target that had never received a
+    // batch, and silently wrong the moment it had one at a different
+    // price, the exact same bug class pos.rs::lookup_products had.
+    let target_unit_price: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT COALESCE(
+                    (SELECT unit_price FROM inventory_batches
+                     WHERE inventory_record_id = ?1 AND business_id = ?2 AND deleted_at IS NULL AND quantity_remaining > 0
+                     ORDER BY {fefo} LIMIT 1),
+                    ?3
+                 )",
+                fefo = crate::batches::FEFO_ORDER_BY,
+            ),
+            params![target_record_id, business_id, target_legacy_unit_price],
+            |r| r.get(0),
+        )
+        .unwrap_or(target_legacy_unit_price);
 
     let source_new_qty = source_current_qty - req.source_quantity;
 
@@ -415,10 +444,11 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
     // This new batch's own selling price: for a brand-new target item,
     // exactly the price supplied when it was created a few lines up
     // (required, validated non-negative there). For an EXISTING
-    // target, the item's own current unit_price — same "existing
-    // item's price is its own, set through the ordinary edit form, not
-    // through a repack" rule this file has always held, just applied
-    // to the new batch's price instead of the whole item's price.
+    // target, its live front-of-queue price computed just above (or
+    // its frozen legacy price if it has no live batch yet) — never
+    // hand-typed through this endpoint, same "an existing item's price
+    // is its own, set through the ordinary edit form or its own
+    // batches, not through a repack" rule this file has always held.
     let new_batch_unit_price = if new_target_name.is_some() {
         req.new_target_unit_price.unwrap()
     } else {

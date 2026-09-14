@@ -194,6 +194,21 @@ pub(crate) fn create_batch_in_tx(
     Ok(id)
 }
 
+/// Canonical FEFO ordering, shared by every place that reads
+/// `inventory_batches` in consumption or front-of-queue order: a real
+/// `expiry_date` first (soonest first), then no-expiry batches
+/// oldest-received first, and — since v29_legacy_batch_backfill —
+/// any synthetic legacy-migration row sorts dead last regardless of
+/// its own `received_at`, preserving the "legacy sold last, always"
+/// rule this file's module doc comment has described from the start.
+/// Previously this ordering expression was hand-copied into every
+/// consumer (this file's own two query sites, plus pos.rs, ai_context.rs,
+/// stock_health.rs) — one shared constant now, so the next place that
+/// reads batches in order can't quietly drift from what checkout()
+/// actually charges by retyping it slightly differently.
+pub(crate) const FEFO_ORDER_BY: &str =
+    "is_legacy_migration ASC, (expiry_date IS NULL) ASC, expiry_date ASC, received_at ASC, id ASC";
+
 /// Consumes `qty_needed` units of one Inventory item in strict FEFO
 /// order — batches with a real expiry date first (soonest first),
 /// then no-expiry batches (oldest received first), then legacy stock
@@ -238,12 +253,12 @@ pub(crate) fn fefo_consume_in_tx(
     // doc comment for the exact ordering rule. `(expiry_date IS NULL)`
     // evaluates to 0 for a real date and 1 for NULL, so ordering by it
     // ascending puts every dated batch before every undated one.
-    let mut stmt = tx.prepare(
+    let mut stmt = tx.prepare(&format!(
         "SELECT id, quantity_remaining, unit_cost, unit_price, expiry_date
          FROM inventory_batches
          WHERE business_id = ?1 AND inventory_record_id = ?2 AND deleted_at IS NULL AND quantity_remaining > 0
-         ORDER BY (expiry_date IS NULL) ASC, expiry_date ASC, received_at ASC, id ASC",
-    )?;
+         ORDER BY {FEFO_ORDER_BY}"
+    ))?;
     let batch_rows: Vec<(String, i64, i64, i64, Option<String>)> = stmt
         .query_map(params![business_id, inventory_record_id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
@@ -470,13 +485,13 @@ pub fn list_batches(
         return Err(anyhow!("inventory item not found: {inventory_record_id}"));
     };
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, inventory_record_id, source_po_number, quantity_received, quantity_remaining,
                 unit_cost, unit_price, expiry_date, received_at
          FROM inventory_batches
          WHERE business_id = ?1 AND inventory_record_id = ?2 AND deleted_at IS NULL AND quantity_remaining > 0
-         ORDER BY (expiry_date IS NULL) ASC, expiry_date ASC, received_at ASC, id ASC",
-    )?;
+         ORDER BY {FEFO_ORDER_BY}"
+    ))?;
     let batches: Vec<BatchRow> = stmt
         .query_map(params![business_id, inventory_record_id], |r| {
             Ok(BatchRow {

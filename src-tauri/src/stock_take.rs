@@ -24,12 +24,17 @@
 //!      fast movers today is a completely normal, valid use of this
 //!      feature, not an error condition. Anything never counted is
 //!      simply left alone at close time — its expected value stands.
-//!   3. `close()` — for every item that WAS counted, applies the
-//!      variance (counted - expected) directly to
-//!      `inventory.quantity` in one atomic transaction, the same way
-//!      receiving/refund/repack do, and returns a variance report.
-//!      Uncounted items are untouched and separately reported as
-//!      "skipped," not silently folded into "no change."
+//!   3. `close()` — for every item that WAS counted, applies a
+//!      NEGATIVE variance (counted - expected — stock physically
+//!      missing) directly to `inventory.quantity` in one atomic
+//!      transaction, the same way receiving/refund/repack do, and
+//!      returns a variance report. A POSITIVE variance (physically
+//!      finding MORE than expected) is never applied — see close()'s
+//!      own comment on why "found" stock needs a real Purchasing
+//!      receipt to get priced, not a bare quantity bump — and is
+//!      reported separately as `needs_purchasing`. Uncounted items are
+//!      untouched and separately reported as "skipped," not silently
+//!      folded into "no change."
 //!
 //! ONLY ONE STOCK TAKE OPEN AT A TIME, per business — enforced by a
 //! partial unique index in the schema (see db_migrations.rs's v11),
@@ -200,6 +205,22 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
 
     let mut adjustments = Vec::new();
     let mut skipped = Vec::new();
+    // THE ACTUAL FIX Deric asked for: a positive variance (counted >
+    // expected — physically finding MORE than the system thinks
+    // exists) used to be applied exactly like a negative one, a bare
+    // `Inventory.quantity` bump with no cost or price attached to the
+    // surplus at all. That was always a little questionable, but it
+    // became a genuine hole once item creation started forcing
+    // unit_cost/unit_price to 0 (see crud::create()): "found" stock
+    // for any item created since then would land priced at exactly
+    // $0 — sellable for free, not flagged as a mistake anywhere. A
+    // stock take can only ever CONFIRM loss now (shrinkage, damage,
+    // miscount, theft — stock that was already priced, now just
+    // marked gone), never conjure priced stock into existence; a
+    // genuine positive discrepancy is either a counting error or
+    // unrecorded stock that belongs in Purchasing, where it can
+    // actually get a real cost and price and create a real batch.
+    let mut needs_purchasing = Vec::new();
     let mut total_variance_units: i64 = 0;
 
     for (_item_id, inv_id, item_name, expected_qty, counted_qty) in &items {
@@ -212,6 +233,14 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
             continue;
         };
         let variance = counted - expected_qty;
+        if variance > 0 {
+            // Not applied at all — see this loop's own comment above.
+            needs_purchasing.push(json!({
+                "inventory_record_id": inv_id, "item_name": item_name,
+                "expected_qty": expected_qty, "counted_qty": counted, "variance": variance,
+            }));
+            continue;
+        }
         if variance != 0 {
             tx.execute(
                 &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
@@ -242,9 +271,11 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
         "stock_take_id": stock_take_id,
         "items_counted": adjustments.len(),
         "items_skipped": skipped.len(),
+        "items_needing_purchasing": needs_purchasing.len(),
         "total_variance_units": total_variance_units,
         "adjustments": adjustments,
         "skipped": skipped,
+        "needs_purchasing": needs_purchasing,
     });
 
     // The traceability record — same reasoning as repack.rs's own
