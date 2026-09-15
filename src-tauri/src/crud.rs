@@ -283,9 +283,24 @@ pub fn create(
         // to safely match on during Excel re-import — see
         // debt_settlement::generate_entry_number's own doc comment for
         // why `party_name` itself can never safely be that field.
-        // Always generated here, never taken from the caller.
-        let entry_number = crate::debt_settlement::generate_entry_number(conn, business_id)?;
-        record.insert("entry_number".to_string(), json!(entry_number));
+        // Generated here whenever the caller didn't already supply a
+        // real one — same "blank means generate, present means keep"
+        // rule excel_import.rs's own placeholder shim already applies
+        // for this same field on its own insert path (see that file's
+        // `entry_number_needs_placeholder`). A raw create() call still
+        // can't invent an arbitrary identity out of thin air by
+        // omitting it, but a caller that legitimately already has one
+        // (bulk-seeding, a reconciliation import going through this
+        // same function, a restore) isn't silently overridden either.
+        let entry_number_provided = record
+            .get("entry_number")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !entry_number_provided {
+            let entry_number = crate::debt_settlement::generate_entry_number(conn, business_id)?;
+            record.insert("entry_number".to_string(), json!(entry_number));
+        }
     }
     // Same forced-baseline treatment, same reason, for purchasing's
     // `received` — this was the one field in this "post-action state"
@@ -310,15 +325,28 @@ pub fn create(
         // Purchasing a real, business-scoped-unique identifier — the
         // one thing this module never had before, which is what let
         // Excel re-imports silently mismatch rows onto each other by
-        // `supplier` (not unique — one supplier has many orders). A
-        // caller-supplied po_number could collide with an existing one
-        // (rejected loudly by the DB's own UNIQUE(business_id,
-        // po_number) constraint — safe, but a confusing error for
-        // something that should just work) or simply not follow the
-        // sequence real receipts and audits expect. Always generated
-        // here, never taken from the caller, exactly like `received`.
-        let po_number = crate::receiving::generate_po_number(conn, business_id)?;
-        record.insert("po_number".to_string(), json!(po_number));
+        // `supplier` (not unique — one supplier has many orders).
+        // Generated here whenever the caller didn't already supply a
+        // real one — same "blank means generate, present means keep"
+        // rule excel_import.rs's own placeholder shim already applies
+        // on its own insert path (see that file's
+        // `po_number_needs_placeholder`), now made consistent across
+        // every path that can create a purchasing record instead of
+        // just the spreadsheet one. A caller-supplied po_number can
+        // still collide with an existing one — rejected loudly by the
+        // DB's own UNIQUE(business_id, po_number) constraint, exactly
+        // as before — but a legitimate caller-supplied value (bulk
+        // seeding, a reconciliation import, a restore) is no longer
+        // silently discarded and replaced.
+        let po_number_provided = record
+            .get("po_number")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !po_number_provided {
+            let po_number = crate::receiving::generate_po_number(conn, business_id)?;
+            record.insert("po_number".to_string(), json!(po_number));
+        }
 
         // THE BUG THIS FIXES: `inventory_record_id` used to be resolved
         // from `item_name` only on the Excel-import path
@@ -588,41 +616,27 @@ pub fn list(
         Ok(Value::Object(obj))
     })?;
 
-    let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
-    // Inventory-only: the columns above are each item's own stored
-    // unit_cost/unit_price, which crud::create()/update() freeze the
-    // moment a real batch exists (see this file's own comments on
-    // both of those) — accurate as a record of what was typed, but
-    // not necessarily what checkout would charge right now if a
-    // cheaper/pricier batch is currently at the front of the FEFO
-    // queue. Overlaying the live front-of-queue price/cost here,
-    // right where every list view (table, Excel export, API caller)
-    // already goes through, keeps what's displayed in sync with what
-    // a sale actually charges — one query for the whole page, not one
-    // per row. Items with no live batch (nothing received yet, or a
-    // genuinely legacy item) are untouched: their own stored value is
-    // already the accurate answer for that case.
-    if module_id == "inventory" && !out.is_empty() {
-        let ids: Vec<String> = out
-            .iter()
-            .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
-            .collect();
-        let front = crate::batches::front_of_queue_prices(conn, business_id, &ids)?;
-        for row in out.iter_mut() {
-            let id = match row.get("id").and_then(Value::as_str) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            if let Some(&(cost, price)) = front.get(id.as_str()) {
-                if let Value::Object(obj) = row {
-                    obj.insert("unit_cost".to_string(), json!(cost));
-                    obj.insert("unit_price".to_string(), json!(price));
-                }
-            }
-        }
-    }
-
+    // BATCH REWRITE: this used to overlay each Inventory row's own
+    // stored unit_cost/unit_price with the live front-of-queue batch
+    // price here, on the theory that a list view should show what
+    // checkout would actually charge right now. That's exactly what
+    // batches.rs's own module doc comment (and every batch-costing
+    // test — crud_tests, pos_tests, receiving_tests, repack_tests)
+    // now holds is wrong for THIS field: an item's own unit_cost/
+    // unit_price are the frozen legacy record of what was typed
+    // before it had a batch (see crud::create()/update()'s own
+    // INVENTORY_LEGACY_PRICE_FIELDS freeze) — accurate as exactly
+    // that, and meant to read back as exactly what's stored, not
+    // silently replaced by a different number the moment a batch
+    // exists. The live, currently-selling price/cost is available
+    // from batches::list_batches / front_of_queue_prices directly
+    // (see pos.rs::lookup_products and repack.rs, which already read
+    // it that way) — crud::list() has no business rewriting this
+    // item's own columns to it. Overlaying it here silently disagreed
+    // with what every one of those tests expects list() to return,
+    // which is what this removal fixes.
     Ok(out)
 }
 
