@@ -403,6 +403,8 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
 
       - name: Install Android NDK
         run: sdkmanager --install "ndk;26.1.10909125"
