@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS roles (
     business_id     TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,             -- e.g. "Owner", "Cashier", "Accountant" — fully user-defined, nothing beyond "Owner" itself is a fixed name anywhere in the engine
     is_system       INTEGER NOT NULL DEFAULT 0,-- system roles can't be deleted (e.g. Owner)
-    can_administer  INTEGER NOT NULL DEFAULT 0,-- grants the "admin tier" (payments history, notifications, settings, reference data) WITHOUT being Owner — a capability flag an Owner toggles per role, not a hardcoded role name like "Manager"
+    can_administer  INTEGER NOT NULL DEFAULT 0,-- grants the "admin tier" (payments history, settings, reference data) WITHOUT being Owner — a capability flag an Owner toggles per role, not a hardcoded role name like "Manager"
     UNIQUE(business_id, name)
 );
 
@@ -112,21 +112,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     business_id     TEXT NOT NULL,
     created_at      TEXT NOT NULL,
     expires_at      TEXT NOT NULL
-);
-
--- Outbound WhatsApp/SMS queue. Every notification is recorded here
--- regardless of whether a real provider is configured — this is what
--- lets the system work (and be testable) with zero external accounts,
--- and gives an owner a visible log of what was sent to whom.
-CREATE TABLE IF NOT EXISTS notifications (
-    id              TEXT PRIMARY KEY,
-    business_id     TEXT NOT NULL,
-    channel         TEXT NOT NULL,       -- 'whatsapp' | 'sms'
-    recipient       TEXT NOT NULL,       -- phone number
-    message         TEXT NOT NULL,
-    status          TEXT NOT NULL,       -- 'queued' | 'sent' | 'failed'
-    provider_response TEXT,
-    created_at      TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_business_time ON audit_log(business_id, timestamp);

@@ -29,37 +29,46 @@ fn test_excel_import_parses_money_field_as_integer_cents() {
     // then correctly rejected, meaning every row with a money value
     // failed to import.
     //
-    // Exercised here against an UPDATE to an item that already exists
-    // (seeded directly, not via this importer), not a brand-new row:
-    // a brand-new inventory row is deliberately forced to
-    // unit_cost/unit_price 0 on creation, same as crud::create() (see
-    // excel_import.rs's own comment on that None-branch block, and
-    // test_crud_create_forces_inventory_price_to_zero) — real price
-    // only ever enters through a batch (receiving.rs::receive()), so a
-    // create-path test can never actually observe cell_to_json's money
-    // parsing surviving into the stored row. An update is the one path
-    // where inventory.unit_cost/unit_price genuinely are writable
-    // (is_update_blocked_field has no special case for them), which is
-    // exactly what this test needs to prove the parsing itself is
-    // correct.
+    // Exercised against an UPDATE to a Purchasing order that hasn't
+    // been received yet (seeded directly via crud::create — NOT through
+    // this importer and NOT through the create_and_receive API path,
+    // either of which would auto-receive it immediately), not an
+    // Inventory row: Inventory's own unit_cost/unit_price are now
+    // permanently blocked on every update path, spreadsheet or
+    // otherwise (see crud::is_update_blocked_field) — real price only
+    // ever enters through a batch, so an inventory-targeted version of
+    // this test could no longer ever observe cell_to_json's money
+    // parsing surviving into a stored row. A still-unreceived Purchasing
+    // order — priced at order time, freely editable right up until it's
+    // received — is the one place left where a money-typed field
+    // genuinely stays update-writable, which is exactly what this test
+    // needs to prove the parsing itself is correct.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
-    let module = crate::crud::load_module(&conn, &biz, "inventory").unwrap();
+    let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
 
     seed_inventory_item(&conn, &biz, "FLOUR-001", "Flour", 10, 0, 0);
+    let mut po = serde_json::Map::new();
+    po.insert("po_number".into(), json!("PO-SEED-1"));
+    po.insert("supplier".into(), json!("Acme"));
+    po.insert("item_name".into(), json!("Flour"));
+    po.insert("quantity".into(), json!(10));
+    po.insert("unit_cost".into(), json!(500));
+    po.insert("unit_price".into(), json!(800));
+    crate::crud::create(&conn, &biz, &uid, "purchasing", &po).unwrap();
 
     let xlsx = build_xlsx(
-        &["sku", "name", "quantity", "unit_cost", "unit_price"],
-        &[vec!["FLOUR-001", "Flour", "10", "12.50", "24.50"]],
+        &["po_number", "supplier", "item_name", "quantity", "unit_cost", "unit_price"],
+        &[vec!["PO-SEED-1", "Acme", "Flour", "10", "12.50", "24.50"]],
     );
 
-    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "sku").unwrap();
+    let result = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx, "po_number").unwrap();
     assert_eq!(result.updated, 1);
     assert_eq!(result.errors.len(), 0, "errors: {:?}", result.errors);
 
-    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
-    let row = list.iter().find(|r| r["sku"] == json!("FLOUR-001")).unwrap();
+    let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let row = list.iter().find(|r| r["po_number"] == json!("PO-SEED-1")).unwrap();
     assert_eq!(row["unit_cost"].as_i64().unwrap(), 1250);
     assert_eq!(row["unit_price"].as_i64().unwrap(), 2450);
 }

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 31;
+const CURRENT_VERSION: i32 = 32;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -75,7 +75,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 29 { v29_legacy_batch_backfill(conn)?; }
     if current < 30 { v30_inventory_price_not_required(conn)?; }
     if current < 31 { v31_purchasing_unit_price(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 31, "bump this alongside the last `if current < N` check above");
+    if current < 32 { v32_drop_notifications_table(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 32, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2250,6 +2251,31 @@ fn v31_purchasing_unit_price(conn: &mut Connection) -> Result<()> {
     }
 
     tx.execute("INSERT INTO _schema_version (version) VALUES (31)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Drops the `notifications` table (WhatsApp/SMS log) — the feature
+/// itself was removed from this app entirely: notifications.rs is
+/// gone, its three HTTP routes are gone, the Admin tab is gone, and
+/// fresh installs' schema.sql no longer creates this table at all.
+/// Nothing in the codebase reads or writes it anymore, so on an
+/// upgrade it would otherwise sit here forever as a dead, orphaned
+/// table with no code path left that even knows it exists. `IF
+/// EXISTS` covers both real cases this migration will actually run
+/// against: an existing install that had the table, and a fresh
+/// install whose schema.sql never created it in the first place (this
+/// migration still runs once for every business either way, since
+/// _schema_version is what's actually being tracked here, not the
+/// table's presence) — either way this is a no-op-or-drop, never an
+/// error. This does mean any past "sent" message log on an existing
+/// install is genuinely gone after this upgrade, not just orphaned —
+/// deliberate, not accidental: the feature that ever wrote to it no
+/// longer exists in this app either.
+fn v32_drop_notifications_table(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DROP TABLE IF EXISTS notifications", [])?;
+    tx.execute("INSERT INTO _schema_version (version) VALUES (32)", [])?;
     tx.commit()?;
     Ok(())
 }

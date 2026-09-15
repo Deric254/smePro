@@ -24,7 +24,6 @@ pub mod invoice;
 pub mod module;
 pub mod money;
 pub mod network_mode;
-pub mod notifications;
 pub mod onboarding;
 pub mod pos;
 pub mod profit;
@@ -122,7 +121,6 @@ pub fn modules_dir() -> std::path::PathBuf {
 pub const MODULE_DEFS: &[(&str, &str)] = &[
     ("accounting", include_str!("../modules/accounting.json")),
     ("debt_credit", include_str!("../modules/debt_credit.json")),
-    ("hr", include_str!("../modules/hr.json")),
     ("inventory", include_str!("../modules/inventory.json")),
     ("invoice", include_str!("../modules/invoice.json")),
     ("purchasing", include_str!("../modules/purchasing.json")),

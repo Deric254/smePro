@@ -206,8 +206,10 @@ pub fn ask(conn: &Connection, business_id: &str, user_id: &str, question: &str) 
 }
 
 fn tls_agent() -> Result<ureq::Agent> {
-    // See the matching comment in notifications.rs — plain default
-    // agent, rustls via ureq's "tls" feature, no system OpenSSL needed.
+    // Plain default agent, rustls via ureq's "tls" feature — no system
+    // OpenSSL needed, which is what breaks cross-compiled builds
+    // (Android, cross-arch macOS) with "could not find OpenSSL
+    // installation".
     //
     // The timeout here is still not optional polish, even now that
     // http_api.rs's AI-ask routes release the DB mutex before making

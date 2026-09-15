@@ -53,7 +53,7 @@ export function formatMoney(cents: number | null | undefined, currencyCode: stri
  * person tabs away from it. Every one of those comma-formatted
  * strings then had nowhere to go: this parser rejected any non-digit
  * character, including the very commas formatMoney had just inserted,
- * so simply opening an HR salary (almost always >= 1,000) for edit
+ * so simply opening an invoice total (almost always >= 1,000) for edit
  * and saving it straight back — without changing a thing — failed
  * with "'50,000.00' is not a valid amount". Thousands separators are
  * also just how people normally type larger figures by hand. Commas

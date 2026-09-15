@@ -122,6 +122,45 @@ pub struct ReceiveRequest {
     pub expiry_date: Option<String>,
 }
 
+/// Creates a new Purchasing order and receives it immediately, in one
+/// transaction — the on-screen "+ New" counterpart to what
+/// `excel_import::import()` already does for a bulk-imported
+/// purchasing row (see that file's own "THE ACTUAL FIX Deric asked
+/// for" comment). Before this, only the spreadsheet path skipped the
+/// separate manual "Receive" click; a purchase order typed in by hand
+/// through the ordinary form still landed unreceived, sitting at
+/// quantity 0 in Inventory until someone came back and clicked
+/// Receive on it — two different behaviors for recording the exact
+/// same real-world fact (stock that has already arrived). This closes
+/// that gap: the moment a purchasing record is created here, it's
+/// received in the same transaction, via the exact same
+/// `receive_in_tx` mechanics `receive()` below and the Excel import
+/// path both already share.
+pub fn create_and_receive(
+    conn: &mut Connection,
+    business_id: &str,
+    user_id: &str,
+    body: &serde_json::Map<String, Value>,
+) -> Result<Value> {
+    // Same permission the manual-receive and bulk-import paths both
+    // require, checked up front for the same reason: creating a
+    // purchasing order this way can increase Inventory stock, the
+    // exact same effect `receive()` has.
+    crate::rbac::require(conn, user_id, "inventory", "receive")?;
+
+    let tx = conn.transaction()?;
+    let id = crud::create(&tx, business_id, user_id, "purchasing", body)?;
+    let purchasing_table = crud::load_module(&tx, business_id, "purchasing")?.table_name();
+    let summary = receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &id, None, None, None, Some(user_id))?;
+    // Same discipline as receive() and repack(): nothing above is
+    // durable until this line.
+    tx.commit()?;
+
+    let _ = crate::audit::log(conn, business_id, Some(user_id), "_receiving", "receive", Some(&id), Some(&summary));
+
+    Ok(json!({"id": id, "receiving": summary}))
+}
+
 /// Runs the whole receive-stock operation as one atomic transaction.
 pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: ReceiveRequest) -> Result<Value> {
     // Same pattern as checkout: one purpose-built permission on the

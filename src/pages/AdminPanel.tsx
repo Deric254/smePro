@@ -8,7 +8,6 @@ import {
   getAiSettings,
   createBackup, restoreBackup,
   getAuditLog,
-  listNotifications, sendNotification, sendLowStockAlert,
   getCurrencyRates, convertCurrency, refreshCurrencyRates,
   listTaxRates, setTaxRate, computeTax,
   changeBusinessType,
@@ -17,14 +16,14 @@ import {
   getToken,
   ApiError,
 } from '../api';
-import type { AuditLogEntry, NotificationRecord, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule, ReleaseOption } from '../api';
+import type { AuditLogEntry, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule, ReleaseOption } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
 import { parseBackendTimestamp } from '../lib/date';
 import BusinessBranding from '../components/BusinessBranding';
 import TwoFactorSetup from '../components/TwoFactorSetup';
 
-export type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'backup' | 'audit' | 'notifications' | 'business' | 'security' | 'ai' | 'network';
+export type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'backup' | 'audit' | 'business' | 'security' | 'ai' | 'network';
 
 export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
@@ -37,7 +36,6 @@ export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'ai', label: 'AI Settings' },
   { id: 'security', label: 'Security' },
   { id: 'network', label: 'Network' },
-  { id: 'notifications', label: 'Notifications' },
   { id: 'backup', label: 'Backup & Restore' },
   { id: 'audit', label: 'Audit Log' },
 ];
@@ -65,7 +63,6 @@ export default function AdminPanel({ tab, onModulesChanged }: { tab: Tab; onModu
       {tab === 'security' && <TwoFactorSetup />}
       {tab === 'network' && <NetworkTab />}
       {tab === 'ai' && <AiSettingsTab />}
-      {tab === 'notifications' && <NotificationsTab />}
       {tab === 'backup' && <BackupTab />}
       {tab === 'audit' && <AuditLogTab />}
     </div>
@@ -1463,148 +1460,6 @@ function AuditLogTab() {
 }
 
 type UserAccountLike = { id: string; username: string };
-
-// -------------------------------------------------------- Notifications
-
-function NotificationsTab() {
-  const [channel, setChannel] = useState<'whatsapp' | 'sms'>('whatsapp');
-  const [recipient, setRecipient] = useState('');
-  const [message, setMessage] = useState('');
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [sent, setSent] = useState(false);
-  const [history, setHistory] = useState<NotificationRecord[]>([]);
-  const [loadingHistory, setLoadingHistory] = useState(true);
-  // Separate submitting/error state from the manual send form above —
-  // the two actions can be triggered independently, and mixing their
-  // in-flight/error state would show a spinner or error message on
-  // the wrong button while the other one is what's actually running.
-  const [sendingLowStock, setSendingLowStock] = useState(false);
-  const [lowStockError, setLowStockError] = useState<string | null>(null);
-  const [lowStockSent, setLowStockSent] = useState(false);
-
-  const refresh = () => {
-    setLoadingHistory(true);
-    listNotifications().then((r) => setHistory(r.notifications)).catch(() => {}).finally(() => setLoadingHistory(false));
-  };
-  useEffect(() => { refresh(); }, []);
-
-  async function handleSend(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setSent(false);
-    setSending(true);
-    try {
-      await sendNotification(channel, recipient, message);
-      setMessage('');
-      setSent(true);
-      refresh();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not send this message');
-    } finally {
-      setSending(false);
-    }
-  }
-
-  async function handleSendLowStock() {
-    if (!recipient) {
-      setLowStockError('Enter a recipient phone number above first.');
-      return;
-    }
-    setLowStockError(null);
-    setLowStockSent(false);
-    setSendingLowStock(true);
-    try {
-      // The message itself is composed server-side from the same
-      // low-stock data the AI assistant and Dashboard already use —
-      // see notifications::send_low_stock_alert — so there's nothing
-      // else to gather here beyond channel + recipient.
-      await sendLowStockAlert(channel, recipient);
-      setLowStockSent(true);
-      refresh();
-    } catch (err) {
-      setLowStockError(err instanceof ApiError ? err.message : 'Could not send the low-stock alert');
-    } finally {
-      setSendingLowStock(false);
-    }
-  }
-
-  return (
-    <div>
-      <div className="card" style={{ marginBottom: '1rem' }}>
-        <h3 style={{ marginTop: 0 }}>Send a message</h3>
-        <p style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginTop: 0 }}>
-          Requires Twilio configured, or messages are only logged.
-        </p>
-        <ErrorBox error={error} />
-        {sent && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.7rem' }}>Sent.</div>}
-        <form onSubmit={handleSend} style={styles.formGrid}>
-          <div>
-            <label>Channel</label>
-            <select value={channel} onChange={(e) => setChannel(e.target.value as 'whatsapp' | 'sms')} style={{ width: '100%' }}>
-              <option value="whatsapp">WhatsApp</option>
-              <option value="sms">SMS</option>
-            </select>
-          </div>
-          <div>
-            <label>Recipient phone number</label>
-            <input value={recipient} onChange={(e) => setRecipient(e.target.value)} placeholder="+2547XXXXXXXX" required style={{ width: '100%' }} />
-          </div>
-          <div style={{ gridColumn: '1 / -1' }}>
-            <label>Message</label>
-            <textarea value={message} onChange={(e) => setMessage(e.target.value)} required rows={3} style={{ width: '100%' }} />
-          </div>
-        </form>
-        <button className="btn btn-stamp" style={{ marginTop: '0.8rem' }} onClick={handleSend} disabled={sending}>
-          {sending ? 'Sending…' : 'Send'}
-        </button>
-      </div>
-
-      <div className="card" style={{ marginBottom: '1rem' }}>
-        <h3 style={{ marginTop: 0 }}>Send low-stock alert</h3>
-        {lowStockError && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginBottom: '0.6rem' }}>{lowStockError}</div>}
-        {lowStockSent && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.6rem' }}>Sent.</div>}
-        <button className="btn btn-outline" onClick={handleSendLowStock} disabled={sendingLowStock}>
-          {sendingLowStock ? 'Sending…' : 'Send low-stock alert'}
-        </button>
-      </div>
-
-      <h3 style={{ margin: '1.2rem 0 0.8rem' }}>Recent messages</h3>
-      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
-        <table className="data-table" style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>When</th>
-              <th style={styles.th}>Channel</th>
-              <th style={styles.th}>To</th>
-              <th style={styles.th}>Message</th>
-              <th style={styles.th}>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loadingHistory ? (
-              <tr><td style={{ ...styles.td, display: 'block', textAlign: 'center' }} colSpan={5}>Loading…</td></tr>
-            ) : history.length === 0 ? (
-              <tr><td style={{ ...styles.td, display: 'block', textAlign: 'center' }} colSpan={5}>No messages sent yet.</td></tr>
-            ) : (
-              history.map((n) => (
-                <tr key={n.id}>
-                  <td style={styles.td} className="mono" data-label="When">{parseBackendTimestamp(n.created_at).toLocaleString()}</td>
-                  <td style={styles.td} data-label="Channel">{n.channel}</td>
-                  <td style={styles.td} className="mono" data-label="To">{n.recipient}</td>
-                  <td style={styles.td} data-label="Message">{n.message.length > 60 ? n.message.slice(0, 60) + '…' : n.message}</td>
-                  <td style={styles.td} data-label="Status">
-                    <span className={`status-pill ${n.status === 'sent' ? 'status-active' : ''}`}>{n.status}</span>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
 
 // --------------------------------------------------------- AI Settings
 

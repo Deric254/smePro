@@ -3,7 +3,7 @@ import {
   getModuleSchema, listRecords, createRecord, updateRecord, deleteRecord, exportModule,
   downloadImportTemplate, importExcel,
   runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, getBusinessInfo,
-  receiveStock, repackStock, settleDebt, getBatches, updateBatchPrice, ApiError,
+  repackStock, settleDebt, getBatches, updateBatchPrice, ApiError,
 } from '../api';
 import type { NewInvoiceItem, ImportExcelResult, BatchSummary } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
@@ -242,21 +242,8 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // permission set regardless of which module's table you're currently
   // viewing, which is why receiving needs its own small fetch below
   // when you're on the Purchasing page rather than Inventory itself.
-  const [inventoryCanReceive, setInventoryCanReceive] = useState(false);
   const [inventoryCanRepack, setInventoryCanRepack] = useState(false);
 
-  const [receivingId, setReceivingId] = useState<string | null>(null);
-  const [receiveQtyText, setReceiveQtyText] = useState('');
-  // Optional per-delivery overrides — see batches.rs's module doc
-  // comment: every receipt now becomes its own batch, so THIS is the
-  // one place a business can set a real expiry date (essential for
-  // FEFO to mean anything) or price this specific delivery differently
-  // from the item's existing price, instead of everything defaulting
-  // to the item's legacy price forever.
-  const [receivePriceText, setReceivePriceText] = useState('');
-  const [receiveExpiryDate, setReceiveExpiryDate] = useState('');
-  const [receiveError, setReceiveError] = useState<string | null>(null);
-  const [receiveSubmitting, setReceiveSubmitting] = useState(false);
   const [actionResult, setActionResult] = useState<string | null>(null);
 
   const [repackSourceId, setRepackSourceId] = useState<string | null>(null);
@@ -351,56 +338,6 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       setBatchSaveError(err instanceof ApiError ? err.message : 'Could not update this batch');
     } finally {
       setBatchSaving(false);
-    }
-  }
-
-  useEffect(() => {
-    if (moduleId === 'inventory') return; // schema.my_permissions already covers this case directly
-    if (moduleId !== 'purchasing') return; // receiving only ever gets triggered from the Purchasing list
-    getModuleSchema('inventory')
-      .then((s) => setInventoryCanReceive(s.my_permissions.includes('receive')))
-      .catch(() => {}); // Inventory module not enabled, or this role can't see it — button just won't show
-  }, [moduleId]);
-
-  async function submitReceive() {
-    if (!receivingId) return;
-    const qty = receiveQtyText.trim() === '' ? undefined : parseInt(receiveQtyText, 10);
-    if (receiveQtyText.trim() !== '' && (!Number.isInteger(qty) || (qty as number) <= 0)) {
-      setReceiveError('Quantity received must be a positive whole number.');
-      return;
-    }
-    let priceOverride: number | undefined;
-    // Blank is a valid, ordinary choice now, not an error: it means
-    // "use this delivery's own price, exactly as declared on the
-    // purchase order" — receive_in_tx defaults to that itself (see its
-    // updated comment). The field is pre-filled from the PO's own
-    // unit_price when this modal opens specifically so the common case
-    // needs no typing at all; only override it here if today's actual
-    // price genuinely differs from what was planned at order time.
-    if (receivePriceText.trim() !== '') {
-      const parsed = parseMoneyInput(receivePriceText, businessCurrency);
-      if (parsed === null) {
-        setReceiveError('Selling price must be a valid amount.');
-        return;
-      }
-      priceOverride = parsed;
-    }
-    setReceiveSubmitting(true);
-    setReceiveError(null);
-    try {
-      const summary = await receiveStock(receivingId, qty, priceOverride, receiveExpiryDate.trim() || undefined);
-      setActionResult(
-        `Received ${summary.quantity_received} of "${summary.inventory_name}". New stock: ${summary.new_stock_level}. This delivery's own cost: ${formatMoney(summary.batch_unit_cost, businessCurrency)}.`
-      );
-      setReceivingId(null);
-      setReceiveQtyText('');
-      setReceivePriceText('');
-      setReceiveExpiryDate('');
-      await refreshRecords();
-    } catch (err) {
-      setReceiveError(err instanceof ApiError ? err.message : 'Could not receive this purchase order');
-    } finally {
-      setReceiveSubmitting(false);
     }
   }
 
@@ -789,20 +726,19 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                 )}
                 {schema.fields.filter((f) => !isActionManagedField(moduleId, f.name)
                   && !(moduleId === 'purchasing' && (f.name === 'item_name' || f.name === 'inventory_record_id'))
-                  // unit_cost/unit_price: hidden on CREATE only, not
-                  // edit — unlike quantity above, these aren't always-
-                  // action-managed. crud::create() now silently forces
-                  // both to 0 regardless of what's submitted (price
-                  // only ever enters through a real purchase/batch —
-                  // see crud.rs), so showing an editable input here
-                  // would let someone type a price that's then quietly
-                  // thrown away, the exact "looks like it worked, isn't
-                  // what actually happened" problem this session's
-                  // other fixes were about. Editing an EXISTING item's
-                  // legacy unit_cost/unit_price is still a supported,
-                  // deliberate path (manually correcting historical
-                  // figures), so this only applies while editingId is
-                  // null.
+                  // unit_cost/unit_price: hidden on CREATE only. A
+                  // brand-new item is always forced to zero regardless
+                  // of what's typed (crud::create's own rule — real
+                  // price only ever enters through a purchase), so
+                  // showing an editable input here would let someone
+                  // type a price that's then silently discarded. Once
+                  // the item EXISTS, these fields are the sanctioned way
+                  // to correct a legacy item's price for as long as it
+                  // has no real batch yet (see crud::update's
+                  // inventory_has_batches check) — the backend itself
+                  // enforces the cutoff the moment a batch exists, with
+                  // a clear error, so the edit form doesn't need to know
+                  // which state a given item is in.
                   && !(moduleId === 'inventory' && editingId === null && (f.name === 'unit_cost' || f.name === 'unit_price'))
                 ).map((f) => (
                   <FieldInput key={f.name} field={f} value={formValues[f.name] ?? ''} units={units} currencies={currencies} businessCurrency={businessCurrency} onChange={(v) => setFormValues((p) => ({ ...p, [f.name]: v }))} />
@@ -824,7 +760,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                       {moduleId === 'invoice' && c === 'tax_amount' ? 'tax' : c.replace(/_/g, ' ')}
                     </th>
                   ))}
-                  {(canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || moduleId === 'inventory' || canSettle) && moduleId !== 'invoice' && <th style={styles.th} />}
+                  {(canUpdate || canDelete || moduleId === 'inventory' || canSettle) && moduleId !== 'invoice' && <th style={styles.th} />}
                 </tr>
               </thead>
               <tbody>
@@ -856,14 +792,9 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                         </div>
                       </td>
                     )}
-                    {moduleId !== 'invoice' && (canUpdate || canDelete || (moduleId === 'purchasing' && inventoryCanReceive) || moduleId === 'inventory' || canSettle) && (
+                    {moduleId !== 'invoice' && (canUpdate || canDelete || moduleId === 'inventory' || canSettle) && (
                       <td style={styles.td}>
                         <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-                          {moduleId === 'purchasing' && inventoryCanReceive && !r.received && (
-                            <button className="btn btn-stamp" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setReceivingId(r.id); setReceiveQtyText(''); setReceivePriceText(typeof r.unit_price === 'number' ? (r.unit_price / 100).toFixed(2) : ''); setReceiveExpiryDate(''); setReceiveError(null); }}>
-                              Receive
-                            </button>
-                          )}
                           {moduleId === 'inventory' && inventoryCanRepack && (
                             <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setRepackSourceId(r.id); setRepackTargetId(''); setRepackTargetMode('existing'); setRepackNewTargetName(''); setRepackNewTargetPriceText(''); setRepackSourceQtyText('1'); setRepackTargetQtyText(''); setRepackNotes(''); setRepackError(null); }}>
                               Repack
@@ -910,52 +841,6 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         <div className="card" style={{ ...styles.error, background: 'var(--paper-highlight, #eef7ee)', color: 'var(--ink)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>{actionResult}</span>
           <button className="btn btn-outline" style={{ padding: '0.2em 0.6em', fontSize: '0.75rem' }} onClick={() => setActionResult(null)}>Dismiss</button>
-        </div>
-      )}
-
-      {receivingId && (
-        <div style={styles.overlay} onClick={() => setReceivingId(null)}>
-          <div className="card" style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ marginTop: 0 }}>Receive stock</h3>
-            <label>Quantity received (optional)</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              placeholder="Full ordered quantity"
-              value={receiveQtyText}
-              onChange={(e) => setReceiveQtyText(e.target.value)}
-              style={{ width: '100%' }}
-            />
-            <label style={{ marginTop: '0.6rem', display: 'block' }}>Selling price for this delivery</label>
-            <input
-              type="text"
-              inputMode="decimal"
-              placeholder="Defaults to this purchase order's own price"
-              value={receivePriceText}
-              onChange={(e) => setReceivePriceText(e.target.value)}
-              style={{ width: '100%' }}
-            />
-            <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
-              Pre-filled from this purchase order's own price — change it only if today's actual price is different.
-            </div>
-            <label style={{ marginTop: '0.6rem', display: 'block' }}>Expiry date (optional)</label>
-            <input
-              type="date"
-              value={receiveExpiryDate}
-              onChange={(e) => setReceiveExpiryDate(e.target.value)}
-              style={{ width: '100%' }}
-            />
-            <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.3rem' }}>
-              This delivery becomes its own batch — set an expiry date here if it has one, so it sells before older or undated stock.
-            </div>
-            {receiveError && <div style={styles.error}>{receiveError}</div>}
-            <div style={styles.modalActions}>
-              <button className="btn btn-outline" onClick={() => setReceivingId(null)} disabled={receiveSubmitting}>Cancel</button>
-              <button className="btn btn-stamp" onClick={submitReceive} disabled={receiveSubmitting}>
-                {receiveSubmitting ? 'Receiving…' : 'Confirm receipt'}
-              </button>
-            </div>
-          </div>
         </div>
       )}
 

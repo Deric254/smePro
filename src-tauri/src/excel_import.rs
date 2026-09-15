@@ -830,6 +830,58 @@ pub fn import(
                     }
                 }
 
+                // Same fix, same reason, as the "purchasing" block just
+                // above — and it closes a real gap, not a hypothetical
+                // one: crud::update()'s own INVENTORY_LEGACY_PRICE_FIELDS
+                // freeze (see that file) rejects unit_cost/unit_price by
+                // PRESENCE alone once an item has a real batch, with no
+                // way to tell "sent but unchanged" from "sent and
+                // changed." The sanctioned stock-take workflow just
+                // above ("Export to Excel", edit counts, reimport) was,
+                // until this block, silently unusable for exactly that
+                // case: its own export always includes unit_cost/
+                // unit_price, so re-importing that file completely
+                // untouched — the ordinary case — would still hard-fail
+                // every single row for any item that had ever been
+                // through one real purchase. Same discipline as
+                // purchasing: reject only if the incoming value actually
+                // differs from what's stored; strip it once confirmed
+                // unchanged, so crud::update() only ever sees these two
+                // fields when they're genuinely being changed on a
+                // legacy (batch-less) item.
+                if module.id == "inventory" {
+                    let has_batches: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM inventory_batches WHERE inventory_record_id = ?1 AND business_id = ?2 AND deleted_at IS NULL)",
+                            rusqlite::params![&id, business_id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(false);
+                    if has_batches {
+                        let mut rejected_field: Option<&str> = None;
+                        for field in ["unit_cost", "unit_price"] {
+                            let Some(incoming) = record.get(field) else { continue };
+                            let stored = stored_field_value(&tx, &table, business_id, &id, field, false).unwrap_or(Value::Null);
+                            if incoming != &stored {
+                                rejected_field = Some(field);
+                                break;
+                            }
+                        }
+                        if let Some(field) = rejected_field {
+                            errors.push(json!({
+                                "row": row_num,
+                                "error": format!(
+                                    "'{field}' cannot be edited here once this item has a real purchase batch behind it — correct the batch's own price instead (see Inventory's batch list for this item)"
+                                )
+                            }));
+                            continue;
+                        }
+                        for field in ["unit_cost", "unit_price"] {
+                            record.remove(field);
+                        }
+                    }
+                }
+
                 // `inventory`'s `quantity` is deliberately NOT filtered
                 // here even when changed: that field's whole reason
                 // for being in the template is the sanctioned

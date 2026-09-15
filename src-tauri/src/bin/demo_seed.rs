@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     // lib.rs's `MODULE_DEFS` doc comment) works the same way regardless
     // of working directory, matching what every other caller of
     // `enable_module` was already switched to.
-    for id in ["inventory", "sales", "hr", "accounting", "purchasing", "debt_credit", "refunds", "invoice"] {
+    for id in ["inventory", "sales", "accounting", "purchasing", "debt_credit", "refunds", "invoice"] {
         let json = module_json(id).unwrap_or_else(|| panic!("missing embedded module definition: {id}"));
         business_panel::enable_module(&mut conn, &business_id, json)?;
     }

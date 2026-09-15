@@ -458,6 +458,55 @@ pub fn update_batch_price(
     Ok(summary)
 }
 
+/// Front-of-queue cost/price for many Inventory items in a single
+/// query — the multi-item counterpart to `list_batches`'s own
+/// `front_of_queue_unit_cost`/`front_of_queue_unit_price`, built the
+/// same way (front batch wins, no live batch falls back to legacy —
+/// but legacy itself is the caller's job here, since the caller
+/// already has each item's own row). Used by crud::list() to show the
+/// Inventory table's price columns as what checkout would actually
+/// charge right now, not the frozen legacy value alone, for however
+/// many rows are on the current page — one query for all of them
+/// rather than one per row, so a full inventory list doesn't turn
+/// into N+1 queries. Same FEFO_ORDER_BY tiebreak as every other
+/// consumer, so this can't quietly disagree with what a sale charges.
+pub(crate) fn front_of_queue_prices(
+    conn: &rusqlite::Connection,
+    business_id: &str,
+    inventory_record_ids: &[String],
+) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+    if inventory_record_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders = inventory_record_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "WITH front_batch AS (
+            SELECT inventory_record_id, unit_cost, unit_price,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY inventory_record_id
+                       ORDER BY {FEFO_ORDER_BY}
+                   ) AS rn
+            FROM inventory_batches
+            WHERE business_id = ?1 AND deleted_at IS NULL AND quantity_remaining > 0
+              AND inventory_record_id IN ({placeholders})
+         )
+         SELECT inventory_record_id, unit_cost, unit_price FROM front_batch WHERE rn = 1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(business_id.to_string())];
+    params.extend(inventory_record_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::ToSql>));
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |r| {
+        Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))
+    })?;
+    rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>().map_err(Into::into)
+}
+
 /// Lists every live batch for one Inventory item, in FEFO order, plus
 /// the item's legacy quantity (computed, never stored — see this
 /// file's own module doc comment) and a read-time "front of queue"

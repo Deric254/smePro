@@ -9,7 +9,7 @@ built and tested in a sandbox (compiled with `cargo build`, executed with
   which modules are enabled: businesses, modules, users, roles, permissions,
   audit_log, licenses, admin_recovery.
 - `modules/inventory.json` — an example module definition. This is the
-  **only** thing you write to add a new module (Sales, HR, POS, ...): a JSON
+  **only** thing you write to add a new module (Sales, Refunds, POS, ...): a JSON
   file describing fields, actions, and default role permissions.
 - `src/module.rs` — reads a module JSON file and generates a real SQL table
   for it at runtime (`CREATE TABLE module_<id> (...)`), validates records
@@ -64,7 +64,7 @@ module disabled (table confirmed still present, data intact) → re-enabled
 **any** enabled module by reading its schema back out of the `modules`
 registry table at request time (not from a hardcoded struct). This is the
 actual proof that "no code changes to add a module" holds: inventory,
-sales, HR, whatever — same four functions handle all of them.
+sales, refunds, whatever — same four functions handle all of them.
 - `create()` — validates, applies field defaults, inserts, audits
 - `list()` — pagination + free-text search across all text fields,
   generated dynamically from the module's field list

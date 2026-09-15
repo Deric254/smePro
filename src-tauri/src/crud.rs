@@ -588,7 +588,42 @@ pub fn list(
         Ok(Value::Object(obj))
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Inventory-only: the columns above are each item's own stored
+    // unit_cost/unit_price, which crud::create()/update() freeze the
+    // moment a real batch exists (see this file's own comments on
+    // both of those) — accurate as a record of what was typed, but
+    // not necessarily what checkout would charge right now if a
+    // cheaper/pricier batch is currently at the front of the FEFO
+    // queue. Overlaying the live front-of-queue price/cost here,
+    // right where every list view (table, Excel export, API caller)
+    // already goes through, keeps what's displayed in sync with what
+    // a sale actually charges — one query for the whole page, not one
+    // per row. Items with no live batch (nothing received yet, or a
+    // genuinely legacy item) are untouched: their own stored value is
+    // already the accurate answer for that case.
+    if module_id == "inventory" && !out.is_empty() {
+        let ids: Vec<String> = out
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let front = crate::batches::front_of_queue_prices(conn, business_id, &ids)?;
+        for row in out.iter_mut() {
+            let id = match row.get("id").and_then(Value::as_str) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if let Some(&(cost, price)) = front.get(id.as_str()) {
+                if let Value::Object(obj) = row {
+                    obj.insert("unit_cost".to_string(), json!(cost));
+                    obj.insert("unit_price".to_string(), json!(price));
+                }
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 /// UPDATE — partial update of any subset of fields, validated, audited
@@ -651,6 +686,32 @@ pub fn update(
         false
     };
 
+    // Inventory's own unit_cost/unit_price are the ONE legitimate,
+    // ongoing exception to "price only ever enters through Purchasing":
+    // correcting a legacy item's price — one that predates the batch
+    // system, or was created before this app ever forced new items to
+    // start at zero — for as long as it has genuinely never been
+    // received through a batch. The moment even one batch exists for
+    // this item, that item's real price now lives on the batch (see
+    // batches.rs), and hand-editing the Inventory record's own fields
+    // would silently disagree with it — no error, nothing re-applied
+    // to Sales' own cost_at_sale history — the exact "inventory has a
+    // price after all" gap this whole session started from. So it's
+    // frozen from that point on, same discipline as
+    // PURCHASING_FROZEN_AFTER_RECEIPT just above; correcting the price
+    // on an item that already has batches means correcting the batch
+    // itself (see batches::update_batch_price), not this record.
+    const INVENTORY_LEGACY_PRICE_FIELDS: [&str; 2] = ["unit_cost", "unit_price"];
+    let inventory_has_batches: bool = if module_id == "inventory" && body.keys().any(|k| INVENTORY_LEGACY_PRICE_FIELDS.contains(&k.as_str())) {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM inventory_batches WHERE inventory_record_id = ?1 AND business_id = ?2 AND deleted_at IS NULL)",
+            params![record_id, business_id],
+            |r| r.get(0),
+        )?
+    } else {
+        false
+    };
+
     let mut sets = vec![];
     let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![];
     let mut idx = 1;
@@ -666,6 +727,11 @@ pub fn update(
         if purchasing_received && PURCHASING_FROZEN_AFTER_RECEIPT.contains(&k.as_str()) {
             return Err(anyhow!(
                 "'{k}' cannot be edited on a purchase order that's already been received — the batch it created keeps its own record of what was actually paid and charged; correct that batch directly instead (see Inventory's batch list for this item), or use the refund/repack actions if stock has already moved"
+            ));
+        }
+        if inventory_has_batches && INVENTORY_LEGACY_PRICE_FIELDS.contains(&k.as_str()) {
+            return Err(anyhow!(
+                "'{k}' cannot be edited here once this item has a real purchase batch behind it — correct the batch's own price instead (see Inventory's batch list for this item)"
             ));
         }
         // Companion to stock_take.rs::close()'s own version of this

@@ -785,9 +785,6 @@ export const exportAiChatHistory = async () => {
   downloadBlob(blob, 'ai-chat-history.xlsx');
 };
 
-// (Notifications — see the fuller, typed versions further down:
-// listNotifications, sendNotification, sendLowStockAlert)
-
 // ---- Roles & permissions ----
 export const listRoles = () => request('/roles');
 export const createRole = (name: string) =>
@@ -874,21 +871,6 @@ export interface AiSettingsStatus {
   claude_key_set: boolean;
 }
 export const getAiSettings = (): Promise<AiSettingsStatus> => request('/ai/settings');
-
-// ---- Notifications ----
-export interface NotificationRecord {
-  id: string;
-  channel: string;
-  recipient: string;
-  message: string;
-  status: string;
-  created_at: string;
-}
-export const listNotifications = (): Promise<{ notifications: NotificationRecord[] }> => request('/notifications');
-export const sendNotification = (channel: 'whatsapp' | 'sms', recipient: string, message: string) =>
-  request('/notifications/send', { method: 'POST', body: JSON.stringify({ channel, recipient, message }) });
-export const sendLowStockAlert = (channel: 'whatsapp' | 'sms', recipient: string) =>
-  request('/notifications/low-stock-alert', { method: 'POST', body: JSON.stringify({ channel, recipient }) });
 
 export interface NewInvoiceItem { description: string; quantity: number; unit_price: number }
 export const createInvoice = (payload: {

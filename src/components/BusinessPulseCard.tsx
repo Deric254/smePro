@@ -39,6 +39,11 @@ export default function BusinessPulseCard({ pulse, compact = false }: { pulse: B
       <div style={styles.statRow}>
         <span>Next month (estimate): <strong>{formatMoney(pulse.forecast_next_period_cents, pulse.currency)}</strong></span>
       </div>
+      {pulse.low_stock_count > 0 && (
+        <div style={styles.statRow}>
+          <span>Low stock: <strong style={{ color: 'var(--stamp)' }}>{pulse.low_stock_count} item{pulse.low_stock_count === 1 ? '' : 's'}</strong></span>
+        </div>
+      )}
       {pulse.recommendations.map((r, i) => (
         <div key={i} style={styles.recommendation}>• {r}</div>
       ))}

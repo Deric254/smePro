@@ -41,8 +41,8 @@ pub fn require_owner(conn: &Connection, user_id: &str) -> Result<()> {
 
 /// Requires the user to be Owner OR hold a role with the `can_administer`
 /// capability flag set. This is the "admin tier" gate for actions like
-/// viewing payment history, sending paid notifications, and managing
-/// reference data (units/currencies) or settings — deliberately NOT a
+/// viewing payment history and managing reference data
+/// (units/currencies) or settings — deliberately NOT a
 /// hardcoded role-name check (it used to check for the literal string
 /// "Manager", which meant a business whose second-in-command role was
 /// named anything else, in any language, silently couldn't do any of
@@ -173,7 +173,7 @@ pub fn read_scope(conn: &Connection, user_id: &str, module_id: &str) -> Result<R
 /// enabled module, the entire Admin menu, Sell, and Stock Take
 /// unconditionally to every signed-in user, regardless of whether their
 /// role actually had any access to them at all. A Staff account with
-/// zero permissions on, say, Accounting or HR still saw it listed under
+/// zero permissions on, say, Accounting or Refunds still saw it listed under
 /// Operations, clicked in, and hit a wall it could have been told about
 /// up front — not the "disable the button that would 403" fix
 /// ModuleView.tsx's own `my_permissions` already does WITHIN a module,

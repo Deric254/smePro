@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, ai_chat, audit, auth, backup, batches, crud, debt_settlement, excel_import, forecast, notifications, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, stock_take, users, xlsx_export};
+use crate::{ai_assistant, ai_chat, audit, auth, backup, batches, crud, debt_settlement, excel_import, forecast, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, stock_take, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -1602,38 +1602,6 @@ fn route(
         };
     }
 
-    // ---- Notifications: WhatsApp/SMS ----
-    if parts.as_slice() == ["notifications", "send"] && *method == Method::Post {
-        if let Err(e) = rbac::require_admin_tier(conn, &user_id) { return json_err(403, &e.to_string()); }
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let g = |k: &str| obj.get(k).and_then(Value::as_str).unwrap_or("");
-        if g("channel").is_empty() || g("recipient").is_empty() || g("message").is_empty() {
-            return json_err(400, "'channel', 'recipient', and 'message' are all required");
-        }
-        return match notifications::send(conn, &business_id, g("channel"), g("recipient"), g("message")) {
-            Ok(rec) => ApiResponse::Json(200, json!(rec)),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["notifications", "low-stock-alert"] && *method == Method::Post {
-        if let Err(e) = rbac::require_admin_tier(conn, &user_id) { return json_err(403, &e.to_string()); }
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let g = |k: &str| obj.get(k).and_then(Value::as_str).unwrap_or("");
-        if g("channel").is_empty() || g("recipient").is_empty() {
-            return json_err(400, "'channel' and 'recipient' are required");
-        }
-        return match notifications::send_low_stock_alert(conn, &business_id, &user_id, g("channel"), g("recipient")) {
-            Ok(rec) => ApiResponse::Json(200, json!(rec)),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["notifications"] && *method == Method::Get {
-        return match notifications::list_recent(conn, &business_id, 50) {
-            Ok(list) => ApiResponse::Json(200, json!({"notifications": list})),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-
     // ---- Module registry: what a generic frontend needs to render itself ----
     if parts.as_slice() == ["modules"] && *method == Method::Get {
         return match crate::business_panel::list_modules(conn, &business_id) {
@@ -1688,10 +1656,23 @@ fn route(
                 }
             }
             (Method::Post, None) => match json_body(body) {
-                Some(obj) => match crud::create(conn, &business_id, &user_id, module_id, &obj) {
-                    Ok(id) => ApiResponse::Json(201, json!({"id": id})),
-                    Err(e) => crud_error(&e),
-                },
+                Some(obj) => {
+                    // Purchasing is created AND received in one step now
+                    // (see receiving::create_and_receive's own doc
+                    // comment) — every other module still goes through
+                    // the plain generic create.
+                    if module_id == "purchasing" {
+                        match receiving::create_and_receive(conn, &business_id, &user_id, &obj) {
+                            Ok(result) => ApiResponse::Json(201, result),
+                            Err(e) => crud_error(&e),
+                        }
+                    } else {
+                        match crud::create(conn, &business_id, &user_id, module_id, &obj) {
+                            Ok(id) => ApiResponse::Json(201, json!({"id": id})),
+                            Err(e) => crud_error(&e),
+                        }
+                    }
+                }
                 None => json_err(400, "body must be a JSON object"),
             },
             (Method::Put, Some(id)) => match json_body(body) {

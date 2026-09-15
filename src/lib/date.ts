@@ -12,7 +12,7 @@
 // the exact UTC clock digits were being echoed straight back out by
 // .toLocaleString() as if they were already local — every timestamp
 // shown anywhere in the app (audit log, receipts, stock take history,
-// customer purchase history, backups, notifications) displayed a time
+// customer purchase history, backups) displayed a time
 // shifted by the viewer's own UTC offset instead of the real local
 // time the thing actually happened. In Kenya (UTC+3) that meant every
 // one of those was showing a time three hours EARLIER than reality.

@@ -212,14 +212,19 @@ fn test_crud_update_applies_partial_patch() {
     // check if the "untouched" value were 0 to begin with.
     let id = seed_inventory_item(&conn, &biz, "EDIT-001", "Original Name", 10, 500, 1000);
 
-    // Only correcting the price typo — quantity, name, sku untouched.
+    // Only correcting the category typo — quantity, name, sku
+    // untouched. Deliberately not unit_price/unit_cost here anymore:
+    // those are now permanently blocked on every update, single-record
+    // or bulk (see crud::is_update_blocked_field) — a partial-patch
+    // test needs a field that's actually still patchable to prove
+    // anything about partial-patch behavior.
     let mut patch = serde_json::Map::new();
-    patch.insert("unit_price".into(), json!(1200));
+    patch.insert("category".into(), json!("Corrected Category"));
     crate::crud::update(&conn, &biz, &uid, "inventory", &id, &patch, false).unwrap();
 
     let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
     let updated = list.iter().find(|r| r["id"] == json!(id)).unwrap();
-    assert_eq!(updated["unit_price"].as_i64().unwrap(), 1200);
+    assert_eq!(updated["category"].as_str().unwrap(), "Corrected Category");
     assert_eq!(updated["name"].as_str().unwrap(), "Original Name"); // untouched
     assert_eq!(updated["quantity"].as_i64().unwrap(), 10); // untouched
 }
@@ -230,27 +235,40 @@ fn test_crud_update_rejects_float_into_money_field() {
     // the same type enforcement as create() for "money" fields — a
     // float dollar value must not be able to sneak past validation
     // just by going through an edit instead of a create.
+    //
+    // Exercised against a still-unreceived Purchasing order, not
+    // Inventory: Inventory's own unit_cost/unit_price are now
+    // permanently blocked on every update, full stop (see
+    // crud::is_update_blocked_field) — a bad float would never even
+    // reach the money-type check there anymore, since the "field can't
+    // be edited at all" error fires first. Purchasing's unit_cost stays
+    // genuinely update-writable right up until the order is received,
+    // which is what this test actually needs: a live money field to
+    // prove the float rejection against.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
 
-    // Seeded directly, not via crud::create(): create() now forces a
-    // brand-new item's unit_cost/unit_price to 0 (price only enters
-    // through a purchase — see crud::create()'s own comment), so
-    // going through create() here would no longer give this test a
-    // genuinely nonzero starting price to prove stays untouched.
-    let id = seed_inventory_item(&conn, &biz, "EDIT-002", "Item", 5, 300, 600);
+    seed_inventory_item(&conn, &biz, "EDIT-002", "Item", 5, 0, 0);
+    let mut po = serde_json::Map::new();
+    po.insert("po_number".into(), json!("PO-EDIT-1"));
+    po.insert("supplier".into(), json!("Test Supplier"));
+    po.insert("item_name".into(), json!("Item"));
+    po.insert("quantity".into(), json!(5));
+    po.insert("unit_cost".into(), json!(300));
+    po.insert("unit_price".into(), json!(600));
+    let id = crate::crud::create(&conn, &biz, &uid, "purchasing", &po).unwrap();
 
     let mut bad_patch = serde_json::Map::new();
-    bad_patch.insert("unit_price".into(), json!(19.99)); // float — must be rejected
-    let result = crate::crud::update(&conn, &biz, &uid, "inventory", &id, &bad_patch, false);
+    bad_patch.insert("unit_cost".into(), json!(19.99)); // float — must be rejected
+    let result = crate::crud::update(&conn, &biz, &uid, "purchasing", &id, &bad_patch, false);
     assert!(result.is_err());
 
     // And the original integer value must be untouched by the
     // rejected attempt — not partially applied, not corrupted.
-    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
     let untouched = list.iter().find(|r| r["id"] == json!(id)).unwrap();
-    assert_eq!(untouched["unit_price"].as_i64().unwrap(), 600);
+    assert_eq!(untouched["unit_cost"].as_i64().unwrap(), 300);
 }
 
 #[test]
@@ -510,10 +528,10 @@ fn test_crud_update_allows_quantity_edit_when_bulk_import_flag_is_set() {
 
 #[test]
 fn test_crud_update_still_allows_other_inventory_fields() {
-    // Confirms the block is scoped to "quantity" alone — every other
-    // inventory field (price, cost, reorder level, category, etc.)
-    // must remain freely editable through the generic form, same as
-    // before this fix.
+    // Confirms the block is scoped to "quantity", "unit_cost", and
+    // "unit_price" alone — every other inventory field (reorder level,
+    // category, currency, etc.) must remain freely editable through
+    // the generic form, same as before this fix.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -522,7 +540,6 @@ fn test_crud_update_still_allows_other_inventory_fields() {
 
     let mut patch = serde_json::Map::new();
     patch.insert("name".into(), json!("Renamed Item"));
-    patch.insert("unit_price".into(), json!(175));
     patch.insert("reorder_level".into(), json!(8));
     let result = crate::crud::update(&conn, &biz, &uid, "inventory", &id, &patch, false);
     assert!(result.is_ok());
@@ -530,9 +547,65 @@ fn test_crud_update_still_allows_other_inventory_fields() {
     let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
     let updated = list.iter().find(|r| r["id"] == json!(id)).unwrap();
     assert_eq!(updated["name"].as_str().unwrap(), "Renamed Item");
-    assert_eq!(updated["unit_price"].as_i64().unwrap(), 175);
     assert_eq!(updated["reorder_level"].as_i64().unwrap(), 8);
     assert_eq!(updated["quantity"].as_i64().unwrap(), 10); // untouched, wasn't in the patch
+}
+
+#[test]
+fn test_crud_update_rejects_inventory_price_edit_once_batched() {
+    // THE ACTUAL FIX Deric asked for, corrected: Inventory's
+    // unit_cost/unit_price stay editable for as long as an item has
+    // never been received through a real batch (this is the sanctioned
+    // way to correct a legacy item stuck at a wrong or zero price —
+    // see crud::update's own comment on why removing this entirely
+    // would have made that kind of item permanently uncorrectable).
+    // The moment a batch exists, the item's real price lives there
+    // instead, and this record's own fields must freeze — editing them
+    // then would silently disagree with the batch without any error.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    // No batch yet — a legacy item, or one whose price was never
+    // corrected. Editing unit_cost/unit_price must still succeed.
+    let id = seed_inventory_item(&conn, &biz, "LEGACY-001", "Legacy Item", 10, 0, 0);
+    let mut fix_patch = serde_json::Map::new();
+    fix_patch.insert("unit_cost".into(), json!(300));
+    fix_patch.insert("unit_price".into(), json!(500));
+    crate::crud::update(&conn, &biz, &uid, "inventory", &id, &fix_patch, false).unwrap();
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let fixed = list.iter().find(|r| r["id"] == json!(id)).unwrap();
+    assert_eq!(fixed["unit_cost"].as_i64().unwrap(), 300);
+    assert_eq!(fixed["unit_price"].as_i64().unwrap(), 500);
+
+    // Now receive a real purchase order against this same item — it
+    // gains a genuine batch.
+    let mut po = serde_json::Map::new();
+    po.insert("po_number".into(), json!("PO-BATCH-1"));
+    po.insert("supplier".into(), json!("Acme"));
+    po.insert("item_name".into(), json!("Legacy Item"));
+    po.insert("quantity".into(), json!(5));
+    po.insert("unit_cost".into(), json!(400));
+    po.insert("unit_price".into(), json!(700));
+    let po_id = crate::crud::create(&conn, &biz, &uid, "purchasing", &po).unwrap();
+    crate::receiving::receive(&mut conn, &biz, &uid, crate::receiving::ReceiveRequest {
+        purchase_record_id: po_id,
+        quantity_received: None,
+        unit_price: None,
+        expiry_date: None,
+    }).unwrap();
+
+    // With a real batch now behind it, hand-editing the Inventory
+    // record's own price must be rejected.
+    let mut blocked_patch = serde_json::Map::new();
+    blocked_patch.insert("unit_cost".into(), json!(999));
+    let result = crate::crud::update(&conn, &biz, &uid, "inventory", &id, &blocked_patch, false);
+    assert!(result.is_err());
+
+    // And the batch-driven price is untouched by the rejected attempt.
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let untouched = list.iter().find(|r| r["id"] == json!(id)).unwrap();
+    assert_eq!(untouched["unit_cost"].as_i64().unwrap(), 300, "the legacy field itself is untouched, not that it still means anything");
 }
 
 #[test]

@@ -30,7 +30,7 @@ align like a real ledger column.
   entirely from `GET /modules`. No hardcoded module list.
 - **Module view** — table + dynamic create form + search + delete +
   Excel export, all generated from `GET /modules/{id}/schema` at
-  runtime. The exact same component renders Inventory, Sales, HR,
+  runtime. The exact same component renders Inventory, Sales, Refunds,
   Accounting, Purchasing, and Debt/Credit correctly — verified live by
   switching between Inventory and Sales in the same test run and seeing
   completely different fields render correctly.

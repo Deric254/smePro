@@ -20,7 +20,7 @@ fn preset_modules(business_type: &str) -> Result<Vec<&'static str>> {
         // delivery against a purchase order.
         "retail" => Ok(vec!["inventory", "purchasing", "sales", "refunds", "debt_credit", "accounting", "invoice"]),
         "food" => Ok(vec!["inventory", "sales", "purchasing", "refunds", "debt_credit", "accounting", "invoice"]),
-        "services" => Ok(vec!["hr", "sales", "refunds", "debt_credit", "accounting", "invoice"]),
+        "services" => Ok(vec!["sales", "refunds", "debt_credit", "accounting", "invoice"]),
         // "manufacturing" gets debt_credit too — a manufacturer selling
         // to distributors/wholesalers on net-30-style terms is the
         // common case, not the exception, and checkout()'s on_credit
@@ -29,7 +29,7 @@ fn preset_modules(business_type: &str) -> Result<Vec<&'static str>> {
         // every manufacturing business hit the same "switch business
         // type just to unlock a module" workaround the retail/purchasing
         // fix above already closed for a different module.
-        "manufacturing" => Ok(vec!["inventory", "purchasing", "hr", "sales", "refunds", "debt_credit", "accounting", "invoice"]),
+        "manufacturing" => Ok(vec!["inventory", "purchasing", "sales", "refunds", "debt_credit", "accounting", "invoice"]),
         other => Err(anyhow!(
             "unknown business type '{other}', expected one of: retail, food, services, manufacturing"
         )),
