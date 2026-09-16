@@ -950,8 +950,96 @@ export interface AuditLogEntry {
   details: unknown;
   timestamp: string;
 }
-export const getAuditLog = (moduleId?: string, limit = 200): Promise<{ entries: AuditLogEntry[] }> =>
-  request(`/audit-log?limit=${limit}${moduleId ? `&module_id=${encodeURIComponent(moduleId)}` : ''}`);
+export interface AuditLogFilters {
+  moduleId?: string;
+  recordId?: string;
+  userId?: string;
+  action?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+function auditQuery(f: AuditLogFilters): string {
+  const p = new URLSearchParams();
+  p.set('limit', String(f.limit ?? 200));
+  if (f.moduleId) p.set('module_id', f.moduleId);
+  if (f.recordId) p.set('record_id', f.recordId);
+  if (f.userId) p.set('user_id', f.userId);
+  if (f.action) p.set('action', f.action);
+  if (f.from) p.set('from', f.from);
+  if (f.to) p.set('to', f.to);
+  return p.toString();
+}
+
+export const getAuditLog = (f: AuditLogFilters = {}): Promise<{ entries: AuditLogEntry[] }> =>
+  request(`/audit-log?${auditQuery(f)}`);
+
+export const exportAuditLog = async (f: AuditLogFilters = {}) => {
+  const blob = await request(`/audit-log.xlsx?${auditQuery(f)}`);
+  downloadBlob(blob, 'audit_log.xlsx');
+};
+
+// ---- Stock movement trace — the signed, per-item quantity ledger.
+// Every row is one real quantity change written in the same
+// transaction as the change itself, so the trace can never drift from
+// the stock it explains. See stock_movement.rs. Owner-only.
+export interface StockMovement {
+  id: string;
+  inventory_record_id: string;
+  item_name: string;
+  movement_type: string;
+  movement_label: string;
+  quantity_delta: number;
+  unit_cost_cents: number;
+  total_cost_cents: number;
+  reference_id: string | null;
+  user_id: string | null;
+  created_at: string;
+}
+export interface StockMovementResult {
+  movements: StockMovement[];
+  total_quantity_in: number;
+  total_quantity_out: number;
+  net_quantity_change: number;
+}
+export interface StockMovementFilters {
+  inventoryRecordId?: string;
+  movementType?: string;
+  userId?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+function movementQuery(f: StockMovementFilters): string {
+  const p = new URLSearchParams();
+  p.set('limit', String(f.limit ?? 200));
+  if (f.inventoryRecordId) p.set('inventory_record_id', f.inventoryRecordId);
+  if (f.movementType) p.set('movement_type', f.movementType);
+  if (f.userId) p.set('user_id', f.userId);
+  if (f.from) p.set('from', f.from);
+  if (f.to) p.set('to', f.to);
+  return p.toString();
+}
+
+export const getStockMovements = (f: StockMovementFilters = {}): Promise<StockMovementResult> =>
+  request(`/inventory/movements?${movementQuery(f)}`);
+
+export const exportStockMovements = async (f: StockMovementFilters = {}) => {
+  const blob = await request(`/inventory/movements.xlsx?${movementQuery(f)}`);
+  downloadBlob(blob, 'stock_movements.xlsx');
+};
+
+export const MOVEMENT_TYPES: { value: string; label: string }[] = [
+  { value: 'sale', label: 'Sale' },
+  { value: 'refund_restock', label: 'Refund restock' },
+  { value: 'receiving', label: 'Stock received' },
+  { value: 'repack_consumed', label: 'Repack (consumed)' },
+  { value: 'repack_produced', label: 'Repack (produced)' },
+  { value: 'stock_take_shrinkage', label: 'Stock take shrinkage' },
+  { value: 'stock_take_surplus', label: 'Stock take surplus' },
+];
 
 // ---- Backup & restore — real disaster recovery, not a suggestion to
 // copy files manually. The raw database key is never shipped in the

@@ -489,6 +489,37 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         params![target_new_qty, target_record_id, business_id],
     )?;
 
+    // Two ledger entries for the two quantity changes, in the same
+    // transaction — see stock_movement.rs. A repack is the one
+    // operation that moves two different items at once, so it records
+    // two rows: stock leaving the source and stock arriving at the
+    // target. Each is costed on its own real basis (the source's actual
+    // FEFO-consumed cost, the target's newly-derived per-unit cost),
+    // and both reference the same source record so the two halves of
+    // one repack can be matched up in a trace.
+    crate::stock_movement::record_in_tx(
+        &tx,
+        business_id,
+        Some(user_id),
+        &req.source_record_id,
+        &source_name,
+        crate::stock_movement::REPACK_CONSUMED,
+        -req.source_quantity,
+        if req.source_quantity > 0 { cost_consumed_from_source / req.source_quantity } else { 0 },
+        Some(&req.source_record_id),
+    )?;
+    crate::stock_movement::record_in_tx(
+        &tx,
+        business_id,
+        Some(user_id),
+        &target_record_id,
+        &target_name,
+        crate::stock_movement::REPACK_PRODUCED,
+        req.target_quantity_produced,
+        new_batch_unit_cost,
+        Some(&req.source_record_id),
+    )?;
+
     let repacked_at = chrono::Utc::now().to_rfc3339();
     let new_batch_id = crate::batches::create_batch_in_tx(
         &tx,

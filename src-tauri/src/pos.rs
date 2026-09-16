@@ -449,6 +449,28 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             params![new_qty, item.inventory_record_id, business_id],
         )?;
 
+        // Ledger entry for the same quantity change, in the same
+        // transaction — see stock_movement.rs. Cost is the weighted
+        // average of the portions actually consumed, not the item's
+        // legacy unit_cost: a line spanning two batches at different
+        // costs has one real blended cost, and recording either batch's
+        // cost alone would misstate it.
+        let movement_units: i64 = portions.iter().map(|p| p.quantity).sum();
+        if movement_units > 0 {
+            let movement_cost: i64 = portions.iter().map(|p| p.unit_cost * p.quantity).sum::<i64>() / movement_units;
+            crate::stock_movement::record_in_tx(
+                &tx,
+                business_id,
+                Some(user_id),
+                &item.inventory_record_id,
+                &name,
+                crate::stock_movement::SALE,
+                -movement_units,
+                movement_cost,
+                Some(&order_id),
+            )?;
+        }
+
         // Per-portion totals, summed into this line's own totals below
         // — see this block's own comment further down for why each
         // portion gets its own sales row instead of being blended into

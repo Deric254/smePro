@@ -38,6 +38,7 @@ pub mod repack;
 pub mod sales_patterns;
 pub mod security;
 pub mod stock_health;
+pub mod stock_movement;
 pub mod stock_take;
 pub mod tax;
 #[cfg(test)]

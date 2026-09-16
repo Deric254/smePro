@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, ai_chat, audit, auth, backup, batches, crud, debt_settlement, excel_import, forecast, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, stock_take, users, xlsx_export};
+use crate::{ai_assistant, ai_chat, audit, auth, backup, batches, crud, debt_settlement, excel_import, forecast, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, stock_movement, stock_take, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -1523,6 +1523,35 @@ fn route(
         };
     }
 
+    // ---- Stock movement trace: the signed, per-item quantity ledger.
+    // Owner-only for the same reason the audit log below is.
+    // GET /inventory/movements[.xlsx] with optional filters:
+    // inventory_record_id, movement_type, user_id, from, to, limit.
+    if (parts.as_slice() == ["inventory", "movements"] || parts.as_slice() == ["inventory", "movements.xlsx"])
+        && *method == Method::Get
+    {
+        let want_xlsx = parts[1] == "movements.xlsx";
+        let q = query_params(url);
+        let filters = stock_movement::MovementFilters {
+            inventory_record_id: q.get("inventory_record_id").cloned(),
+            movement_type: q.get("movement_type").cloned(),
+            user_id: q.get("user_id").cloned(),
+            from: q.get("from").cloned(),
+            to: q.get("to").cloned(),
+            limit: q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(200),
+        };
+        if want_xlsx {
+            return match stock_movement::export_xlsx(conn, &business_id, &user_id, &filters) {
+                Ok(bytes) => ApiResponse::Xlsx(200, bytes, "stock_movements.xlsx".to_string()),
+                Err(e) => crud_error(&e),
+            };
+        }
+        return match stock_movement::list(conn, &business_id, &user_id, &filters) {
+            Ok(data) => ApiResponse::Json(200, data),
+            Err(e) => crud_error(&e),
+        };
+    }
+
     // ---- Audit log: the actual point of recording all of this is being
     // able to look at it. Owner-only — this is oversight data about
     // what every user in the business has done, not something a Staff
@@ -1535,38 +1564,47 @@ fn route(
     // everything of this type," which someone would have to scroll
     // through by eye to find one record's history in. Both filters can
     // combine (e.g. module_id=_repack&record_id=<id>).
-    if parts.as_slice() == ["audit-log"] && *method == Method::Get {
+    //
+    // `user_id`, `action` and the `from`/`to` date range were added
+    // alongside those two, and the whole filter set is now built
+    // dynamically rather than as a fixed list of hand-written SQL
+    // variants: the previous four-way match already needed one query
+    // per combination, which does not scale past a couple of filters
+    // without the variants silently drifting apart from each other.
+    // `.xlsx` on the path returns the same rows as a spreadsheet.
+    if (parts.as_slice() == ["audit-log"] || parts.as_slice() == ["audit-log.xlsx"]) && *method == Method::Get {
         if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let want_xlsx = parts[0] == "audit-log.xlsx";
         let q = query_params(url);
-        let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).min(1000);
-        let module_filter = q.get("module_id").cloned();
-        let record_filter = q.get("record_id").cloned();
+        let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 5000);
 
-        let (sql, mode) = match (&module_filter, &record_filter) {
-            (Some(_), Some(_)) => (
-                "SELECT id, user_id, module_id, action, record_id, details_json, timestamp
-                 FROM audit_log WHERE business_id = ?1 AND module_id = ?2 AND record_id = ?3 ORDER BY timestamp DESC LIMIT ?4",
-                2,
-            ),
-            (Some(_), None) => (
-                "SELECT id, user_id, module_id, action, record_id, details_json, timestamp
-                 FROM audit_log WHERE business_id = ?1 AND module_id = ?2 ORDER BY timestamp DESC LIMIT ?3",
-                1,
-            ),
-            (None, Some(_)) => (
-                "SELECT id, user_id, module_id, action, record_id, details_json, timestamp
-                 FROM audit_log WHERE business_id = ?1 AND record_id = ?2 ORDER BY timestamp DESC LIMIT ?3",
-                3,
-            ),
-            (None, None) => (
-                "SELECT id, user_id, module_id, action, record_id, details_json, timestamp
-                 FROM audit_log WHERE business_id = ?1 ORDER BY timestamp DESC LIMIT ?2",
-                0,
-            ),
-        };
+        let mut sql = String::from(
+            "SELECT id, user_id, module_id, action, record_id, details_json, timestamp
+             FROM audit_log WHERE business_id = ?",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(business_id.clone())];
+        for (param, column) in [("module_id", "module_id"), ("record_id", "record_id"), ("user_id", "user_id"), ("action", "action")] {
+            if let Some(v) = q.get(param) {
+                sql.push_str(&format!(" AND {column} = ?"));
+                args.push(Box::new(v.clone()));
+            }
+        }
+        if let Some(v) = q.get("from") {
+            sql.push_str(" AND timestamp >= ?");
+            args.push(Box::new(v.clone()));
+        }
+        if let Some(v) = q.get("to") {
+            // Same end-of-day widening as the movement trace, for the
+            // same reason — see stock_movement::widen_to_end_of_day.
+            sql.push_str(" AND timestamp <= ?");
+            args.push(Box::new(if v.len() == 10 { format!("{v} 23:59:59") } else { v.clone() }));
+        }
+        sql.push_str(" ORDER BY timestamp DESC, id DESC LIMIT ?");
+        args.push(Box::new(limit));
 
-        let mut stmt = match conn.prepare(sql) { Ok(s) => s, Err(e) => return json_err(500, &e.to_string()) };
-        let map_row = |r: &rusqlite::Row| -> rusqlite::Result<Value> {
+        let mut stmt = match conn.prepare(&sql) { Ok(s) => s, Err(e) => return json_err(500, &e.to_string()) };
+        let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| {
             Ok(json!({
                 "id": r.get::<_, String>(0)?,
                 "user_id": r.get::<_, Option<String>>(1)?,
@@ -1576,20 +1614,40 @@ fn route(
                 "details": r.get::<_, Option<String>>(5)?.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
                 "timestamp": r.get::<_, String>(6)?,
             }))
+        });
+        let list = match rows.and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>()) {
+            Ok(l) => l,
+            Err(e) => return json_err(500, &e.to_string()),
         };
-        let rows = if mode == 2 {
-            stmt.query_map(rusqlite::params![business_id, module_filter.unwrap(), record_filter.unwrap(), limit], map_row)
-        } else if mode == 1 {
-            stmt.query_map(rusqlite::params![business_id, module_filter.unwrap(), limit], map_row)
-        } else if mode == 3 {
-            stmt.query_map(rusqlite::params![business_id, record_filter.unwrap(), limit], map_row)
-        } else {
-            stmt.query_map(rusqlite::params![business_id, limit], map_row)
-        };
-        return match rows.and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>()) {
-            Ok(list) => ApiResponse::Json(200, json!({"entries": list})),
-            Err(e) => json_err(500, &e.to_string()),
-        };
+
+        if want_xlsx {
+            let table: Vec<Vec<Value>> = list
+                .iter()
+                .map(|e| {
+                    vec![
+                        e["timestamp"].clone(),
+                        e["module_id"].clone(),
+                        e["action"].clone(),
+                        e["record_id"].clone(),
+                        e["user_id"].clone(),
+                        // The payload shape differs per module, so it is
+                        // exported as its raw JSON rather than spread
+                        // across columns that would be empty for most rows.
+                        json!(e["details"].to_string()),
+                    ]
+                })
+                .collect();
+            return match xlsx_export::rows_to_xlsx(
+                "Audit Log",
+                &["When", "Module", "Action", "Record", "User", "Details"],
+                &table,
+                &[],
+            ) {
+                Ok(bytes) => ApiResponse::Xlsx(200, bytes, "audit_log.xlsx".to_string()),
+                Err(e) => json_err(500, &e.to_string()),
+            };
+        }
+        return ApiResponse::Json(200, json!({"entries": list}));
     }
 
     // ---- Onboarding wizard: POST /onboarding/setup {"business_type": "retail"} ----

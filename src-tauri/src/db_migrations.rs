@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 34;
+const CURRENT_VERSION: i32 = 35;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -78,7 +78,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 32 { v32_drop_notifications_table(conn)?; }
     if current < 33 { v33_stock_takes_allow_cancelled_status(conn)?; }
     if current < 34 { v34_stock_take_items_write_off_cost(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 34, "bump this alongside the last `if current < N` check above");
+    if current < 35 { v35_stock_movements(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 35, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2394,6 +2395,64 @@ fn v34_stock_take_items_write_off_cost(conn: &mut Connection) -> Result<()> {
         )?;
     }
     tx.execute("INSERT INTO _schema_version (version) VALUES (34)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Creates `stock_movements` — a permanent, append-only ledger of every
+/// quantity change to every inventory item, written inside the same
+/// transaction as the quantity change itself so a movement can never
+/// exist without its stock change or vice versa. Before this, the only
+/// record that stock had moved lived in `audit_log`, whose
+/// `details_json` payload has a different shape for every module that
+/// writes it — usable for "what did this user do", not for "reconstruct
+/// this item's quantity history", which is what a stock movement trace
+/// actually has to answer.
+///
+/// `quantity_delta` is signed: negative leaves the business (sale,
+/// shrinkage, repack consumption), positive enters it (receiving,
+/// refund restock, repack output, surplus). Summing every delta for an
+/// item reproduces its current quantity from zero, which is the
+/// property that makes this a real ledger rather than a log.
+///
+/// Historic movements from before this table existed cannot be
+/// backfilled: audit_log's per-module payloads do not carry a reliable
+/// per-item signed delta for every action, and inventing one would put
+/// wrong numbers into a ledger whose whole value is being trustworthy.
+/// The ledger therefore starts empty and is correct from this version
+/// forward.
+fn v35_stock_movements(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS stock_movements (
+            id                  TEXT PRIMARY KEY,
+            business_id         TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            inventory_record_id TEXT NOT NULL,
+            item_name           TEXT NOT NULL,
+            movement_type       TEXT NOT NULL,
+            quantity_delta      INTEGER NOT NULL,
+            unit_cost_cents     INTEGER NOT NULL DEFAULT 0,
+            reference_id        TEXT,
+            user_id             TEXT,
+            created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+        [],
+    )?;
+    // Every query this table serves is scoped to one business and
+    // ordered or filtered by time — see stock_movement::list.
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stock_movements_business_time
+         ON stock_movements(business_id, created_at)",
+        [],
+    )?;
+    // "Show me everything that ever happened to THIS item" — the
+    // per-item trace, which is the whole point of the feature.
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stock_movements_item
+         ON stock_movements(business_id, inventory_record_id, created_at)",
+        [],
+    )?;
+    tx.execute("INSERT INTO _schema_version (version) VALUES (35)", [])?;
     tx.commit()?;
     Ok(())
 }

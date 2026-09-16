@@ -95,3 +95,69 @@ pub fn report_to_xlsx(points: &[ReportPoint], measure_label: &str) -> Result<Vec
 
     Ok(workbook.save_to_buffer()?)
 }
+
+/// Writes an explicit, caller-supplied table (fixed headers + rows) into
+/// an .xlsx file. Used where the columns are a deliberate, human-facing
+/// layout rather than whatever keys a record happens to carry — the
+/// stock movement trace and the audit log, whose useful columns are a
+/// curated subset presented in a specific order, not a raw row dump.
+///
+/// `money_columns` holds the indices of columns whose values are integer
+/// minor units and must be written as a real decimal number with a
+/// currency number-format — the exact same cents-to-decimal concern
+/// records_to_xlsx documents above, expressed by position because these
+/// tables have no ModuleDef to look field types up in. Numbers stay real
+/// numbers (never pre-formatted strings) so the person who opens the
+/// file can sum, sort, filter and chart them.
+pub fn rows_to_xlsx(
+    sheet_name: &str,
+    headers: &[&str],
+    rows: &[Vec<Value>],
+    money_columns: &[usize],
+) -> Result<Vec<u8>> {
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet().set_name(sheet_name)?;
+
+    let header_format = Format::new().set_bold().set_background_color("#D9E1F2");
+    let money_format = Format::new().set_num_format("0.00");
+    let money: std::collections::HashSet<usize> = money_columns.iter().copied().collect();
+
+    for (col_idx, header) in headers.iter().enumerate() {
+        sheet.write_string_with_format(0, col_idx as u16, *header, &header_format)?;
+    }
+
+    for (row_idx, row_values) in rows.iter().enumerate() {
+        let row = (row_idx + 1) as u32;
+        for (col_idx, value) in row_values.iter().enumerate() {
+            let col = col_idx as u16;
+            match value {
+                Value::String(s) => { sheet.write_string(row, col, s)?; }
+                Value::Number(n) if money.contains(&col_idx) => {
+                    let cents = n.as_i64().unwrap_or(0);
+                    sheet.write_number_with_format(row, col, cents as f64 / 100.0, &money_format)?;
+                }
+                Value::Number(n) => { sheet.write_number(row, col, n.as_f64().unwrap_or(0.0))?; }
+                Value::Bool(b) => { sheet.write_boolean(row, col, *b)?; }
+                _ => { sheet.write_blank(row, col, &Format::new())?; }
+            }
+        }
+    }
+
+    // Widen to the header text, then to the widest cell beneath it, so a
+    // long item name or timestamp isn't delivered as "#####".
+    for (col_idx, header) in headers.iter().enumerate() {
+        let widest_cell = rows
+            .iter()
+            .filter_map(|r| r.get(col_idx))
+            .map(|v| match v {
+                Value::String(s) => s.chars().count(),
+                other => other.to_string().chars().count(),
+            })
+            .max()
+            .unwrap_or(0);
+        let width = (header.chars().count().max(widest_cell) as f64 + 4.0).clamp(12.0, 60.0);
+        sheet.set_column_width(col_idx as u16, width)?;
+    }
+
+    Ok(workbook.save_to_buffer()?)
+}

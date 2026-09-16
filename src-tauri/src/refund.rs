@@ -302,6 +302,28 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
             &format!("UPDATE {inventory_table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
             params![new_qty, inv_id, business_id],
         )?;
+
+        // Ledger entry for the same quantity change, in the same
+        // transaction — see stock_movement.rs. Costed at the original
+        // sale's own per-unit cost (the same basis
+        // batches::restore_to_batch_in_tx restores at), so a refund
+        // reverses exactly what the sale recorded rather than whatever
+        // the item costs today. Referenced to the sale being refunded:
+        // the refund record itself does not exist yet at this point,
+        // and the sale is the more useful end of the trace anyway.
+        let restock_unit_cost = if original_qty > 0 { original_cost_at_sale / original_qty } else { 0 };
+        crate::stock_movement::record_in_tx(
+            &tx,
+            business_id,
+            Some(user_id),
+            &inv_id,
+            &item_name,
+            crate::stock_movement::REFUND_RESTOCK,
+            req.quantity,
+            restock_unit_cost,
+            Some(&req.sale_id),
+        )?;
+
         new_stock_level = Some(new_qty);
         inventory_record_id = Some(inv_id);
     }

@@ -323,6 +323,7 @@ pub(crate) fn receive_in_tx(
         params![purchase_record_id, business_id],
     )?;
 
+
     let received_at = chrono::Utc::now().to_rfc3339();
     let batch_id = crate::batches::create_batch_in_tx(
         tx,
@@ -335,6 +336,22 @@ pub(crate) fn receive_in_tx(
         expiry_date,
         &received_at,
         created_by,
+    )?;
+
+    // Ledger entry for the same quantity change, in the same
+    // transaction — see stock_movement.rs. Referenced to the batch this
+    // delivery created, so a movement can be traced back to the exact
+    // batch (and therefore the exact PO and cost) it came from.
+    crate::stock_movement::record_in_tx(
+        tx,
+        business_id,
+        created_by,
+        &inventory_record_id,
+        &inventory_name,
+        crate::stock_movement::RECEIVING,
+        quantity_received,
+        po_unit_cost,
+        Some(&batch_id),
     )?;
 
     // Same Bookkeeping auto-post as before this feature, same

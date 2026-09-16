@@ -8,6 +8,11 @@ import {
   getAiSettings,
   createBackup, restoreBackup,
   getAuditLog,
+  exportAuditLog,
+  getStockMovements,
+  exportStockMovements,
+  MOVEMENT_TYPES,
+  getBusinessInfo,
   getCurrencyRates, convertCurrency, refreshCurrencyRates,
   listTaxRates, setTaxRate, computeTax,
   changeBusinessType,
@@ -16,14 +21,14 @@ import {
   getToken,
   ApiError,
 } from '../api';
-import type { AuditLogEntry, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule, ReleaseOption } from '../api';
+import type { StockMovementResult, AuditLogEntry, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule, ReleaseOption } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
 import { parseBackendTimestamp } from '../lib/date';
 import BusinessBranding from '../components/BusinessBranding';
 import TwoFactorSetup from '../components/TwoFactorSetup';
 
-export type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'backup' | 'audit' | 'business' | 'security' | 'ai' | 'network';
+export type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'backup' | 'audit' | 'movements' | 'business' | 'security' | 'ai' | 'network';
 
 export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
@@ -38,6 +43,7 @@ export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'network', label: 'Network' },
   { id: 'backup', label: 'Backup & Restore' },
   { id: 'audit', label: 'Audit Log' },
+  { id: 'movements', label: 'Stock Movements' },
 ];
 
 // Navigation into a specific admin section now lives entirely in the
@@ -65,6 +71,7 @@ export default function AdminPanel({ tab, onModulesChanged }: { tab: Tab; onModu
       {tab === 'ai' && <AiSettingsTab />}
       {tab === 'backup' && <BackupTab />}
       {tab === 'audit' && <AuditLogTab />}
+      {tab === 'movements' && <StockMovementsTab />}
     </div>
   );
 }
@@ -1393,6 +1400,9 @@ function AuditLogTab() {
   const [moduleFilter, setModuleFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [userFilter, setUserFilter] = useState('');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
 
   useEffect(() => {
     listUsers().then((r) => {
@@ -1405,22 +1415,52 @@ function AuditLogTab() {
   useEffect(() => {
     setLoading(true);
     setError(null);
-    getAuditLog(moduleFilter || undefined)
+    getAuditLog({ moduleId: moduleFilter || undefined, userId: userFilter || undefined, from: from || undefined, to: to || undefined })
       .then((r) => setEntries(r.entries))
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the audit log'))
       .finally(() => setLoading(false));
-  }, [moduleFilter]);
+  }, [moduleFilter, userFilter, from, to]);
 
   const moduleOptions = Array.from(new Set(entries.map((e) => e.module_id))).sort();
 
+  async function handleExport() {
+    setError(null);
+    try {
+      await exportAuditLog({ moduleId: moduleFilter || undefined, userId: userFilter || undefined, from: from || undefined, to: to || undefined });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not export the audit log');
+    }
+  }
+
   return (
     <div>
-      <div style={{ marginBottom: '0.8rem' }}>
-        <label>Filter by module</label>
-        <select value={moduleFilter} onChange={(e) => setModuleFilter(e.target.value)} style={{ width: 'auto', marginLeft: '0.6rem' }}>
-          <option value="">All</option>
-          {moduleOptions.map((m) => <option key={m} value={m}>{m}</option>)}
-        </select>
+      <div style={styles.filterBar}>
+        <div>
+          <label>Module</label>
+          <select value={moduleFilter} onChange={(e) => setModuleFilter(e.target.value)}>
+            <option value="">All</option>
+            {moduleOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>User</label>
+          <select value={userFilter} onChange={(e) => setUserFilter(e.target.value)}>
+            <option value="">All</option>
+            {Object.entries(users).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>From</label>
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+        </div>
+        <div>
+          <label>To</label>
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </div>
+        <div style={styles.filterActions}>
+          <button className="btn btn-outline" onClick={() => { setModuleFilter(''); setUserFilter(''); setFrom(''); setTo(''); }}>Clear</button>
+          <button className="btn btn-outline" onClick={handleExport} disabled={entries.length === 0}>Export to Excel</button>
+        </div>
       </div>
       <ErrorBox error={error} />
       <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
@@ -1704,7 +1744,139 @@ function NetworkTab() {
   );
 }
 
+// ------------------------------------------------ Stock Movement Trace
+function StockMovementsTab() {
+  const [data, setData] = useState<StockMovementResult | null>(null);
+  const [users, setUsers] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [typeFilter, setTypeFilter] = useState('');
+  const [userFilter, setUserFilter] = useState('');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [currency, setCurrency] = useState('USD');
+
+  useEffect(() => {
+    listUsers().then((r) => {
+      const map: Record<string, string> = {};
+      r.users.forEach((u: UserAccountLike) => { map[u.id] = u.username; });
+      setUsers(map);
+    }).catch(() => {});
+    getBusinessInfo().then((b: { currency?: string }) => setCurrency(b.currency ?? 'USD')).catch(() => {});
+  }, []);
+
+  const activeFilters = {
+    movementType: typeFilter || undefined,
+    userId: userFilter || undefined,
+    from: from || undefined,
+    to: to || undefined,
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    getStockMovements(activeFilters)
+      .then(setData)
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load stock movements'))
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typeFilter, userFilter, from, to]);
+
+  async function handleExport() {
+    setError(null);
+    try {
+      await exportStockMovements(activeFilters);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not export stock movements');
+    }
+  }
+
+  const movements = data?.movements ?? [];
+
+  return (
+    <div>
+      <div style={styles.filterBar}>
+        <div>
+          <label>Movement</label>
+          <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+            <option value="">All</option>
+            {MOVEMENT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>User</label>
+          <select value={userFilter} onChange={(e) => setUserFilter(e.target.value)}>
+            <option value="">All</option>
+            {Object.entries(users).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>From</label>
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+        </div>
+        <div>
+          <label>To</label>
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </div>
+        <div style={styles.filterActions}>
+          <button className="btn btn-outline" onClick={() => { setTypeFilter(''); setUserFilter(''); setFrom(''); setTo(''); }}>Clear</button>
+          <button className="btn btn-outline" onClick={handleExport} disabled={movements.length === 0}>Export to Excel</button>
+        </div>
+      </div>
+
+      <ErrorBox error={error} />
+
+      {data && movements.length > 0 && (
+        <div style={styles.totalsRow}>
+          <div><span style={styles.totalLabel}>Stock in</span><strong style={{ color: 'var(--ok)' }}>+{data.total_quantity_in}</strong></div>
+          <div><span style={styles.totalLabel}>Stock out</span><strong style={{ color: 'var(--stamp)' }}>{data.total_quantity_out}</strong></div>
+          <div><span style={styles.totalLabel}>Net change</span><strong>{data.net_quantity_change > 0 ? '+' : ''}{data.net_quantity_change}</strong></div>
+        </div>
+      )}
+
+      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
+        <table className="data-table" style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>When</th>
+              <th style={styles.th}>Item</th>
+              <th style={styles.th}>Movement</th>
+              <th style={{ ...styles.th, textAlign: 'right' }}>Qty</th>
+              <th style={{ ...styles.th, textAlign: 'right' }}>Total cost</th>
+              <th style={styles.th}>Who</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td style={{ ...styles.td, display: 'block', textAlign: 'center' }} colSpan={6}>Loading…</td></tr>
+            ) : movements.length === 0 ? (
+              <tr><td style={{ ...styles.td, display: 'block', textAlign: 'center' }} colSpan={6}>No stock movements recorded for this selection.</td></tr>
+            ) : (
+              movements.map((m) => (
+                <tr key={m.id}>
+                  <td style={styles.td} className="mono" data-label="When">{parseBackendTimestamp(m.created_at).toLocaleString()}</td>
+                  <td style={styles.td} data-label="Item">{m.item_name}</td>
+                  <td style={styles.td} data-label="Movement">{m.movement_label}</td>
+                  <td style={{ ...styles.td, textAlign: 'right', color: m.quantity_delta < 0 ? 'var(--stamp)' : 'var(--ok)' }} className="mono" data-label="Qty">
+                    {m.quantity_delta > 0 ? '+' : ''}{m.quantity_delta}
+                  </td>
+                  <td style={{ ...styles.td, textAlign: 'right' }} className="mono" data-label="Total cost">{formatMoney(m.total_cost_cents, currency)}</td>
+                  <td style={styles.td} data-label="Who">{m.user_id ? (users[m.user_id] ?? 'Unknown user') : 'System'}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 const styles: Record<string, React.CSSProperties> = {
+  filterBar: { display: 'flex', gap: '0.9rem', flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: '0.9rem' },
+  filterActions: { display: 'flex', gap: '0.5rem', alignItems: 'flex-end' },
+  totalsRow: { display: 'flex', gap: '1.6rem', flexWrap: 'wrap', marginBottom: '0.8rem', fontSize: '0.9rem' },
+  totalLabel: { display: 'block', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--ink-soft)' },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: '0.86rem' },
   th: { textAlign: 'left', padding: '0.6rem 0.8rem', borderBottom: '1px solid var(--paper-line)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.03em', color: 'var(--ink-soft)' },
   td: { padding: '0.55rem 0.8rem', borderBottom: '1px solid var(--paper-line)' },

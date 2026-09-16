@@ -412,6 +412,23 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
             )?;
             total_variance_units += variance;
             total_write_off_cost += write_off_cost;
+
+            // Ledger entry for the same quantity change, in the same
+            // transaction — see stock_movement.rs. Costed from the
+            // real FEFO write-off just computed above, not the item's
+            // flat legacy cost, so the ledger and the write-off figure
+            // profit.rs reports can never disagree.
+            crate::stock_movement::record_in_tx(
+                &tx,
+                business_id,
+                Some(user_id),
+                inv_id,
+                item_name,
+                crate::stock_movement::STOCK_TAKE_SHRINKAGE,
+                variance,
+                if shrinkage_qty > 0 { write_off_cost / shrinkage_qty } else { 0 },
+                Some(stock_take_id),
+            )?;
         } else if variance > 0 {
             // Surplus: legacy quantity is derived (quantity minus what
             // batches account for), so raising it alone can't desync
@@ -422,6 +439,22 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
                 params![counted, inv_id, business_id],
             )?;
             total_variance_units += variance;
+
+            // Surplus has no cost basis of its own — the stock was
+            // found, not bought — so it is recorded at zero unit cost
+            // rather than inventing one from the item's legacy price.
+            // See the surplus comment directly above.
+            crate::stock_movement::record_in_tx(
+                &tx,
+                business_id,
+                Some(user_id),
+                inv_id,
+                item_name,
+                crate::stock_movement::STOCK_TAKE_SURPLUS,
+                variance,
+                0,
+                Some(stock_take_id),
+            )?;
         }
         // variance == 0: nothing to write; still reported below so a
         // confirmed-correct count is visible, not just an unmentioned

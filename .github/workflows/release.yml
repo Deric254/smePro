@@ -768,8 +768,23 @@ jobs:
   # uses — no new secret needed.
   publish-release:
     needs: [bump-version, create-release, desktop, android]
+    if: ${{ always() && needs.desktop.result == 'success' && needs.create-release.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
+      - name: Verify the desktop updater manifest actually uploaded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.bump-version.outputs.new_tag }}"
+          ASSETS=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
+          echo "Assets on $TAG:"
+          echo "$ASSETS"
+          if ! echo "$ASSETS" | grep -qx "latest.json"; then
+            echo "::error::latest.json is missing from $TAG. The desktop auto-updater reads this file from releases/latest/download/latest.json and will fail with 'Could not fetch a valid release JSON from the remote' without it. tauri-action only generates it when TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD are set as repository secrets. Refusing to publish a release the updater cannot consume."
+            exit 1
+          fi
+
       - name: Publish the release (draft -> published)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

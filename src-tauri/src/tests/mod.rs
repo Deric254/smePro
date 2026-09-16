@@ -56,3 +56,5 @@ mod report_tests;
 mod stock_take_tests;
 #[cfg(test)]
 mod unique_constraint_migration_tests;
+#[cfg(test)]
+mod stock_movement_tests;
