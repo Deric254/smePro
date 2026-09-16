@@ -114,17 +114,6 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
         .fields
         .iter()
         .filter(|f| !(module.id == "inventory" && f.name == "quantity"))
-        // Same reasoning, same place, as `quantity` just above: a
-        // brand-new inventory item created via this blank template has
-        // its unit_cost/unit_price forced to 0 regardless of what's
-        // typed (see this file's `import`, `None` branch) — real price
-        // only ever enters through a purchase (a batch). Printing these
-        // two columns on a sheet whose values are never honored is the
-        // exact "invites someone to type a real value there, reasonably
-        // expecting it to land" trap `quantity` was removed for. Per
-        // Deric: these two fields belong to Purchasing, not Inventory's
-        // own create/import surface.
-        .filter(|f| !(module.id == "inventory" && (f.name == "unit_cost" || f.name == "unit_price")))
         // Same reasoning as inventory's `quantity` just above, for two
         // different purchasing fields:
         // - `received` is set only by receiving.rs::receive(), never by

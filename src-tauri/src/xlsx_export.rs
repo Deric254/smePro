@@ -40,19 +40,6 @@ pub fn records_to_xlsx(records: &[Value], sheet_name: &str, module_def: &ModuleD
         columns.sort(); // deterministic order regardless of HashMap iteration
     }
 
-    // Inventory's unit_cost/unit_price are frozen legacy history once an
-    // item has a real purchase batch, and even on batch-less items
-    // they're no longer meant to be edited through this file — the
-    // export/re-import round trip exists for the sanctioned stock-take
-    // workflow (reconciling `quantity`), not for touching price (see
-    // excel_import.rs). Dropping both columns here removes the only
-    // place someone could type a new value in and have it silently
-    // stripped or rejected on re-import. Per Deric: these two fields
-    // belong to Purchasing, not this file.
-    if module_def.id == "inventory" {
-        columns.retain(|c| c != "unit_cost" && c != "unit_price");
-    }
-
     for (col_idx, col_name) in columns.iter().enumerate() {
         sheet.write_string_with_format(0, col_idx as u16, col_name, &header_format)?;
     }
