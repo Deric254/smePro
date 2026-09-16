@@ -342,28 +342,47 @@ export interface StockTakeItem {
 }
 export interface StockTake {
   id: string;
-  status: 'in_progress' | 'closed';
+  status: 'in_progress' | 'closed' | 'cancelled';
   created_at: string;
   closed_at: string | null;
   items: StockTakeItem[];
 }
 export interface StockTakeSummary {
   id: string;
-  status: 'in_progress' | 'closed';
+  status: 'in_progress' | 'closed' | 'cancelled';
   created_at: string;
   closed_at: string | null;
   item_count: number;
   counted_count: number;
+  // null when nothing countable contributes yet (nothing counted, or
+  // every counted item had a zero expected_qty baseline) — see
+  // stock_take.rs's own "n/a" handling for a single item's percentage.
+  max_variance_pct: number | null;
+  avg_variance_pct: number | null;
+}
+export interface StockTakeAdjustment {
+  inventory_record_id: string;
+  item_name: string;
+  expected_qty: number;
+  counted_qty: number;
+  variance: number;
+  // A number, or the literal string "n/a" when expected_qty was 0.
+  variance_pct: number | 'n/a';
+  // Nonzero only for a negative variance (shrinkage) — the real cost,
+  // in cents, of what was written off via FEFO. Always 0 for a
+  // surplus or a confirmed-correct count.
+  write_off_cost: number;
 }
 export interface StockTakeCloseResult {
   stock_take_id: string;
   items_counted: number;
   items_skipped: number;
-  items_needing_purchasing: number;
+  items_skipped_deleted: number;
   total_variance_units: number;
-  adjustments: { inventory_record_id: string; item_name: string; expected_qty: number; counted_qty: number; variance: number }[];
+  total_write_off_cost: number;
+  adjustments: StockTakeAdjustment[];
   skipped: { inventory_record_id: string; item_name: string; expected_qty: number }[];
-  needs_purchasing: { inventory_record_id: string; item_name: string; expected_qty: number; counted_qty: number; variance: number }[];
+  skipped_deleted: { inventory_record_id: string; item_name: string; expected_qty: number; counted_qty: number }[];
 }
 export const initiateStockTake = (): Promise<StockTake> =>
   request('/inventory/stocktake/initiate', { method: 'POST' });
@@ -380,6 +399,10 @@ export const recordStockTakeCount = (stockTakeId: string, itemId: string, counte
   });
 export const closeStockTake = (stockTakeId: string): Promise<StockTakeCloseResult> =>
   request(`/inventory/stocktake/${stockTakeId}/close`, { method: 'POST' });
+// Discards a forgotten/abandoned count with zero effect on inventory
+// and frees the business-wide lock — see stock_take.rs::cancel.
+export const cancelStockTake = (stockTakeId: string): Promise<StockTake> =>
+  request(`/inventory/stocktake/${stockTakeId}/cancel`, { method: 'POST' });
 
 // ---- Settling a debt/credit record. See debt_settlement.rs. ----
 export interface SettleDebtSummary {
@@ -415,6 +438,13 @@ export interface GrossProfitSummary {
   margin_pct: number | null;
   sales_count: number;
   cost_bearing_sales_count: number;
+  // All-time confirmed shrinkage from closed stock takes — see
+  // profit::shrinkage_cents. Deliberately separate from profit_cents
+  // above (what selling things made) vs. profit_cents_after_shrinkage
+  // (what the business actually kept, after write-offs).
+  shrinkage_cents: number;
+  profit_cents_after_shrinkage: number;
+  margin_pct_after_shrinkage: number | null;
 }
 export const getGrossProfitSummary = (): Promise<GrossProfitSummary> => request('/sales/profit-summary');
 
@@ -428,6 +458,8 @@ export interface ItemProfit {
   margin_pct: number | null;
   sales_count: number;
   cost_bearing_sales_count: number;
+  shrinkage_cents: number;
+  profit_cents_after_shrinkage: number;
 }
 export const getProfitByItem = (limit = 20): Promise<{ items: ItemProfit[] }> =>
   request(`/sales/profit-by-item?limit=${limit}`);

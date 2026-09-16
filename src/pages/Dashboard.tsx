@@ -290,6 +290,13 @@ function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; 
             ? `Across ${data.sales_count} sale${data.sales_count === 1 ? '' : 's'} — no revenue yet`
             : `${data.margin_pct.toFixed(1)}% margin, across ${data.sales_count} sale${data.sales_count === 1 ? '' : 's'}`}
         </div>
+        {data.shrinkage_cents > 0 ? (
+          <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.15rem' }}>
+            After {formatMoney(data.shrinkage_cents, currency)} in stock-take write-offs: {data.profit_cents_after_shrinkage >= 0 ? '+' : '−'}
+            {formatMoney(Math.abs(data.profit_cents_after_shrinkage), currency)}
+            {data.margin_pct_after_shrinkage !== null ? ` (${data.margin_pct_after_shrinkage.toFixed(1)}% margin)` : ''}
+          </div>
+        ) : null}
       </div>
       {missingCostCount > 0 ? (
         <div style={{ textAlign: 'right', flexShrink: 0, fontSize: '0.78rem', color: 'var(--ink-soft)', maxWidth: '10rem' }}>

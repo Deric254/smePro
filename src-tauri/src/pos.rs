@@ -351,6 +351,11 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
 
     let tx = conn.transaction()?;
 
+    // Checkout is stock-affecting, so it's blocked for the duration
+    // of an open stock take — see stock_take.rs's own doc comment on
+    // `require_no_open_stock_take` for why.
+    crate::stock_take::require_no_open_stock_take(&tx, business_id)?;
+
     // Same transaction as everything else below — if the customer
     // gets created/updated but the sale itself fails partway through,
     // the whole thing rolls back together, not a customer record left

@@ -72,6 +72,108 @@ fn test_close_applies_counted_variance_to_inventory_quantity() {
 }
 
 #[test]
+fn test_cancel_discards_counts_and_leaves_inventory_untouched() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let rice_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
+
+    // A count was entered but the take is abandoned before close —
+    // this must not leak into inventory.quantity in any form.
+    crate::stock_take::record_count(
+        &conn, &biz, &uid,
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 12 },
+    ).unwrap();
+
+    let cancelled = crate::stock_take::cancel(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+    assert_eq!(cancelled["status"].as_str().unwrap(), "cancelled");
+
+    let rice = get_item(&conn, &biz, &uid, &rice_id);
+    assert_eq!(rice["quantity"].as_i64().unwrap(), 40, "cancel must never write the discarded count to inventory");
+}
+
+#[test]
+fn test_cancel_frees_the_lock_for_a_new_stock_take_and_for_checkout() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    crate::stock_take::cancel(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+
+    // The whole point of cancel: checkout works again immediately...
+    let req = crate::pos::CheckoutRequest {
+        idempotency_key: None,
+        discount_pct: None,
+        items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
+        payment_method: Some("Cash".into()),
+        customer: None,
+        customer_phone: None,
+        allow_oversell: false,
+        on_credit: false,
+        due_date: None,
+    };
+    assert!(crate::pos::checkout(&mut conn, &biz, &uid, req).is_ok());
+
+    // ...and a fresh stock take can be started without "already in
+    // progress" complaining about the cancelled one.
+    assert!(crate::stock_take::initiate(&mut conn, &biz, &uid).is_ok());
+}
+
+#[test]
+fn test_cannot_cancel_an_already_closed_stock_take() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    seed_inventory_item(&conn, &biz, "ITEM-001", "Item", 10, 100, 200);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+
+    let result = crate::stock_take::cancel(&mut conn, &biz, &uid, &stock_take_id);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("already closed"));
+}
+
+#[test]
+fn test_close_persists_write_off_cost_onto_the_stock_take_item_row() {
+    // db_migrations.rs's v34 column exists specifically so this value
+    // is a real, permanent, queryable fact — not just something that
+    // passes through the close() response and the audit log and is
+    // then gone. Checked directly against the row, independent of
+    // profit.rs's own tests reading it back through summary()/by_item().
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let rice_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+    let tea_id = seed_inventory_item(&conn, &biz, "TEA-001", "Tea", 20, 200, 350);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let items = initiated["items"].as_array().unwrap();
+    let rice_item_id = items.iter().find(|i| i["inventory_record_id"].as_str().unwrap() == rice_id).unwrap()["id"].as_str().unwrap().to_string();
+    let tea_item_id = items.iter().find(|i| i["inventory_record_id"].as_str().unwrap() == tea_id).unwrap()["id"].as_str().unwrap().to_string();
+
+    // Rice: shrinkage of 10 units at 500 cents = 5000.
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: rice_item_id.clone(), counted_qty: 30 }).unwrap();
+    // Tea: exact match, no write-off.
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: tea_item_id.clone(), counted_qty: 20 }).unwrap();
+    crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+
+    let rice_write_off: i64 = conn.query_row("SELECT write_off_cost_cents FROM stock_take_items WHERE id = ?1", rusqlite::params![rice_item_id], |r| r.get(0)).unwrap();
+    let tea_write_off: i64 = conn.query_row("SELECT write_off_cost_cents FROM stock_take_items WHERE id = ?1", rusqlite::params![tea_item_id], |r| r.get(0)).unwrap();
+    assert_eq!(rice_write_off, 5000);
+    assert_eq!(tea_write_off, 0, "an exact-match count must persist an explicit 0, not leave the column unset");
+}
+
+#[test]
 fn test_close_leaves_uncounted_items_untouched_and_reports_them_as_skipped() {
     // Partial counting is a legitimate, expected use of this feature —
     // a business that only had time to recount its top movers today
@@ -296,11 +398,12 @@ fn test_history_lists_past_stock_takes_most_recent_first() {
 }
 
 #[test]
-fn test_close_does_not_apply_a_positive_variance_and_reports_it_separately() {
-    // THE ACTUAL FIX Deric asked for: "found" stock (counted > expected)
-    // must never be silently priced at nothing. This is the negative
-    // test to the shrinkage test above — same feature, opposite
-    // direction, must NOT touch quantity.
+fn test_close_applies_a_positive_variance_directly_at_legacy_cost() {
+    // "Found" stock (counted > expected) is applied directly now —
+    // legacy quantity is derived (quantity minus what batches account
+    // for), so raising it alone can't desync anything, and a stock
+    // take can trust its own count without routing the surplus through
+    // Purchasing first.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -317,12 +420,89 @@ fn test_close_does_not_apply_a_positive_variance_and_reports_it_separately() {
     ).unwrap();
 
     let summary = crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
-    assert_eq!(summary["items_counted"].as_i64().unwrap(), 0, "a positive variance is never counted as an applied adjustment");
-    assert_eq!(summary["items_needing_purchasing"].as_i64().unwrap(), 1);
-    assert_eq!(summary["total_variance_units"].as_i64().unwrap(), 0, "nothing was actually applied, so total variance stays 0");
+    assert_eq!(summary["items_counted"].as_i64().unwrap(), 1);
+    assert_eq!(summary["total_variance_units"].as_i64().unwrap(), 7);
+    let adj = &summary["adjustments"][0];
+    assert_eq!(adj["variance"].as_i64().unwrap(), 7);
+    assert!((adj["variance_pct"].as_f64().unwrap() - 17.5).abs() < 0.001, "7/40 * 100 = 17.5%");
+    assert_eq!(adj["write_off_cost"].as_i64().unwrap(), 0, "a surplus has no write-off cost — only shrinkage does");
 
     let rice = get_item(&conn, &biz, &uid, &rice_id);
-    assert_eq!(rice["quantity"].as_i64().unwrap(), 40, "quantity must be completely untouched by a rejected positive variance");
+    assert_eq!(rice["quantity"].as_i64().unwrap(), 47, "a positive variance is now applied directly to quantity");
+}
+
+#[test]
+fn test_close_reports_variance_pct_and_write_off_cost_for_shrinkage() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    // 40 units @ 500 cents cost each.
+    seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
+
+    // 7 units physically missing.
+    crate::stock_take::record_count(
+        &conn, &biz, &uid,
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 33 },
+    ).unwrap();
+
+    let summary = crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+    let adj = &summary["adjustments"][0];
+    assert_eq!(adj["variance"].as_i64().unwrap(), -7);
+    assert!((adj["variance_pct"].as_f64().unwrap() - (-17.5)).abs() < 0.001, "-7/40 * 100 = -17.5%");
+    assert_eq!(adj["write_off_cost"].as_i64().unwrap(), 7 * 500, "7 units written off at 500 cents cost each");
+    assert_eq!(summary["total_write_off_cost"].as_i64().unwrap(), 7 * 500);
+}
+
+#[test]
+fn test_close_reports_n_a_variance_pct_when_expected_qty_is_zero() {
+    // A zero baseline makes any percentage undefined (divide by zero),
+    // not a misleading 0% or an infinite number — must come back as
+    // the literal string "n/a".
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    seed_inventory_item(&conn, &biz, "ITEM-001", "Item", 0, 100, 200);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
+
+    crate::stock_take::record_count(
+        &conn, &biz, &uid,
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 5 },
+    ).unwrap();
+
+    let summary = crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+    assert_eq!(summary["adjustments"][0]["variance_pct"].as_str().unwrap(), "n/a");
+}
+
+#[test]
+fn test_history_rollup_reports_max_and_average_variance_pct() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800); // will vary -17.5%
+    seed_inventory_item(&conn, &biz, "BEANS-001", "Beans", 20, 300, 500); // will vary +25%
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let items = initiated["items"].as_array().unwrap();
+    let rice_item_id = items.iter().find(|i| i["item_name"] == serde_json::json!("Rice")).unwrap()["id"].as_str().unwrap().to_string();
+    let beans_item_id = items.iter().find(|i| i["item_name"] == serde_json::json!("Beans")).unwrap()["id"].as_str().unwrap().to_string();
+
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: rice_item_id, counted_qty: 33 }).unwrap();
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: beans_item_id, counted_qty: 25 }).unwrap();
+
+    crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+
+    let history = crate::stock_take::list(&conn, &biz, &uid).unwrap();
+    let entry = &history["stock_takes"][0];
+    assert!((entry["max_variance_pct"].as_f64().unwrap() - 25.0).abs() < 0.001, "worst swing is Beans at +25%, not Rice's -17.5%");
+    assert!((entry["avg_variance_pct"].as_f64().unwrap() - 21.25).abs() < 0.001, "(17.5 + 25) / 2 = 21.25");
 }
 
 #[test]
@@ -337,3 +517,106 @@ fn test_staff_role_cannot_initiate_a_stock_take() {
     let result = crate::stock_take::initiate(&mut conn, &biz, &staff_uid);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_open_stock_take_blocks_checkout() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+
+    crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+
+    let req = crate::pos::CheckoutRequest {
+        idempotency_key: None,
+        discount_pct: None,
+        items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 1 }],
+        payment_method: Some("Cash".into()),
+        customer: None,
+        customer_phone: None,
+        allow_oversell: false,
+        on_credit: false,
+        due_date: None,
+    };
+    let result = crate::pos::checkout(&mut conn, &biz, &uid, req);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("stock take is in progress"));
+}
+
+#[test]
+fn test_open_stock_take_blocks_receiving() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+
+    let mut po = serde_json::Map::new();
+    po.insert("supplier".into(), serde_json::json!("Test Supplier"));
+    po.insert("item_name".into(), serde_json::json!("Rice"));
+    po.insert("inventory_record_id".into(), serde_json::json!(inv_id));
+    po.insert("quantity".into(), serde_json::json!(10));
+    po.insert("unit_cost".into(), serde_json::json!(500));
+    po.insert("unit_price".into(), serde_json::json!(800));
+    let po_id = crate::crud::create(&conn, &biz, &uid, "purchasing", &po).unwrap();
+
+    crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
+    let result = crate::receiving::receive(&mut conn, &biz, &uid, req);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("stock take is in progress"));
+}
+
+#[test]
+fn test_open_stock_take_blocks_refund() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = seed_inventory_item(&conn, &biz, "FLOUR-001", "Flour", 50, 2000, 3000);
+
+    let checkout_req = crate::pos::CheckoutRequest {
+        idempotency_key: None,
+        discount_pct: None,
+        items: vec![crate::pos::CartItem { inventory_record_id: inv_id, quantity: 10 }],
+        payment_method: Some("Cash".into()),
+        customer: None,
+        customer_phone: None,
+        allow_oversell: false,
+        on_credit: false,
+        due_date: None,
+    };
+    let sale = crate::pos::checkout(&mut conn, &biz, &uid, checkout_req).unwrap();
+    let sale_id = sale["items"][0]["sale_id"].as_str().unwrap().to_string();
+
+    crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+
+    let req = crate::refund::RefundRequest { sale_id, quantity: 4, refund_amount: 12000, reason: None, restock: true };
+    let result = crate::refund::process_refund(&mut conn, &biz, &uid, req);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("stock take is in progress"));
+}
+
+#[test]
+fn test_open_stock_take_blocks_repack() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let dozen_id = seed_inventory_item(&conn, &biz, "EGG-DOZEN", "Eggs — Dozen", 5, 3000, 4000);
+    let single_id = seed_inventory_item(&conn, &biz, "EGG-SINGLE", "Eggs — Single", 0, 0, 400);
+
+    crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+
+    let req = crate::repack::RepackRequest {
+        source_record_id: dozen_id,
+        source_quantity: 1,
+        target_record_id: Some(single_id),
+        target_quantity_produced: 12,
+        new_target_name: None,
+        new_target_unit_price: None,
+        notes: None,
+    };
+    let result = crate::repack::repack(&mut conn, &biz, &uid, req);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("stock take is in progress"));
+}
+

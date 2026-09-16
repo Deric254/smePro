@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 32;
+const CURRENT_VERSION: i32 = 34;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -76,7 +76,9 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 30 { v30_inventory_price_not_required(conn)?; }
     if current < 31 { v31_purchasing_unit_price(conn)?; }
     if current < 32 { v32_drop_notifications_table(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 32, "bump this alongside the last `if current < N` check above");
+    if current < 33 { v33_stock_takes_allow_cancelled_status(conn)?; }
+    if current < 34 { v34_stock_take_items_write_off_cost(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 34, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2276,6 +2278,122 @@ fn v32_drop_notifications_table(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute("DROP TABLE IF EXISTS notifications", [])?;
     tx.execute("INSERT INTO _schema_version (version) VALUES (32)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Widens `stock_takes.status`'s CHECK constraint to also allow
+/// 'cancelled', for stock_take.rs::cancel() — the escape hatch for a
+/// forgotten/abandoned count. SQLite has no in-place way to alter a
+/// CHECK constraint, so this is the same rebuild pattern as v10
+/// (create correctly-shaped table, copy every row unchanged — no data
+/// transformation needed, existing rows are all 'in_progress' or
+/// 'closed' already and remain valid under the wider constraint —
+/// drop the old table, rename). The partial unique index
+/// (`idx_stock_takes_one_open_per_business`) and the business index
+/// are recreated identically: cancelling only ever sets status to
+/// 'cancelled', never back to 'in_progress', so the one-open-per-
+/// business guarantee that index enforces is untouched by this.
+fn v33_stock_takes_allow_cancelled_status(conn: &mut Connection) -> Result<()> {
+    // MUST happen outside any transaction (SQLite no-ops a PRAGMA
+    // foreign_keys change made mid-transaction) and MUST happen before
+    // dropping `stock_takes` below. With FK enforcement on — see
+    // db.rs's own comment on why it's forced on for every connection —
+    // `DROP TABLE stock_takes` runs an implicit `DELETE FROM
+    // stock_takes` first, which would cascade through
+    // `stock_take_items`'s `ON DELETE CASCADE` and silently erase
+    // every business's entire stock-take history before the rename
+    // ever ran. Restored the instant this migration finishes, whether
+    // it succeeds or fails, so no other statement in this connection's
+    // lifetime ever runs with it off.
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let result = v33_rebuild(conn);
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    result
+}
+
+fn v33_rebuild(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    tx.execute(
+        "CREATE TABLE stock_takes_new (
+            id                  TEXT PRIMARY KEY,
+            business_id         TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            status              TEXT NOT NULL DEFAULT 'in_progress' CHECK (status IN ('in_progress','closed','cancelled')),
+            created_by_user_id  TEXT NOT NULL,
+            created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+            closed_at           TEXT,
+            closed_by_user_id   TEXT
+        )",
+        [],
+    )?;
+    tx.execute(
+        "INSERT INTO stock_takes_new (id, business_id, status, created_by_user_id, created_at, closed_at, closed_by_user_id)
+         SELECT id, business_id, status, created_by_user_id, created_at, closed_at, closed_by_user_id FROM stock_takes",
+        [],
+    )?;
+    tx.execute("DROP TABLE stock_takes", [])?;
+    tx.execute("ALTER TABLE stock_takes_new RENAME TO stock_takes", [])?;
+
+    tx.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_takes_one_open_per_business
+         ON stock_takes(business_id) WHERE status = 'in_progress'",
+        [],
+    )?;
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stock_takes_business
+         ON stock_takes(business_id, created_at)",
+        [],
+    )?;
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (33)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Adds `write_off_cost_cents` to `stock_take_items` — a plain
+/// additive column (SQLite CAN do this one in-place, no CHECK
+/// constraint involved, so no v33-style rebuild needed here) so
+/// stock_take.rs::close()'s real, correctly-computed shrinkage cost
+/// becomes a permanent, queryable fact instead of living only in the
+/// ephemeral close() response and the audit log. THE ACTUAL FIX Deric
+/// asked for: without this, a business could take a real shrinkage
+/// loss and their profit/margin reports (see profit.rs) would never
+/// reflect it — the write-off happened, but nowhere kept a number a
+/// report could later add up. Defaults to 0, so every pre-existing
+/// row (all counted before this column existed) reads as "no
+/// write-off cost on record for this item" — accurate for a surplus
+/// or an exact match, understated for a pre-existing shrinkage row,
+/// which is the best this migration alone can do: the true cost for
+/// those was computed once at close time and was never stored
+/// anywhere retrievable, not even the audit log in a
+/// migration-readable shape (see audit.rs — its payload is a free-form
+/// JSON blob per entry, not a column this migration could reliably
+/// parse back out across every past audit-log version).
+fn v34_stock_take_items_write_off_cost(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    // SQLite has no `ADD COLUMN IF NOT EXISTS` — same pragma_table_info
+    // guard this file already uses elsewhere (see v17/v25) for exactly
+    // the scenario this fixes a real failure in: a test (or a real
+    // install) rolling `_schema_version` back and re-running `run()`
+    // re-applies every migration from that point forward, and a bare
+    // `ALTER TABLE ADD COLUMN` is not idempotent the way `CREATE TABLE
+    // IF NOT EXISTS` is — the second run fails outright with "duplicate
+    // column name" instead of harmlessly no-op'ing. Confirmed via
+    // money_migration_tests.rs's own v8 test, which does exactly that
+    // rollback-and-rerun and failed for real before this guard was added.
+    let already_has_column: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('stock_take_items') WHERE name='write_off_cost_cents'",
+        [],
+        |r| r.get(0),
+    )?;
+    if already_has_column == 0 {
+        tx.execute(
+            "ALTER TABLE stock_take_items ADD COLUMN write_off_cost_cents INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    tx.execute("INSERT INTO _schema_version (version) VALUES (34)", [])?;
     tx.commit()?;
     Ok(())
 }

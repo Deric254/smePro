@@ -154,6 +154,33 @@ fn test_update_batch_price_enforces_price_floor_and_owner_only_cost_edits() {
 }
 
 #[test]
+fn test_update_batch_price_blocked_while_a_stock_take_is_open() {
+    // close()'s FEFO consumption reads a batch's live unit_cost/
+    // unit_price at close time to price a write-off — see
+    // stock_take.rs::close() and this guard's own comment in
+    // batches.rs. A price/cost edit landing mid-count must not be
+    // allowed to change that out from under an in-progress reconciliation.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let inv_id = seed_inventory_item(&conn, &biz, "SOAP-100", "Soap", 0, 0, 500);
+    let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Soap", 20, 100, 150);
+    let receive_result = receive(&mut conn, &biz, &uid, &po_id, Some(150), None);
+    let batch_id = receive_result["batch_id"].as_str().unwrap().to_string();
+
+    crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+
+    let edit = crate::batches::UpdateBatchPriceRequest { batch_id: batch_id.clone(), unit_price: 200, unit_cost: None };
+    let result = crate::batches::update_batch_price(&mut conn, &biz, &uid, edit);
+    assert!(result.is_err(), "batch price/cost must be frozen while a stock take is open");
+    assert!(result.unwrap_err().to_string().contains("stock take"));
+
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &inv_id).unwrap();
+    assert_eq!(summary["batches"][0]["unit_price"].as_i64().unwrap(), 150, "the blocked edit must not have partially applied");
+}
+
+#[test]
 fn test_refund_credits_back_the_exact_batch_it_was_sold_from() {
     let mut conn = test_db();
     let biz = test_business(&mut conn);

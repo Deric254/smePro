@@ -89,6 +89,10 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
 
     let tx = conn.transaction()?;
 
+    // Refunds put stock back — blocked for the duration of an open
+    // stock take for the same reason checkout is (see stock_take.rs).
+    crate::stock_take::require_no_open_stock_take(&tx, business_id)?;
+
     let sale_row: Option<SaleRow> = tx
         .query_row(
             &format!(

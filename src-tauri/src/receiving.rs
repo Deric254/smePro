@@ -224,6 +224,15 @@ pub(crate) fn receive_in_tx(
     expiry_date: Option<&str>,
     created_by: Option<&str>,
 ) -> Result<Value> {
+    // Receiving adds stock — blocked for the duration of an open
+    // stock take for the same reason checkout is (see stock_take.rs).
+    // Guarded here rather than in each of `receive()` and
+    // `create_and_receive()` separately since both funnel through this
+    // one shared mechanics function — as does `excel_import::import()`,
+    // which gets the same protection for free rather than silently
+    // being left as a hole.
+    crate::stock_take::require_no_open_stock_take(tx, business_id)?;
+
     let row: Option<(String, i64, bool, Option<String>, String, i64, i64, Option<String>)> = tx
         .query_row(
             &format!(

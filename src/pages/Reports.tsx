@@ -212,6 +212,12 @@ export default function Reports() {
                   Only {grossProfit.cost_bearing_sales_count} of {grossProfit.sales_count} sales have real cost data recorded — this margin is based on those only, not the full sales count.
                 </div>
               )}
+              {grossProfit.shrinkage_cents > 0 && (
+                <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)', marginTop: '0.35rem' }}>
+                  {formatMoney(grossProfit.shrinkage_cents, currency)} written off via closed stock takes — net profit after shrinkage: {formatMoney(grossProfit.profit_cents_after_shrinkage, currency)}
+                  {grossProfit.margin_pct_after_shrinkage !== null ? ` (${grossProfit.margin_pct_after_shrinkage.toFixed(1)}% margin)` : ''}
+                </div>
+              )}
             </div>
           )}
           {itemMargins && <ItemMarginCard items={itemMargins} currency={currency} />}

@@ -24,17 +24,21 @@
 //!      fast movers today is a completely normal, valid use of this
 //!      feature, not an error condition. Anything never counted is
 //!      simply left alone at close time — its expected value stands.
-//!   3. `close()` — for every item that WAS counted, applies a
-//!      NEGATIVE variance (counted - expected — stock physically
-//!      missing) directly to `inventory.quantity` in one atomic
-//!      transaction, the same way receiving/refund/repack do, and
-//!      returns a variance report. A POSITIVE variance (physically
-//!      finding MORE than expected) is never applied — see close()'s
-//!      own comment on why "found" stock needs a real Purchasing
-//!      receipt to get priced, not a bare quantity bump — and is
-//!      reported separately as `needs_purchasing`. Uncounted items are
-//!      untouched and separately reported as "skipped," not silently
-//!      folded into "no change."
+//!   3. `close()` — for every item that WAS counted, applies its
+//!      variance to `inventory.quantity` in one atomic transaction,
+//!      the same way receiving/refund/repack do, and returns a
+//!      variance report. NEGATIVE variance (stock physically missing)
+//!      is routed through `batches::fefo_consume_in_tx` — the exact
+//!      same FEFO write-down checkout uses — so `inventory_batches`
+//!      stays in sync instead of going stale; the report carries each
+//!      write-off's real cost, not just a unit count. POSITIVE
+//!      variance (physically finding MORE than expected) is applied
+//!      directly at the item's legacy cost/price: legacy quantity is
+//!      already real, already-priced stock (it's simply derived as
+//!      `quantity − sum(batch quantities)`), so raising it alone can't
+//!      desync anything — no new batch, no block needed. Uncounted
+//!      items are untouched and separately reported as "skipped," not
+//!      silently folded into "no change."
 //!
 //! ONLY ONE STOCK TAKE OPEN AT A TIME, per business — enforced by a
 //! partial unique index in the schema (see db_migrations.rs's v11),
@@ -42,6 +46,15 @@
 //! `initiate()` calls fails at the database level rather than
 //! producing two simultaneously "current" counts with no way to tell
 //! which one a given count belongs to.
+//!
+//! CHECKOUT, RECEIVING, REFUNDS, AND REPACK ARE ALL BLOCKED for the
+//! duration of an open stock take (`require_no_open_stock_take`,
+//! called at the top of each one's own transaction). That's a real
+//! tradeoff — zero sales/stock movement while a count is open, so
+//! counts should stay short — but it's what makes `close()`'s
+//! `quantity = counted` an absolute, safe overwrite: with nothing else
+//! able to touch stock mid-count, `expected_qty` at `initiate()` and
+//! live `quantity` at `close()` can only differ by the count itself.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -49,6 +62,36 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
+
+/// Guard used by every stock-affecting write path — checkout,
+/// receiving, refunds, repack — to enforce that they're blocked for
+/// the duration of an open stock take. This is what makes `close()`'s
+/// absolute overwrite (`quantity = counted`) safe: if nothing else
+/// can touch stock while a count is open, `expected_qty` at
+/// `initiate()` and live `quantity` at `close()` are guaranteed to
+/// match apart from the count itself, so there's no delta-vs-overwrite
+/// ambiguity to resolve.
+///
+/// Called as the first statement inside each operation's own
+/// transaction (after `conn.transaction()?`), not before it — SQLite
+/// is single-writer, so checking inside the same transaction the write
+/// itself lands in closes the race where a stock take opens in the gap
+/// between an earlier check and the write that follows it.
+pub(crate) fn require_no_open_stock_take(conn: &Connection, business_id: &str) -> Result<()> {
+    let open_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM stock_takes WHERE business_id = ?1 AND status = 'in_progress'",
+            params![business_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = open_id {
+        return Err(anyhow!(
+            "a stock take is in progress (id: {id}) — finalize it before checkout, receiving, refunds, or repacking can continue"
+        ));
+    }
+    Ok(())
+}
 
 /// Starts a new stock take: snapshots every current, non-deleted
 /// inventory item's quantity as `expected_qty`. Fails outright if this
@@ -114,6 +157,77 @@ pub fn initiate(conn: &mut Connection, business_id: &str, user_id: &str) -> Resu
     );
 
     get(conn, business_id, user_id, &stock_take_id)
+}
+
+/// Cancels an open stock take with zero effect on inventory — the
+/// missing escape hatch for a forgotten/abandoned count. Before this,
+/// the only way to release the business-wide lock on checkout,
+/// receiving, refunds, and repack was to `close()` it, which is a
+/// safe no-op when nothing was counted but looks identical in the UI
+/// and audit log to a real, deliberate reconciliation — nothing marks
+/// it as "walked away from," so a shift-change or forgotten count can
+/// silently block sales for hours with no obvious way out for a
+/// non-technical staffer.
+///
+/// Recorded counts are discarded, not applied: `initiate()` never
+/// touched `inventory.quantity` (only `expected_qty` snapshots), and
+/// `record_count()` only ever wrote to `stock_take_items`, so there is
+/// nothing to roll back here — this simply marks the stock take
+/// `cancelled` (distinct from `closed`) and frees the lock, the same
+/// way `close()` does, without running any variance/write-off logic.
+///
+/// REQUIRES A SCHEMA CHANGE: this assumes the `stock_takes.status`
+/// column accepts `'cancelled'` alongside `'in_progress'`/`'closed'`.
+/// If that column has a CHECK constraint restricting it to the two
+/// existing values (see db_migrations.rs), it must be widened first —
+/// this file has no visibility into that migration.
+pub fn cancel(conn: &mut Connection, business_id: &str, user_id: &str, stock_take_id: &str) -> Result<Value> {
+    crate::rbac::require(conn, user_id, "inventory", "stocktake")?;
+
+    let tx = conn.transaction()?;
+
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM stock_takes WHERE id = ?1 AND business_id = ?2",
+            params![stock_take_id, business_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match status.as_deref() {
+        None => return Err(anyhow!("stock take not found: {stock_take_id}")),
+        Some("closed") => return Err(anyhow!("this stock take is already closed")),
+        Some("cancelled") => return Err(anyhow!("this stock take is already cancelled")),
+        _ => {}
+    }
+
+    // Reported in the audit entry so a cancel that discarded real
+    // in-progress counts is distinguishable from one that discarded
+    // nothing — useful context for whoever reviews the trail later,
+    // even though neither case wrote anything to inventory.
+    let counted_items: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM stock_take_items WHERE stock_take_id = ?1 AND counted_qty IS NOT NULL",
+        params![stock_take_id],
+        |r| r.get(0),
+    )?;
+
+    tx.execute(
+        "UPDATE stock_takes SET status = 'cancelled', closed_at = datetime('now'), closed_by_user_id = ?1 WHERE id = ?2",
+        params![user_id, stock_take_id],
+    )?;
+
+    tx.commit()?;
+
+    let _ = crate::audit::log(
+        conn,
+        business_id,
+        Some(user_id),
+        "_stock_take",
+        "cancel",
+        Some(stock_take_id),
+        Some(&json!({ "counted_items_discarded": counted_items })),
+    );
+
+    get(conn, business_id, user_id, stock_take_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,25 +319,21 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
 
     let mut adjustments = Vec::new();
     let mut skipped = Vec::new();
-    // THE ACTUAL FIX Deric asked for: a positive variance (counted >
-    // expected — physically finding MORE than the system thinks
-    // exists) used to be applied exactly like a negative one, a bare
-    // `Inventory.quantity` bump with no cost or price attached to the
-    // surplus at all. That was always a little questionable, but it
-    // became a genuine hole once item creation started forcing
-    // unit_cost/unit_price to 0 (see crud::create()): "found" stock
-    // for any item created since then would land priced at exactly
-    // $0 — sellable for free, not flagged as a mistake anywhere. A
-    // stock take can only ever CONFIRM loss now (shrinkage, damage,
-    // miscount, theft — stock that was already priced, now just
-    // marked gone), never conjure priced stock into existence; a
-    // genuine positive discrepancy is either a counting error or
-    // unrecorded stock that belongs in Purchasing, where it can
-    // actually get a real cost and price and create a real batch.
-    let mut needs_purchasing = Vec::new();
+    // Counted during this stock take, but the item was soft-deleted
+    // before close() ran — distinct from `skipped` (never counted).
+    // `initiate()`'s snapshot query filters `deleted_at IS NULL`, so
+    // close() has to honor that same exclusion at write time, not
+    // just at snapshot time, or a deleted row gets a fresh quantity
+    // "resurrected" onto it and a variance report shows a confirmed
+    // adjustment for an item that's actually gone.
+    let mut skipped_deleted = Vec::new();
     let mut total_variance_units: i64 = 0;
+    // Real dollar value of confirmed shrinkage this close — summed
+    // from the FEFO write-off portions below, not estimated from a
+    // single flat item-level cost.
+    let mut total_write_off_cost: i64 = 0;
 
-    for (_item_id, inv_id, item_name, expected_qty, counted_qty) in &items {
+    for (item_id, inv_id, item_name, expected_qty, counted_qty) in &items {
         let Some(counted) = counted_qty else {
             // Never counted during this stock take — expected value
             // stands untouched, reported separately so it's visible
@@ -232,28 +342,113 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
             skipped.push(json!({ "inventory_record_id": inv_id, "item_name": item_name, "expected_qty": expected_qty }));
             continue;
         };
-        let variance = counted - expected_qty;
-        if variance > 0 {
-            // Not applied at all — see this loop's own comment above.
-            needs_purchasing.push(json!({
-                "inventory_record_id": inv_id, "item_name": item_name,
-                "expected_qty": expected_qty, "counted_qty": counted, "variance": variance,
+
+        let still_active: bool = tx
+            .query_row(
+                &format!("SELECT 1 FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+                params![inv_id, business_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !still_active {
+            skipped_deleted.push(json!({
+                "inventory_record_id": inv_id,
+                "item_name": item_name,
+                "expected_qty": expected_qty,
+                "counted_qty": counted,
             }));
             continue;
         }
-        if variance != 0 {
+
+        let variance = counted - expected_qty;
+        // `n/a`, not a divide-by-zero or a misleading 0%, when this
+        // item's expected baseline was itself zero — any nonzero count
+        // against a zero baseline is an infinite percentage, not a
+        // real number worth charting.
+        let variance_pct: Value = if *expected_qty != 0 {
+            json!((variance as f64 / *expected_qty as f64) * 100.0)
+        } else {
+            json!("n/a")
+        };
+        let mut write_off_cost: i64 = 0;
+
+        if variance < 0 {
+            // Shrinkage: a stock take is a form of stock leaving,
+            // exactly like a sale, just with no revenue attached — so
+            // it draws down through the same strict FEFO order
+            // checkout uses (dated batches soonest-first, then
+            // undated, then legacy last) instead of a bare quantity
+            // overwrite that would leave inventory_batches stale.
+            let shrinkage_qty = -variance;
+            // Read live `quantity` here, in this same transaction,
+            // rather than trusting `*expected_qty` for it. The two are
+            // guaranteed equal by `require_no_open_stock_take` (nothing
+            // else can have moved `quantity` since `initiate()`'s
+            // snapshot) — but `fefo_consume_in_tx` uses this value to
+            // work out how much of `shrinkage_qty` legacy stock can
+            // still cover once batches are exhausted, so getting it
+            // from the row itself costs one extra column on a query
+            // this loop already makes, and keeps that math right even
+            // if the guard is ever loosened or bypassed elsewhere.
+            let (live_qty, legacy_unit_cost, legacy_unit_price): (i64, i64, i64) = tx.query_row(
+                &format!("SELECT quantity, unit_cost, unit_price FROM {table} WHERE id = ?1 AND business_id = ?2"),
+                params![inv_id, business_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            let portions = crate::batches::fefo_consume_in_tx(
+                &tx,
+                business_id,
+                inv_id,
+                shrinkage_qty,
+                live_qty,
+                legacy_unit_cost,
+                legacy_unit_price,
+            )?;
+            write_off_cost = portions.iter().map(|p| p.unit_cost * p.quantity).sum();
             tx.execute(
-                &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3"),
+                &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3 AND deleted_at IS NULL"),
+                params![counted, inv_id, business_id],
+            )?;
+            total_variance_units += variance;
+            total_write_off_cost += write_off_cost;
+        } else if variance > 0 {
+            // Surplus: legacy quantity is derived (quantity minus what
+            // batches account for), so raising it alone can't desync
+            // anything against the batches that already exist — no new
+            // batch, no cost/price attached to the surplus itself.
+            tx.execute(
+                &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3 AND deleted_at IS NULL"),
                 params![counted, inv_id, business_id],
             )?;
             total_variance_units += variance;
         }
+        // variance == 0: nothing to write; still reported below so a
+        // confirmed-correct count is visible, not just an unmentioned
+        // absence.
+
+        // Persisted onto the row itself — not just returned in this
+        // response and the audit log — so profit.rs's shrinkage figure
+        // (and anything else that ever needs to add this up later) has
+        // a real, permanent, queryable number to read instead of
+        // re-deriving or losing it. See db_migrations.rs's v34 for why
+        // this column exists at all. Written even when it's 0 (a
+        // surplus or an exact match), for the same "explicit, not
+        // implied by a column's default" reasoning the rest of this
+        // function already holds itself to.
+        tx.execute(
+            "UPDATE stock_take_items SET write_off_cost_cents = ?1 WHERE id = ?2",
+            params![write_off_cost, item_id],
+        )?;
+
         adjustments.push(json!({
             "inventory_record_id": inv_id,
             "item_name": item_name,
             "expected_qty": expected_qty,
             "counted_qty": counted,
             "variance": variance,
+            "variance_pct": variance_pct,
+            "write_off_cost": write_off_cost,
         }));
     }
 
@@ -271,11 +466,12 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
         "stock_take_id": stock_take_id,
         "items_counted": adjustments.len(),
         "items_skipped": skipped.len(),
-        "items_needing_purchasing": needs_purchasing.len(),
+        "items_skipped_deleted": skipped_deleted.len(),
         "total_variance_units": total_variance_units,
+        "total_write_off_cost": total_write_off_cost,
         "adjustments": adjustments,
         "skipped": skipped,
-        "needs_purchasing": needs_purchasing,
+        "skipped_deleted": skipped_deleted,
     });
 
     // The traceability record — same reasoning as repack.rs's own
@@ -351,10 +547,23 @@ pub fn get_open(conn: &Connection, business_id: &str, user_id: &str) -> Result<O
 /// screen should stay cheap regardless of catalog size.
 pub fn list(conn: &Connection, business_id: &str, user_id: &str) -> Result<Value> {
     crate::rbac::require(conn, user_id, "inventory", "stocktake")?;
+    // max/avg are over ABS(variance_pct) — "worst" stocktake means
+    // largest swing in either direction, not largest net surplus. Only
+    // counted items with a nonzero expected baseline contribute (an
+    // uncounted item has no variance yet; a zero-expected baseline has
+    // no meaningful percentage — see close()'s own "n/a" handling),
+    // so both come back NULL/None for a stock take with nothing
+    // countable yet, rather than a misleading 0.
     let mut stmt = conn.prepare(
         "SELECT st.id, st.status, st.created_at, st.closed_at,
                 (SELECT COUNT(*) FROM stock_take_items sti WHERE sti.stock_take_id = st.id) AS item_count,
-                (SELECT COUNT(*) FROM stock_take_items sti WHERE sti.stock_take_id = st.id AND sti.counted_qty IS NOT NULL) AS counted_count
+                (SELECT COUNT(*) FROM stock_take_items sti WHERE sti.stock_take_id = st.id AND sti.counted_qty IS NOT NULL) AS counted_count,
+                (SELECT MAX(ABS((sti.counted_qty - sti.expected_qty) * 100.0 / sti.expected_qty))
+                   FROM stock_take_items sti
+                   WHERE sti.stock_take_id = st.id AND sti.counted_qty IS NOT NULL AND sti.expected_qty != 0) AS max_variance_pct,
+                (SELECT AVG(ABS((sti.counted_qty - sti.expected_qty) * 100.0 / sti.expected_qty))
+                   FROM stock_take_items sti
+                   WHERE sti.stock_take_id = st.id AND sti.counted_qty IS NOT NULL AND sti.expected_qty != 0) AS avg_variance_pct
          FROM stock_takes st WHERE st.business_id = ?1 ORDER BY st.created_at DESC",
     )?;
     let rows: Vec<Value> = stmt
@@ -366,6 +575,8 @@ pub fn list(conn: &Connection, business_id: &str, user_id: &str) -> Result<Value
                 "closed_at": r.get::<_, Option<String>>(3)?,
                 "item_count": r.get::<_, i64>(4)?,
                 "counted_count": r.get::<_, i64>(5)?,
+                "max_variance_pct": r.get::<_, Option<f64>>(6)?,
+                "avg_variance_pct": r.get::<_, Option<f64>>(7)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

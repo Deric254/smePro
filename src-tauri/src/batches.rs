@@ -428,6 +428,29 @@ pub fn update_batch_price(
     let Some((inventory_record_id, current_cost, _current_price)) = existing else {
         return Err(anyhow!("batch not found: {}", req.batch_id));
     };
+
+    // Same freeze as crud.rs::update's inventory_price_locked_by_stock_take
+    // guard, same reason: stock_take.rs::close()'s FEFO consumption reads
+    // THIS batch's live unit_cost/unit_price straight from
+    // inventory_batches at close time to price whatever gets written
+    // off — not a snapshot taken back when the stock take was
+    // initiated. That guard only covers a legacy (non-batched) item's
+    // own unit_cost/unit_price on the generic update path; a batch's
+    // cost/price, edited through this dedicated action instead, is
+    // the one other door the same live read is exposed through. See
+    // crud.rs's own comment on that pair of fields for the fuller
+    // reasoning — it applies here unchanged.
+    let stock_take_open: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM stock_takes WHERE business_id = ?1 AND status = 'in_progress')",
+        params![business_id],
+        |r| r.get(0),
+    )?;
+    if stock_take_open {
+        return Err(anyhow!(
+            "batch cost/price cannot be edited while a stock take is in progress — its write-off cost is priced from current cost/price at close time; finish or cancel the stock take first"
+        ));
+    }
+
     let new_cost = req.unit_cost.unwrap_or(current_cost);
     if req.unit_price < new_cost {
         let business_currency: String = tx

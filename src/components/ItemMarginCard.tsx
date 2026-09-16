@@ -36,6 +36,11 @@ export default function ItemMarginCard({ items, currency }: { items: ItemProfit[
                   {it.sales_count} sale{it.sales_count === 1 ? '' : 's'}
                   {partialCost ? ` · ${it.cost_bearing_sales_count} with real cost data` : ''}
                 </div>
+                {it.shrinkage_cents > 0 ? (
+                  <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>
+                    {formatMoney(it.shrinkage_cents, currency)} written off in stock takes
+                  </div>
+                ) : null}
               </div>
               <div style={{ textAlign: 'right', flexShrink: 0 }}>
                 <div style={{ fontWeight: 600, color: isProfit ? 'var(--ink)' : 'var(--stamp)' }}>

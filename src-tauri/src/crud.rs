@@ -726,6 +726,29 @@ pub fn update(
         false
     };
 
+    // Same two fields, a different reason to freeze them: close()'s
+    // shrinkage branch (stock_take.rs) reads THIS item's live
+    // unit_cost/unit_price at close time to price whatever gets
+    // written off — not the value captured back when the stock take
+    // was initiated. A price correction landing here mid-count would
+    // silently change what that write-off gets costed at, with no
+    // relationship enforced between the edit and the count in
+    // progress. checkout/receiving/refund/repack already can't run at
+    // all while a stock take is open (require_no_open_stock_take) —
+    // this closes the same hole for the one write path that guard
+    // never covered, since a plain field edit was never routed through
+    // it. Only queried when actually relevant, same discipline as the
+    // two guards above.
+    let inventory_price_locked_by_stock_take: bool = if module_id == "inventory" && body.keys().any(|k| INVENTORY_LEGACY_PRICE_FIELDS.contains(&k.as_str())) {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM stock_takes WHERE business_id = ?1 AND status = 'in_progress')",
+            params![business_id],
+            |r| r.get(0),
+        )?
+    } else {
+        false
+    };
+
     let mut sets = vec![];
     let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![];
     let mut idx = 1;
@@ -746,6 +769,11 @@ pub fn update(
         if inventory_has_batches && INVENTORY_LEGACY_PRICE_FIELDS.contains(&k.as_str()) {
             return Err(anyhow!(
                 "'{k}' cannot be edited here once this item has a real purchase batch behind it — correct the batch's own price instead (see Inventory's batch list for this item)"
+            ));
+        }
+        if inventory_price_locked_by_stock_take && INVENTORY_LEGACY_PRICE_FIELDS.contains(&k.as_str()) {
+            return Err(anyhow!(
+                "'{k}' cannot be edited while a stock take is in progress — its write-off cost is priced from this item's current cost/price at close time; finish or cancel the stock take first"
             ));
         }
         // Companion to stock_take.rs::close()'s own version of this

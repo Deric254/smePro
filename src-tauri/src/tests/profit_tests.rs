@@ -116,6 +116,100 @@ fn test_gross_profit_summary_counts_cost_bearing_sales_separately_from_total() {
     assert_eq!(summary.cost_bearing_sales_count, 2, "exactly the 2 real checkouts, not the 1 hand-created sale");
 }
 
+
+#[test]
+fn test_gross_profit_summary_includes_shrinkage_from_closed_stock_take() {
+    // THE ACTUAL FIX for this session's gap #4: a stock take's
+    // write-off must show up in the same profit report Sales' own
+    // numbers do, as a distinct figure — not folded into cost_cents/
+    // profit_cents (see profit.rs's own comment on why those two stay
+    // Sales-only), and not silently absent either.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let rice_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+    checkout_one(&mut conn, &biz, &uid, &rice_id, 5); // revenue 4000, cost 2500
+
+    let before = crate::profit::summary(&conn, &biz, &uid).unwrap();
+    assert_eq!(before.shrinkage_cents, 0);
+    assert_eq!(before.profit_cents_after_shrinkage, before.profit_cents);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
+    // Expected 35 (40 - 5 sold), counted 30 -> shrinkage of 5 units at
+    // the item's legacy cost of 500 cents = 2500 cents written off.
+    crate::stock_take::record_count(
+        &conn, &biz, &uid,
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 30 },
+    ).unwrap();
+    crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+
+    let after = crate::profit::summary(&conn, &biz, &uid).unwrap();
+    assert_eq!(after.shrinkage_cents, 2500);
+    assert_eq!(after.profit_cents, before.profit_cents, "Sales-only profit_cents must be untouched by shrinkage");
+    assert_eq!(after.profit_cents_after_shrinkage, before.profit_cents - 2500);
+    let expected_margin = (before.profit_cents - 2500) as f64 / after.revenue_cents as f64 * 100.0;
+    assert!((after.margin_pct_after_shrinkage.unwrap() - expected_margin).abs() < 0.001);
+}
+
+#[test]
+fn test_gross_profit_summary_excludes_shrinkage_from_a_cancelled_stock_take() {
+    // Cancelling never wrote anything to inventory (see
+    // stock_take.rs::cancel) — a count entered then abandoned must
+    // never surface as a real cost here.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
+    crate::stock_take::record_count(
+        &conn, &biz, &uid,
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 10 },
+    ).unwrap();
+    crate::stock_take::cancel(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+
+    let summary = crate::profit::summary(&conn, &biz, &uid).unwrap();
+    assert_eq!(summary.shrinkage_cents, 0, "a cancelled stock take must never contribute shrinkage");
+}
+
+#[test]
+fn test_profit_by_item_includes_per_item_shrinkage() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let rice_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+    let tea_id = seed_inventory_item(&conn, &biz, "TEA-001", "Tea", 50, 200, 350);
+    checkout_one(&mut conn, &biz, &uid, &rice_id, 5);
+    checkout_one(&mut conn, &biz, &uid, &tea_id, 3);
+
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let rice_item_id = initiated["items"].as_array().unwrap().iter()
+        .find(|i| i["inventory_record_id"].as_str().unwrap() == rice_id)
+        .unwrap()["id"].as_str().unwrap().to_string();
+    // Rice: expected 35, counted 30 -> 5 units shrinkage at 500 cents = 2500.
+    // Tea is left uncounted (skipped) -> zero shrinkage for Tea.
+    crate::stock_take::record_count(
+        &conn, &biz, &uid,
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: rice_item_id, counted_qty: 30 },
+    ).unwrap();
+    crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+
+    let by_item = crate::profit::by_item(&conn, &biz, &uid, 20).unwrap();
+    let rice = by_item.iter().find(|i| i.item_name == "Rice").unwrap();
+    let tea = by_item.iter().find(|i| i.item_name == "Tea").unwrap();
+    assert_eq!(rice.shrinkage_cents, 2500);
+    assert_eq!(rice.profit_cents_after_shrinkage, rice.profit_cents - 2500);
+    assert_eq!(tea.shrinkage_cents, 0, "Tea was never counted in this stock take — no write-off to attribute to it");
+    assert_eq!(tea.profit_cents_after_shrinkage, tea.profit_cents);
+}
+
 #[test]
 fn test_gross_profit_summary_flags_missing_historical_cost_data() {
     // A sale hand-created directly (not through checkout()) has no

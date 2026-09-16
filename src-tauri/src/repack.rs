@@ -286,6 +286,11 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
 
     let tx = conn.transaction()?;
 
+    // Repack moves stock between items — blocked for the duration of
+    // an open stock take for the same reason checkout is (see
+    // stock_take.rs).
+    crate::stock_take::require_no_open_stock_take(&tx, business_id)?;
+
     // unit_price pulled alongside cost now too — needed for the
     // profit-uplift figures below, not just the cost-basis math.
     let source: Option<(String, i64, i64, i64)> = tx

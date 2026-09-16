@@ -23,6 +23,63 @@ fn test_crud_create_and_list() {
     assert_eq!(list[0].get("sku").unwrap().as_str().unwrap(), "TEST-001");
 }
 
+/// Regression test: unit_cost/unit_price on a legacy (non-batched)
+/// Inventory item used to be freely editable through the generic
+/// update endpoint even while a stock take was open — even though
+/// stock_take.rs::close()'s shrinkage branch prices whatever gets
+/// written off from this item's live cost/price at close time. See
+/// crud.rs::update's inventory_price_locked_by_stock_take guard.
+#[test]
+fn test_inventory_price_fields_blocked_while_a_stock_take_is_open() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+
+    crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+
+    let mut edit = serde_json::Map::new();
+    edit.insert("unit_cost".into(), json!(600));
+    let result = crate::crud::update(&conn, &biz, &uid, "inventory", &inv_id, &edit, false);
+    assert!(result.is_err(), "unit_cost must be frozen while a stock take is open");
+    assert!(result.unwrap_err().to_string().contains("stock take"));
+
+    let mut edit = serde_json::Map::new();
+    edit.insert("unit_price".into(), json!(900));
+    let result = crate::crud::update(&conn, &biz, &uid, "inventory", &inv_id, &edit, false);
+    assert!(result.is_err(), "unit_price must be frozen while a stock take is open");
+
+    // A field unrelated to price is untouched by this guard.
+    let mut edit = serde_json::Map::new();
+    edit.insert("name".into(), json!("Rice (Local)"));
+    assert!(crate::crud::update(&conn, &biz, &uid, "inventory", &inv_id, &edit, false).is_ok());
+
+    let record = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let item = record.iter().find(|r| r.get("id").unwrap().as_str().unwrap() == inv_id).unwrap();
+    assert_eq!(item.get("unit_cost").unwrap().as_i64().unwrap(), 500, "the blocked cost edit must not have partially applied");
+    assert_eq!(item.get("unit_price").unwrap().as_i64().unwrap(), 800, "the blocked price edit must not have partially applied");
+}
+
+/// Same guard, bulk-import path: excel_import.rs's own reconciliation
+/// call goes through crud::update(bulk_import = true), and this
+/// freeze is NOT one of the fields bulk_import is allowed to bypass
+/// (only inventory.quantity is) — see is_update_blocked_field's own
+/// doc comment on exactly that distinction.
+#[test]
+fn test_inventory_price_fields_blocked_during_stock_take_even_via_bulk_import() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = seed_inventory_item(&conn, &biz, "RICE-001", "Rice", 40, 500, 800);
+
+    crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+
+    let mut edit = serde_json::Map::new();
+    edit.insert("unit_cost".into(), json!(600));
+    let result = crate::crud::update(&conn, &biz, &uid, "inventory", &inv_id, &edit, true);
+    assert!(result.is_err(), "bulk_import must not be able to bypass this freeze either");
+}
+
 /// Regression test for the bug fixed in module.rs
 /// (business_scoped_unique_constraints) / db_migrations.rs (v13): a
 /// field marked `unique: true` (inventory's `sku`) must only be

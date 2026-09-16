@@ -1246,6 +1246,14 @@ fn route(
             };
         }
     }
+    if let [module_seg, "stocktake", id, "cancel"] = parts.as_slice() {
+        if *module_seg == "inventory" && *method == Method::Post {
+            return match stock_take::cancel(conn, &business_id, &user_id, id) {
+                Ok(summary) => ApiResponse::Json(200, summary),
+                Err(e) => crud_error(&e),
+            };
+        }
+    }
 
     // ---- Settling a debt/credit: see debt_settlement.rs. Route
     // segment is "debt_credit" (matching the module's own literal id,

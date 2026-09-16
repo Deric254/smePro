@@ -49,6 +49,45 @@ pub struct GrossProfitSummary {
     /// real cost data" — or, just as importantly, "2 of 50" — instead
     /// of a flag that treats both situations identically.
     pub cost_bearing_sales_count: i64,
+    /// All-time confirmed shrinkage cost from CLOSED stock takes only
+    /// (a cancelled one wrote nothing — see stock_take.rs::cancel) —
+    /// a second, deliberately separate query against
+    /// `stock_take_items`, NOT folded into `cost_cents`/`profit_cents`
+    /// above. Sales' own cost_at_sale is "what was paid for something
+    /// that generated revenue"; a write-off is "stock that left with
+    /// no revenue at all" — a different kind of loss, not a discount
+    /// on the ones this module was built to measure. Kept separate so
+    /// neither number silently absorbs the other: `profit_cents`
+    /// still answers "what did selling things make," unchanged from
+    /// before this field existed, and `profit_cents_after_shrinkage`
+    /// below answers the fuller "what did the business actually keep"
+    /// question this session's gap report asked for.
+    pub shrinkage_cents: i64,
+    pub profit_cents_after_shrinkage: i64,
+    /// Same "undefined, not zero" rule as `margin_pct`, against the
+    /// same revenue denominator — shrinkage has no revenue of its own
+    /// to divide by.
+    pub margin_pct_after_shrinkage: Option<f64>,
+}
+
+/// Sums confirmed write-off cost across every CLOSED stock take for
+/// this business — a deliberate second, single-purpose query, not a
+/// join bolted onto `summary()`'s own Sales-only query above: that one
+/// stays exactly what its module doc comment already promises
+/// ("just one query against one table"), and this is a completely
+/// different table answering a completely different question.
+/// Cancelled stock takes are excluded on purpose — see
+/// stock_take.rs::cancel, nothing they touched ever reached
+/// inventory.quantity, so there is no real cost to attribute to one.
+fn shrinkage_cents(conn: &Connection, business_id: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(sti.write_off_cost_cents), 0)
+         FROM stock_take_items sti
+         JOIN stock_takes st ON st.id = sti.stock_take_id
+         WHERE st.business_id = ?1 AND st.status = 'closed'",
+        params![business_id],
+        |r| r.get(0),
+    ).map_err(Into::into)
 }
 
 /// All-time totals — same scope `DebtSummary`'s KPI-card numbers use,
@@ -77,6 +116,14 @@ pub fn summary(conn: &Connection, business_id: &str, user_id: &str) -> Result<Gr
         None
     };
 
+    let shrinkage_cents = shrinkage_cents(conn, business_id)?;
+    let profit_cents_after_shrinkage = profit_cents - shrinkage_cents;
+    let margin_pct_after_shrinkage = if revenue_cents > 0 {
+        Some(profit_cents_after_shrinkage as f64 / revenue_cents as f64 * 100.0)
+    } else {
+        None
+    };
+
     Ok(GrossProfitSummary {
         revenue_cents,
         cost_cents,
@@ -84,6 +131,9 @@ pub fn summary(conn: &Connection, business_id: &str, user_id: &str) -> Result<Gr
         margin_pct,
         sales_count,
         cost_bearing_sales_count,
+        shrinkage_cents,
+        profit_cents_after_shrinkage,
+        margin_pct_after_shrinkage,
     })
 }
 
@@ -102,6 +152,14 @@ pub struct ItemProfit {
     /// should stay visible, not average away into a single blended
     /// business-wide number.
     pub cost_bearing_sales_count: i64,
+    /// Same meaning and same CLOSED-only scope as
+    /// GrossProfitSummary::shrinkage_cents, just for this one item's
+    /// `item_name` — an item can be both a strong seller AND a
+    /// frequent write-off (breakage, spoilage, theft), and blending
+    /// those into one number would hide exactly the item an owner
+    /// most needs to see both halves of.
+    pub shrinkage_cents: i64,
+    pub profit_cents_after_shrinkage: i64,
 }
 
 /// Same all-time, same-table computation as summary() above — just
@@ -130,8 +188,35 @@ pub fn by_item(conn: &Connection, business_id: &str, user_id: &str, limit: i64) 
          LIMIT ?2"
     );
 
+    // Same reasoning as shrinkage_cents() above, GROUP BY item_name
+    // instead of collapsed to a single total. A HashMap, not a second
+    // SQL join against the sales table above: stock_take_items'
+    // item_name is a plain frozen-at-count-time string (see this
+    // file's own struct — it's not a foreign key into Inventory), so
+    // matching it to Sales' own item_name has to happen the same
+    // string-equality way either query would do it — doing that in
+    // Rust after one simple query, rather than in a cross-table SQL
+    // join, keeps both queries exactly as single-purpose as
+    // shrinkage_cents() itself already is.
+    let mut shrinkage_by_item: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT sti.item_name, COALESCE(SUM(sti.write_off_cost_cents), 0)
+             FROM stock_take_items sti
+             JOIN stock_takes st ON st.id = sti.stock_take_id
+             WHERE st.business_id = ?1 AND st.status = 'closed'
+             GROUP BY sti.item_name",
+        )?;
+        let rows = stmt.query_map(params![business_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (item_name, cents) = row?;
+            shrinkage_by_item.insert(item_name, cents);
+        }
+    }
+
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![business_id, limit], |r| {
+        let item_name: String = r.get(0)?;
         let revenue_cents: i64 = r.get(1)?;
         let cost_cents: i64 = r.get(2)?;
         let profit_cents = revenue_cents - cost_cents;
@@ -140,14 +225,17 @@ pub fn by_item(conn: &Connection, business_id: &str, user_id: &str, limit: i64) 
         } else {
             None
         };
+        let shrinkage_cents = shrinkage_by_item.get(&item_name).copied().unwrap_or(0);
         Ok(ItemProfit {
-            item_name: r.get(0)?,
+            profit_cents_after_shrinkage: profit_cents - shrinkage_cents,
+            item_name,
             revenue_cents,
             cost_cents,
             profit_cents,
             margin_pct,
             sales_count: r.get(3)?,
             cost_bearing_sales_count: r.get(4)?,
+            shrinkage_cents,
         })
     })?;
 
