@@ -151,3 +151,27 @@ fn test_v8_migration_is_idempotent() {
     assert_eq!(after_first, 1999);
     assert_eq!(after_first, after_second);
 }
+
+#[test]
+fn test_v2_v4_v7_migrations_are_idempotent_when_rerun() {
+    // Regression test for a real bug this session found and fixed: v2,
+    // v4 and v7 used a bare `ALTER TABLE ADD COLUMN` with no existence
+    // check — exactly the class of bug that made v34 fail this same
+    // kind of rollback-and-rerun test with "duplicate column name"
+    // before it was fixed. These three are lower-traffic tables
+    // (businesses, users, sessions) so nothing had exercised the
+    // rerun path for them until now.
+    let mut conn = test_db();
+    conn.execute("DELETE FROM _schema_version WHERE version >= 2", []).unwrap();
+    crate::db_migrations::run(&mut conn).expect("first rerun from v2 must succeed");
+    crate::db_migrations::run(&mut conn).expect("second rerun must no-op, not fail with 'duplicate column name'");
+
+    for (table, column) in [("businesses", "slogan"), ("users", "totp_secret"), ("users", "totp_enabled"), ("sessions", "last_activity")] {
+        let count: i64 = conn.query_row(
+            &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name='{column}'"),
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "{table}.{column} must exist exactly once, not zero and not duplicated");
+    }
+}

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 35;
+const CURRENT_VERSION: i32 = 36;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -79,7 +79,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 33 { v33_stock_takes_allow_cancelled_status(conn)?; }
     if current < 34 { v34_stock_take_items_write_off_cost(conn)?; }
     if current < 35 { v35_stock_movements(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 35, "bump this alongside the last `if current < N` check above");
+    if current < 36 { v36_import_batches(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 36, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -93,7 +94,20 @@ fn v1_initial(conn: &mut Connection) -> Result<()> {
 
 fn v2_add_slogan(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    tx.execute("ALTER TABLE businesses ADD COLUMN slogan TEXT", [])?;
+    // SQLite has no `ADD COLUMN IF NOT EXISTS` — same pragma_table_info
+    // guard the rest of this file uses (see v23/v29/v31/v34), added
+    // here for the same reason: a rollback-and-rerun of migrations
+    // (see money_migration_tests.rs) re-applies this one too, and a
+    // bare ALTER TABLE fails outright the second time instead of
+    // harmlessly no-op'ing.
+    let already_has_column: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('businesses') WHERE name='slogan'",
+        [],
+        |r| r.get(0),
+    )?;
+    if already_has_column == 0 {
+        tx.execute("ALTER TABLE businesses ADD COLUMN slogan TEXT", [])?;
+    }
     tx.execute("INSERT INTO _schema_version (version) VALUES (2)", [])?;
     tx.commit()?;
     Ok(())
@@ -108,9 +122,23 @@ fn v3_invoice_module(conn: &mut Connection) -> Result<()> {
 
 fn v4_add_totp(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    tx.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT", [])?;
-    tx.execute("ALTER TABLE users ADD COLUMN totp_recovery_codes TEXT", [])?;
-    tx.execute("ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0", [])?;
+    // Same pragma_table_info guard as v2 above, same reason — three
+    // columns here, so each is checked independently rather than
+    // assuming all three are always added or missing together.
+    for (column, col_def) in [
+        ("totp_secret", "TEXT"),
+        ("totp_recovery_codes", "TEXT"),
+        ("totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let already_has_column: i64 = tx.query_row(
+            "SELECT count(*) FROM pragma_table_info('users') WHERE name=?1",
+            rusqlite::params![column],
+            |r| r.get(0),
+        )?;
+        if already_has_column == 0 {
+            tx.execute(&format!("ALTER TABLE users ADD COLUMN {column} {col_def}"), [])?;
+        }
+    }
     tx.execute("INSERT INTO _schema_version (version) VALUES (4)", [])?;
     tx.commit()?;
     Ok(())
@@ -155,10 +183,18 @@ fn v6_add_exchange_rates(conn: &mut Connection) -> Result<()> {
 
 fn v7_session_security(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    tx.execute(
-        "ALTER TABLE sessions ADD COLUMN last_activity TEXT NOT NULL DEFAULT (datetime('now'))",
+    // Same pragma_table_info guard as v2/v4 above, same reason.
+    let already_has_column: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('sessions') WHERE name='last_activity'",
         [],
+        |r| r.get(0),
     )?;
+    if already_has_column == 0 {
+        tx.execute(
+            "ALTER TABLE sessions ADD COLUMN last_activity TEXT NOT NULL DEFAULT (datetime('now'))",
+            [],
+        )?;
+    }
     tx.execute("INSERT INTO _schema_version (version) VALUES (7)", [])?;
     tx.commit()?;
     Ok(())
@@ -2453,6 +2489,43 @@ fn v35_stock_movements(conn: &mut Connection) -> Result<()> {
         [],
     )?;
     tx.execute("INSERT INTO _schema_version (version) VALUES (35)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Records every spreadsheet actually imported, keyed by the exact
+/// content of the file — closes a real bug: a module with no unique
+/// field (purchasing has none until a `po_number` exists — see
+/// excel_import.rs's own doc comment on why) treats EVERY row of EVERY
+/// import as a brand-new record, because there is no key to match an
+/// existing one against. Re-uploading the identical "new orders" sheet
+/// a second time — a double-click, a retry after a slow response, a
+/// forgotten "did that already work?" re-upload — silently created a
+/// second full set of purchase orders and, since Purchasing auto-
+/// receives what it creates, applied the same stock to Inventory again.
+/// Five re-uploads meant five times the stock from one real delivery.
+///
+/// The fix (excel_import::import) hashes the raw file bytes and refuses
+/// a second import whose hash exactly matches one already recorded for
+/// this business and module — before any row is touched, so a rejected
+/// re-upload changes nothing rather than partially applying.
+fn v36_import_batches(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS import_batches (
+            id            TEXT PRIMARY KEY,
+            business_id   TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            module_id     TEXT NOT NULL,
+            file_hash     TEXT NOT NULL,
+            user_id       TEXT,
+            rows_created  INTEGER NOT NULL DEFAULT 0,
+            rows_updated  INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (business_id, module_id, file_hash)
+        )",
+        [],
+    )?;
+    tx.execute("INSERT INTO _schema_version (version) VALUES (36)", [])?;
     tx.commit()?;
     Ok(())
 }

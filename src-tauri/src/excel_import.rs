@@ -80,7 +80,7 @@
 use crate::{audit, crud, module::ModuleDef, receiving, reference_data};
 use anyhow::{anyhow, Result};
 use calamine::{open_workbook_from_rs, Data, Reader, Xlsx};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::io::Cursor;
 
@@ -114,6 +114,17 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
         .fields
         .iter()
         .filter(|f| !(module.id == "inventory" && f.name == "quantity"))
+        // Same reasoning, same place, as `quantity` just above: a
+        // brand-new inventory item created via this blank template has
+        // its unit_cost/unit_price forced to 0 regardless of what's
+        // typed (see this file's `import`, `None` branch) — real price
+        // only ever enters through a purchase (a batch). Printing these
+        // two columns on a sheet whose values are never honored is the
+        // exact "invites someone to type a real value there, reasonably
+        // expecting it to land" trap `quantity` was removed for. Per
+        // Deric: these two fields belong to Purchasing, not Inventory's
+        // own create/import surface.
+        .filter(|f| !(module.id == "inventory" && (f.name == "unit_cost" || f.name == "unit_price")))
         // Same reasoning as inventory's `quantity` just above, for two
         // different purchasing fields:
         // - `received` is set only by receiving.rs::receive(), never by
@@ -215,6 +226,37 @@ pub fn import(
     // existing key will correctly fail for them individually, not
     // silently succeed as an unauthorized overwrite.
     crate::rbac::require(conn, user_id, &module.id, "create")?;
+
+    // THE ACTUAL FIX for a real bug: a module with no unique field
+    // (purchasing has none until a po_number exists) treats every row
+    // of every import as a brand-new record, since there is no key to
+    // match an existing one against. Re-uploading the identical file a
+    // second time silently created a second full set of records — and
+    // since Purchasing auto-receives whatever it creates (see the
+    // "THE ACTUAL FIX Deric asked for" block further down), that meant
+    // the same stock applied to Inventory a second, third, or fifth
+    // time from one real delivery. Hashed and checked before any row is
+    // parsed or touched, so a rejected re-upload changes nothing.
+    // db_migrations.rs's v36 has the fuller explanation.
+    let file_hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&xlsx_bytes);
+        format!("{:x}", hasher.finalize())
+    };
+    let already_imported: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM import_batches WHERE business_id = ?1 AND module_id = ?2 AND file_hash = ?3)",
+        params![business_id, module.id, file_hash],
+        |r| r.get(0),
+    )?;
+    if already_imported {
+        return Err(anyhow!(
+            "this exact spreadsheet has already been imported for {} — importing it again would create duplicate records{}. If this is genuinely new (a separate order, a second batch), make any change to the file — even editing one cell — before importing again.",
+            module.display_name,
+            if module.id == "purchasing" { " and receive the same stock a second time" } else { "" }
+        ));
+    }
+
 
     // Importing a Purchasing order now also receives it immediately
     // (see the big comment on the auto-receive block further down for
@@ -1056,6 +1098,16 @@ pub fn import(
             }
         }
     }
+
+    // Recorded in the same transaction as every row above, so it only
+    // becomes durable if the whole import actually commits — a batch
+    // whose transaction rolled back leaves no trace to block a genuine
+    // retry after fixing whatever caused the failure.
+    tx.execute(
+        "INSERT INTO import_batches (id, business_id, module_id, file_hash, user_id, rows_created, rows_updated, created_at)
+         VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+        params![business_id, module.id, file_hash, user_id, created, updated],
+    )?;
 
     // Everything above happened inside `tx` — this is the one moment
     // all of it becomes durable at once, same discipline as every

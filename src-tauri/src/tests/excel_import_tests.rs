@@ -412,6 +412,66 @@ fn test_purchasing_import_resolves_inventory_record_id_from_item_name() {
 }
 
 #[test]
+fn test_reimporting_the_identical_purchasing_sheet_is_rejected_not_duplicated() {
+    // THE ACTUAL BUG this closes: purchasing has no unique field until
+    // a po_number exists, so every row of a "new orders" import always
+    // creates a fresh record — there is nothing to match an existing
+    // one against. Before this fix, uploading the exact same filled-in
+    // template a second time (a double-click, a retry, an accidental
+    // re-upload) silently created a second purchase order and, since
+    // Purchasing auto-receives what it creates, applied the same stock
+    // to Inventory a second time. Five re-uploads meant five times the
+    // stock from one real delivery.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    let mut inv_record = serde_json::Map::new();
+    inv_record.insert("sku".into(), json!("RICE-001"));
+    inv_record.insert("name".into(), json!("Rice"));
+    inv_record.insert("quantity".into(), json!(0));
+    inv_record.insert("unit_cost".into(), json!(1000));
+    inv_record.insert("unit_price".into(), json!(1500));
+    crate::crud::create(&conn, &biz, &uid, "inventory", &inv_record).unwrap();
+
+    let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
+    let xlsx = build_xlsx(
+        &["supplier", "item_name", "quantity", "unit_cost", "unit_price"],
+        &[vec!["Acme Distributors", "Rice", "50", "9.50", "15.00"]],
+    );
+
+    let first = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx.clone(), "supplier").unwrap();
+    assert_eq!(first.created, 1);
+
+    let inv_qty_after_first: i64 = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap()[0]["quantity"].as_i64().unwrap();
+    assert_eq!(inv_qty_after_first, 50, "the one real delivery must add 50 units");
+
+    // The exact same bytes, uploaded again — the accidental-duplicate
+    // case this bug produced.
+    let second = crate::excel_import::import(&mut conn, &biz, &uid, &module, xlsx.clone(), "supplier");
+    match second {
+        Ok(_) => panic!("an identical re-upload must be rejected outright, not silently create a duplicate order"),
+        Err(e) => assert!(e.to_string().contains("already been imported")),
+    }
+
+    // Nothing from the rejected attempt may have partially applied.
+    let po_count = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap().len();
+    assert_eq!(po_count, 1, "the rejected re-upload must not have created a second purchase order");
+    let inv_qty_after_second: i64 = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap()[0]["quantity"].as_i64().unwrap();
+    assert_eq!(inv_qty_after_second, 50, "stock must not have been applied a second time");
+
+    // A genuinely different order (one changed cell) must go through
+    // normally — this is a content check, not a rate limit or a
+    // one-import-per-day rule.
+    let different_xlsx = build_xlsx(
+        &["supplier", "item_name", "quantity", "unit_cost", "unit_price"],
+        &[vec!["Acme Distributors", "Rice", "30", "9.50", "15.00"]],
+    );
+    let third = crate::excel_import::import(&mut conn, &biz, &uid, &module, different_xlsx, "supplier").unwrap();
+    assert_eq!(third.created, 1, "a genuinely different file must import normally");
+}
+
+#[test]
 fn test_purchasing_import_rejects_item_name_with_no_matching_inventory_item() {
     // The manual form's dropdown can only ever pick an item that
     // already exists in Inventory ("Create the item in Inventory
