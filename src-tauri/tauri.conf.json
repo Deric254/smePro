@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SME Pro",
   "mainBinaryName": "sme-pro",
-  "version": "0.1.82",
+  "version": "0.1.81",
   "identifier": "com.smepro.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,7 +26,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQzQzUwQURGM0NDMUY4RjAKUldUdytNRTgzd3JGUSt3eE8wWHJZMUNneHdMVk54SitCYXRKVWpKQmlWc1dhQ3h3dmpZOXJSbmYK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ0QkU2Njg3NDQ3MTcyQkIKUldTN2NuRkVoMmErMUkrcktkT2hnUk9sTGNzWW92b0xmSWUyVzVTMk01RVY0UFhEMGxCYUdXRG8K",
       "endpoints": [
         "https://github.com/Deric254/smePro/releases/latest/download/latest.json"
       ]
