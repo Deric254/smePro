@@ -31,6 +31,35 @@ permissions:
 
 jobs:
   # ------------------------------------------------------------------
+  # Fails in seconds, not 15 minutes. Without this, a missing
+  # TAURI_SIGNING_PRIVATE_KEY secret is only ever discovered by
+  # publish-release, AFTER test-and-lint, bump-version, create-release,
+  # the full 4-way desktop matrix, and the android build have all
+  # already run to completion — wasting the entire run's build time on
+  # a release that was always going to be rejected. This runs with no
+  # dependencies, in parallel with test-and-lint, so it adds zero time
+  # to a healthy run and saves ~15 minutes on a misconfigured one.
+  # ------------------------------------------------------------------
+  preflight-check-secrets:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify updater signing secrets are set
+        env:
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          HAS_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY repo secret is not set. Generate a key locally with 'npm run tauri signer generate -- -w ~/.tauri/sme-pro.key' (never in a shared/AI session), put its public half in src-tauri/tauri.conf.json under plugins.updater.pubkey, and add the private key file's contents as this secret. See RELEASE.md 'One-time setup'."
+            exit 1
+          fi
+          if [ "$HAS_PASSWORD" != "true" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY_PASSWORD repo secret is not set. This is the password you chose when generating the key in the step above. See RELEASE.md 'One-time setup'."
+            exit 1
+          fi
+          echo "Signing secrets present — proceeding."
+
+  # ------------------------------------------------------------------
   # The actual quality gate. Without this job, nothing in this
   # pipeline ever ran a test, a lint check, or even confirmed the code
   # compiles before bumping the version, tagging it, and building real
@@ -97,7 +126,7 @@ jobs:
   # where those files disagree with each other or with the tag.
   # ------------------------------------------------------------------
   bump-version:
-    needs: test-and-lint
+    needs: [test-and-lint, preflight-check-secrets]
     if: ${{ github.ref_type == 'tag' || !contains(github.event.head_commit.message, 'chore(release):') }}
     runs-on: ubuntu-24.04
     outputs:
