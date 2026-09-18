@@ -23,7 +23,7 @@ import { useEffect, useState } from 'react';
 type ReleaseAsset = { name: string; browser_download_url: string };
 type ReleaseInfo = { tag_name: string; assets: ReleaseAsset[]; body?: string };
 
-const REPO = 'Deric254/UniversalSME';
+const REPO = 'Deric254/smePro';
 
 function isNewer(latest: string, current: string): boolean {
   const parse = (v: string) => v.replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
