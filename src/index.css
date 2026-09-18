@@ -300,6 +300,33 @@ label {
   background: var(--paper);
 }
 
+/* THE ACTUAL CAUSE OF THE APP-WIDE HORIZONTAL SCROLL: <main
+   className="app-main-content"> is a flex item (App.tsx's root is
+   `display: flex` — sidebar + main) with only `flex: 1` set inline.
+   A flex item's default `min-width` is `auto`, not `0` — meaning the
+   browser refuses to shrink it below the natural min-content width of
+   whatever is inside it, no matter how much `flex: 1` says it should
+   yield. Every one of this app's own internal "make wide tables
+   scroll, not the page" wrappers (the `overflowX: 'auto'` cards in
+   AdminPanel/ModuleView/Customers/StockTake, and PointOfSale's own
+   `.pos-layout` grid) depends on <main> itself being willing to
+   shrink first — an `overflow-x: auto` on a child can only ever kick
+   in once its own box has actually been constrained to less than its
+   content's natural width. With <main> pinned to "at least as wide as
+   my widest child's min-content" by this default, a wide table (or
+   the POS product grid) instead pushed <main>, the flex row, and the
+   whole page out past the viewport — every one of those existing
+   inner scroll wrappers was silently never being reached. This single
+   `min-width: 0` is the fix: it removes that floor so <main> actually
+   shrinks to the space the sidebar leaves it, and every page's own
+   already-correct internal overflow handling starts working as
+   designed. Applies at every width (not just the mobile media
+   queries below) since the underlying flex default is the same bug
+   on a full-width desktop window as it is on a phone. */
+.app-main-content {
+  min-width: 0;
+}
+
 .app-hamburger {
   display: none;
 }
@@ -495,7 +522,14 @@ label {
    cart doesn't get squeezed into an unusably narrow strip. */
 .pos-layout {
   display: grid;
-  grid-template-columns: 1fr 320px;
+  /* minmax(0, 1fr), not a bare 1fr: a grid track's default minimum is
+     also `auto` (the same footgun as a flex item's default min-width
+     — see .app-main-content above), so without the explicit 0 floor
+     this column could refuse to shrink below the product grid's own
+     min-content width (e.g. an unusually long, unbroken product name)
+     and force the same kind of overflow one layer down, even with the
+     fix above in place. */
+  grid-template-columns: minmax(0, 1fr) 320px;
   gap: 1.2rem;
   align-items: flex-start;
 }
