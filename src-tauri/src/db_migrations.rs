@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 36;
+const CURRENT_VERSION: i32 = 37;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -80,7 +80,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 34 { v34_stock_take_items_write_off_cost(conn)?; }
     if current < 35 { v35_stock_movements(conn)?; }
     if current < 36 { v36_import_batches(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 36, "bump this alongside the last `if current < N` check above");
+    if current < 37 { v37_users_terms_acceptance(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 37, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2526,6 +2527,32 @@ fn v36_import_batches(conn: &mut Connection) -> Result<()> {
         [],
     )?;
     tx.execute("INSERT INTO _schema_version (version) VALUES (36)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn v37_users_terms_acceptance(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    // SQLite has no `ADD COLUMN IF NOT EXISTS` — same pragma_table_info
+    // guard this file already uses elsewhere (see v17/v25/v34) for the
+    // rollback-and-rerun scenario documented on v34: a bare `ALTER TABLE
+    // ADD COLUMN` is not idempotent the way `CREATE TABLE IF NOT EXISTS`
+    // is, so a second run without this guard fails outright with
+    // "duplicate column name" instead of harmlessly no-op'ing.
+    let already_has_column: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('users') WHERE name='terms_accepted_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    if already_has_column == 0 {
+        // Both nullable, no DEFAULT: NULL is the correct, meaningful
+        // "hasn't accepted yet" state for every existing user the
+        // moment this migration runs — not something to paper over
+        // with a default value.
+        tx.execute("ALTER TABLE users ADD COLUMN terms_accepted_at TEXT", [])?;
+        tx.execute("ALTER TABLE users ADD COLUMN terms_accepted_version TEXT", [])?;
+    }
+    tx.execute("INSERT INTO _schema_version (version) VALUES (37)", [])?;
     tx.commit()?;
     Ok(())
 }

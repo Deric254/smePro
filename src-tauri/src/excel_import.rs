@@ -174,6 +174,22 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
         sheet.write_string_with_format(0, col as u16, &label, &header_format)?;
     }
 
+    // `expiry_date`: not a declared field on `purchasing` (it's a
+    // BATCH property, set at receive time — see batches.rs), so it
+    // isn't in `template_fields` above and needs its own column,
+    // appended after every real field. Optional — a business without
+    // perishable stock leaves it blank and every batch it creates
+    // just never expires (see batches.rs's FEFO ordering: a
+    // no-expiry batch sells after every dated one, not before
+    // anything). `import()`'s own row-parsing loop reads this same
+    // literal header name back out — see its "row_expiry_date"
+    // comment for why it's handled separately from `template_fields`
+    // there too.
+    let expiry_col = template_fields.len();
+    if module.id == "purchasing" {
+        sheet.write_string_with_format(0, expiry_col as u16, "expiry_date", &header_format)?;
+    }
+
     // One example row, greyed-out-by-convention (a leading '#'), shows
     // the expected shape without the user having to guess — deleted
     // by them before their real data, same convention as most
@@ -193,6 +209,9 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
             _ => format!("example {}", field.name),
         };
         sheet.write_string(1, col as u16, format!("# {example}"))?;
+    }
+    if module.id == "purchasing" {
+        sheet.write_string(1, expiry_col as u16, "# 2026-01-31")?;
     }
 
     sheet.autofit();
@@ -429,6 +448,28 @@ pub fn import(
             if matches!(cell, Data::Empty) { continue; }
             record.insert(field.name.clone(), cell_to_json(cell, &field.field_type, &currency));
         }
+
+        // `expiry_date` deliberately captured OUTSIDE the loop above,
+        // and never inserted into `record`: it isn't a declared field
+        // on the `purchasing` module (it belongs to the BATCH this
+        // receipt creates — see batches.rs — not to the purchase
+        // order row), so the loop's `module.fields.iter().find(...)`
+        // guard would silently drop it exactly the way it drops any
+        // other unrecognized column — same bug, same fix, as
+        // `create_and_receive`'s own comment in receiving.rs. Only
+        // meaningful for `purchasing` (see `generate_template`'s own
+        // special-cased column for this same field, and the
+        // `receive_in_tx` call below that's the only place this is
+        // actually used).
+        let row_expiry_date: Option<String> = if module.id == "purchasing" {
+            headers.iter().position(|h| h == "expiry_date")
+                .and_then(|col_idx| cells.get(col_idx))
+                .filter(|cell| !matches!(cell, Data::Empty))
+                .map(|cell| cell_to_json(cell, "date", &currency))
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+        } else {
+            None
+        };
 
         // Snapshot of exactly what THIS ROW's own cells actually
         // provided, taken before the default-fill loop just below adds
@@ -1071,7 +1112,7 @@ pub fn import(
                         if module.id == "purchasing" {
                             let quantity = record.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0);
                             let purchasing_table = module.table_name();
-                            match receiving::receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &new_id, Some(quantity), None, None, Some(user_id)) {
+                            match receiving::receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &new_id, Some(quantity), None, row_expiry_date.as_deref(), Some(user_id)) {
                                 Ok(summary) => {
                                     let _ = audit::log(&tx, business_id, Some(user_id), "_receiving", "receive", Some(&new_id), Some(&summary));
                                 }

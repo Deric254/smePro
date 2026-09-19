@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { login, login2fa, setSession, getResolvedBusinessId, getPublicBranding, getSecurityQuestions, recoverViaSecurityQuestions, recoverViaAdminCode, API_BASE, ApiError } from '../api';
+import { login, login2fa, setSession, clearSession, logout, getTerms, acceptTerms, getResolvedBusinessId, getPublicBranding, getSecurityQuestions, recoverViaSecurityQuestions, recoverViaAdminCode, API_BASE, ApiError } from '../api';
 
-type Mode = 'login' | '2fa' | 'recover-questions' | 'recover-admin-code' | 'recover-success';
+type Mode = 'login' | '2fa' | 'terms' | 'recover-questions' | 'recover-admin-code' | 'recover-success';
 
 export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [businessId, setBusinessId] = useState(localStorage.getItem('erp_business_id') || '');
@@ -36,9 +36,66 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
   const [branding, setBranding] = useState<{ name: string | null; logo_url: string | null; slogan: string | null }>({ name: null, logo_url: null, slogan: null });
 
+  // Terms & Conditions — first-login blocking gate. See terms.rs on
+  // the backend for why this is per-user and versioned: `mode ===
+  // 'terms'` is reached only when the login response says the CURRENT
+  // user hasn't accepted the CURRENT version yet (see completeLogin
+  // below), and there is no path out of it except accepting or
+  // logging back out — no "skip" button on purpose.
+  const [termsText, setTermsText] = useState('');
+  const [termsLoading, setTermsLoading] = useState(false);
+  const [termsAccepting, setTermsAccepting] = useState(false);
+
   useEffect(() => {
     getPublicBranding().then(setBranding).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (mode !== 'terms') return;
+    setTermsLoading(true);
+    setError(null);
+    getTerms()
+      .then((r) => setTermsText(r.text))
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the Terms & Conditions'))
+      .finally(() => setTermsLoading(false));
+  }, [mode]);
+
+  // Shared by both login paths (normal + 2FA) below — the terms gate
+  // applies identically to either. `token` is stored via setSession
+  // immediately either way (acceptTerms below needs an authenticated
+  // session to call), but onLoggedIn() — the actual entry into the
+  // rest of the app — only fires once terms_accepted is true.
+  function completeLogin(token: string, termsAccepted: boolean) {
+    setSession(token, businessId);
+    if (termsAccepted) {
+      onLoggedIn();
+    } else {
+      setMode('terms');
+    }
+  }
+
+  async function handleAcceptTerms() {
+    setError(null);
+    setTermsAccepting(true);
+    try {
+      await acceptTerms();
+      onLoggedIn();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not record your acceptance — please try again');
+    } finally {
+      setTermsAccepting(false);
+    }
+  }
+
+  // The only way out of the terms screen besides accepting: abandon
+  // this session and go back to the sign-in form. Best-effort logout
+  // (the session may already be about to expire on its own) — the
+  // client-side session clear is what actually matters here.
+  function handleDeclineTerms() {
+    logout().catch(() => {});
+    clearSession();
+    switchMode('login');
+  }
 
   useEffect(() => {
     // The overwhelmingly common case: one installed copy of this app,
@@ -69,8 +126,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
         setMode('2fa');
         return;
       }
-      setSession(result.token, businessId);
-      onLoggedIn();
+      completeLogin(result.token, result.terms_accepted);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not reach the server');
     } finally {
@@ -83,9 +139,8 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     setError(null);
     setLoading(true);
     try {
-      const { token } = await login2fa(tempToken, twoFaCode);
-      setSession(token, businessId);
-      onLoggedIn();
+      const result = await login2fa(tempToken, twoFaCode);
+      completeLogin(result.token, result.terms_accepted);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not verify code');
     } finally {
@@ -169,7 +224,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
           )}
           <div>
             <div style={styles.eyebrow}>{branding.name || 'SME Pro'}</div>
-            <h1 style={{ margin: 0 }}>{mode === 'login' ? 'Sign in' : mode === '2fa' ? 'Verify your identity' : 'Reset your password'}</h1>
+            <h1 style={{ margin: 0 }}>{mode === 'login' ? 'Sign in' : mode === '2fa' ? 'Verify your identity' : mode === 'terms' ? 'Terms & Conditions' : 'Reset your password'}</h1>
             {branding.slogan && mode === 'login' && (
               <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', fontStyle: 'italic', marginTop: '0.15rem' }}>{branding.slogan}</div>
             )}
@@ -237,6 +292,32 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
               Back to sign in
             </button>
           </form>
+        )}
+
+        {mode === 'terms' && (
+          <div style={styles.form}>
+            <div style={styles.hint}>
+              Please review and accept the Terms &amp; Conditions to continue.
+            </div>
+            <div style={styles.termsBox}>
+              {termsLoading ? 'Loading…' : termsText}
+            </div>
+
+            {error && <div style={styles.error}>{error}</div>}
+
+            <button
+              type="button"
+              className="btn btn-stamp"
+              disabled={termsLoading || termsAccepting || !termsText}
+              onClick={handleAcceptTerms}
+              style={{ width: '100%', justifyContent: 'center' }}
+            >
+              {termsAccepting ? 'Recording…' : 'I accept'}
+            </button>
+            <button type="button" onClick={handleDeclineTerms} style={styles.linkBtn}>
+              Not now — log out
+            </button>
+          </div>
         )}
 
         {(mode === 'recover-questions' || mode === 'recover-admin-code') && (
@@ -360,6 +441,17 @@ const styles: Record<string, React.CSSProperties> = {
   form: { display: 'flex', flexDirection: 'column', gap: '0.9rem' },
   input: { width: '100%' },
   hint: { fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.3rem', lineHeight: 1.4 },
+  termsBox: {
+    maxHeight: '45vh',
+    overflowY: 'auto',
+    whiteSpace: 'pre-wrap',
+    fontSize: '0.8rem',
+    lineHeight: 1.5,
+    padding: '0.8em 0.9em',
+    border: '1px solid var(--paper-line)',
+    borderRadius: 4,
+    background: 'var(--paper)',
+  },
   error: { background: 'var(--stamp-wash)', color: 'var(--stamp)', padding: '0.5em 0.7em', borderRadius: 3, fontSize: '0.85rem' },
   linkBtn: { background: 'none', border: 'none', color: 'var(--ink-soft)', fontSize: '0.8rem', cursor: 'pointer', textAlign: 'center', textDecoration: 'underline', padding: '0.3rem' },
   tabRow: { display: 'flex', gap: '0.5rem' },

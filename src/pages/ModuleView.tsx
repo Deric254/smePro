@@ -537,6 +537,16 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
           : f.type === 'boolean' ? raw === 'true'
           : raw;
       }
+      // expiry_date: same reason as PurchaseItemSelector's
+      // inventory_record_id/item_name aren't set via the loop above —
+      // it isn't in schema.fields (see the input's own comment above)
+      // so the loop never picks it up. Create-only, matching the
+      // input being hidden on edit: create_and_receive (receiving.rs)
+      // is the only path that ever reads this key, and it only runs
+      // on create.
+      if (moduleId === 'purchasing' && editingId === null && formValues.expiry_date) {
+        payload.expiry_date = formValues.expiry_date;
+      }
       if (editingId !== null) {
         await updateRecord(moduleId, editingId, payload);
       } else {
@@ -723,6 +733,28 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                     required
                     onChange={(id, name) => setFormValues((p) => ({ ...p, inventory_record_id: id, item_name: name }))}
                   />
+                )}
+                {/* Not a `schema.fields` entry, deliberately, same as
+                    PurchaseItemSelector just above: `expiry_date`
+                    belongs to the BATCH this purchase creates (see
+                    batches.rs), not to the purchasing row itself, so
+                    it isn't in purchasing.json and the generic field
+                    loop below never renders it on its own. handleSubmit
+                    reads this one field out of formValues by name and
+                    adds it to the payload separately, since the normal
+                    payload-building loop only walks schema.fields. */}
+                {moduleId === 'purchasing' && editingId === null && (
+                  <div>
+                    <label>expiry date</label>
+                    <input
+                      type="date"
+                      value={formValues.expiry_date ?? ''}
+                      onChange={(e) => setFormValues((p) => ({ ...p, expiry_date: e.target.value }))}
+                    />
+                    <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginTop: '0.2em' }}>
+                      Optional — leave blank for stock that doesn't expire. Sets the expiry date for the batch this delivery creates; used to sell soon-expiring stock first (FEFO).
+                    </div>
+                  </div>
                 )}
                 {schema.fields.filter((f) => !isActionManagedField(moduleId, f.name)
                   && !(moduleId === 'purchasing' && (f.name === 'item_name' || f.name === 'inventory_record_id'))

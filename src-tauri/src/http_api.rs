@@ -6,7 +6,7 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::rate_limit::RateLimiter;
 use crate::report::Dimension;
-use crate::{ai_assistant, ai_chat, audit, auth, backup, batches, crud, debt_settlement, excel_import, forecast, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, stock_movement, stock_take, users, xlsx_export};
+use crate::{ai_assistant, ai_chat, audit, auth, backup, batches, crud, debt_settlement, excel_import, forecast, onboarding, pos, rbac, receiving, reference_data, refund, report, repack, roles, settings, stock_movement, stock_take, terms, users, xlsx_export};
 use std::time::Duration;
 
 enum ApiResponse {
@@ -343,6 +343,16 @@ fn route(
         };
     }
 
+    // GET /terms — public, no auth: a user must be able to read the
+    // current Terms & Conditions before logging in, not only after.
+    // See terms.rs for the text/version themselves; the two
+    // `/auth/*login` routes below report whether the CURRENT user has
+    // already accepted this same version, and `POST /terms/accept`
+    // (protected route, below) is how they record accepting it.
+    if parts.as_slice() == ["terms"] && *method == Method::Get {
+        return ApiResponse::Json(200, json!({"version": terms::TERMS_VERSION, "text": terms::TERMS_TEXT}));
+    }
+
     // GET /setup/diagnostics — NOT used by the frontend at all. Exists
     // purely so a real device's actual runtime state can be inspected
     // directly (e.g. by opening this URL in the phone's browser, or via
@@ -577,7 +587,14 @@ fn route(
         return match auth::create_session(conn, &logged_in_user_id, biz) {
             Ok(token) => {
                 let _ = audit::log(conn, biz, Some(&logged_in_user_id), "_auth", "login_success", None, None);
-                ApiResponse::Json(200, json!({"token": token}))
+                // Reported right alongside the token, not as a separate
+                // round-trip: the frontend needs this the instant login
+                // succeeds, to decide whether to show the blocking
+                // acceptance screen before anything else renders. See
+                // terms.rs — false for a user who has never accepted,
+                // or who accepted an older version since superseded.
+                let terms_accepted = terms::accepted_current(conn, &logged_in_user_id).unwrap_or(false);
+                ApiResponse::Json(200, json!({"token": token, "terms_accepted": terms_accepted}))
             }
             Err(e) => json_err(500, &e.to_string()),
         };
@@ -604,7 +621,11 @@ fn route(
         return match auth::create_session(conn, &pending_user_id, &pending_business_id) {
             Ok(token) => {
                 let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "login_success", None, None);
-                ApiResponse::Json(200, json!({"token": token}))
+                // Same reporting as the non-2FA login route above — see
+                // its comment. A 2FA user needs this exact same gate,
+                // reported the exact same way.
+                let terms_accepted = terms::accepted_current(conn, &pending_user_id).unwrap_or(false);
+                ApiResponse::Json(200, json!({"token": token, "terms_accepted": terms_accepted}))
             }
             Err(e) => json_err(500, &e.to_string()),
         };
@@ -674,6 +695,16 @@ fn route(
 
     if parts.as_slice() == ["auth", "logout"] && *method == Method::Post {
         return match auth::logout(conn, token) { Ok(()) => ApiResponse::Json(200, json!({"logged_out": true})), Err(e) => json_err(400, &e.to_string()) };
+    }
+
+    // POST /terms/accept — records that the CURRENT user (from the
+    // session token, not from anything the request body could spoof)
+    // has accepted the current version. See terms.rs.
+    if parts.as_slice() == ["terms", "accept"] && *method == Method::Post {
+        return match terms::accept(conn, &user_id) {
+            Ok(()) => ApiResponse::Json(200, json!({"version": terms::TERMS_VERSION, "accepted": true})),
+            Err(e) => json_err(500, &e.to_string()),
+        };
     }
 
     // GET /auth/me — who is currently signed in, right now, from the

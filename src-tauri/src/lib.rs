@@ -43,6 +43,7 @@ pub mod stock_take;
 pub mod tax;
 #[cfg(test)]
 mod tests;
+pub mod terms;
 pub mod totp;
 
 /// Where the bundled `modules/*.json` files actually live at runtime.

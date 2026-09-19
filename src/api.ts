@@ -51,10 +51,6 @@ export function getToken() {
   return authToken;
 }
 
-export function getBusinessId() {
-  return businessId;
-}
-
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -189,6 +185,13 @@ export const login2fa = (tempToken: string, code: string) =>
     return body;
   });
 
+// ---- Terms & Conditions — see terms.rs. `getTerms` is public (a user
+// must be able to read the terms before logging in), `acceptTerms`
+// requires the session `login`/`login2fa` just issued. ----
+export const getTerms = (): Promise<{ version: string; text: string }> => request('/terms');
+export const acceptTerms = (): Promise<{ version: string; accepted: boolean }> =>
+  request('/terms/accept', { method: 'POST' });
+
 export interface SecurityQuestions { question1: string | null; question2: string | null }
 export const getSecurityQuestions = (biz: string, username: string): Promise<SecurityQuestions> =>
   // GET, not POST — and cache: 'no-store' explicitly, same reasoning
@@ -302,23 +305,6 @@ export interface RefundRequest {
 export const processRefund = (req: RefundRequest) =>
   request('/sales/refund', { method: 'POST', body: JSON.stringify(req) });
 
-// ---- Receiving stock — the buying-side counterpart. See receiving.rs. ----
-export const receiveStock = (
-  purchaseRecordId: string,
-  quantityReceived?: number,
-  unitPrice?: number,
-  expiryDate?: string,
-) =>
-  request('/purchasing/receive', {
-    method: 'POST',
-    body: JSON.stringify({
-      purchase_record_id: purchaseRecordId,
-      quantity_received: quantityReceived,
-      unit_price: unitPrice,
-      expiry_date: expiryDate,
-    }),
-  });
-
 // ---- Repacking / breaking bulk. See repack.rs. ----
 export const repackStock = (req: {
   source_record_id: string; source_quantity: number;
@@ -388,8 +374,6 @@ export const initiateStockTake = (): Promise<StockTake> =>
   request('/inventory/stocktake/initiate', { method: 'POST' });
 export const getOpenStockTake = (): Promise<{ open: StockTake | null }> =>
   request('/inventory/stocktake/open');
-export const getStockTake = (id: string): Promise<StockTake> =>
-  request(`/inventory/stocktake/${id}`);
 export const getStockTakeHistory = (): Promise<{ stock_takes: StockTakeSummary[] }> =>
   request('/inventory/stocktake/history');
 export const recordStockTakeCount = (stockTakeId: string, itemId: string, countedQty: number) =>
@@ -768,9 +752,7 @@ export interface BusinessPulse {
   recommendations: string[];
   currency: string;
 }
-export const askAi = (question: string): Promise<{ answer: string; business_pulse: BusinessPulse }> =>
-  request('/ai/ask', { method: 'POST', body: JSON.stringify({ question }) });
-// Same computed readout askAi/askAiInSession attach to a chat answer,
+// Same computed readout askAiInSession attaches to a chat answer,
 // fetched on its own so the Dashboard can show it without requiring a
 // chat question first. See business_pulse.rs — identical numbers,
 // identical RBAC, identical has_data:false degrade path.

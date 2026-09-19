@@ -142,6 +142,24 @@ pub fn create_and_receive(
     user_id: &str,
     body: &serde_json::Map<String, Value>,
 ) -> Result<Value> {
+    // THE BUG THIS FIXES: `expiry_date` isn't a declared field on the
+    // `purchasing` module (it belongs to the BATCH this receipt
+    // creates — see batches.rs — not to the purchase order row
+    // itself), so `crud::create` below silently drops it: `module.
+    // validate()` only checks declared fields, and `insert_validated_
+    // record` only ever writes columns for fields the module
+    // declares, so an extra key in `body` is simply never persisted
+    // anywhere. That's fine for the purchasing ROW, but this function
+    // used to also throw the value away for the BATCH, by hardcoding
+    // `None` on the `receive_in_tx` call below regardless of what the
+    // caller sent — there was no way, through the on-screen "+ New"
+    // form (the only reachable manual receive path — see this
+    // function's own doc comment above), to ever record an expiry
+    // date for perishable stock. Pulled out here, before `body` is
+    // handed to `crud::create`, and threaded through to `receive_in_
+    // tx` explicitly instead.
+    let expiry_date = body.get("expiry_date").and_then(|v| v.as_str()).map(|s| s.to_string());
+
     // Same permission the manual-receive and bulk-import paths both
     // require, checked up front for the same reason: creating a
     // purchasing order this way can increase Inventory stock, the
@@ -151,7 +169,7 @@ pub fn create_and_receive(
     let tx = conn.transaction()?;
     let id = crud::create(&tx, business_id, user_id, "purchasing", body)?;
     let purchasing_table = crud::load_module(&tx, business_id, "purchasing")?.table_name();
-    let summary = receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &id, None, None, None, Some(user_id))?;
+    let summary = receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &id, None, None, expiry_date.as_deref(), Some(user_id))?;
     // Same discipline as receive() and repack(): nothing above is
     // durable until this line.
     tx.commit()?;
