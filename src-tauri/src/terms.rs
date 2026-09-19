@@ -21,26 +21,25 @@ use rusqlite::{params, Connection};
 /// user's prior acceptance stale — including ones who already
 /// accepted an older version — and routes them through the acceptance
 /// screen again on their very next login. See `accepted_current`.
-pub const TERMS_VERSION: &str = "2026-09-19";
+pub const TERMS_VERSION: &str = "2026-09-19-r2";
 
-/// PLACEHOLDER LEGAL TEXT. Not reviewed by a lawyer — do not treat as
-/// final or production-ready. Every `[PLACEHOLDER: ...]` marker below
-/// is a real fact this document is missing (DericBI's exact registered
-/// legal name/jurisdiction, a real support contact) that must be
-/// filled in, and the whole document needs a Kenyan lawyer's review,
-/// before this is relied on for real users. See this feature's own
-/// engineering brief for the full list.
+/// LEGAL TEXT — filled in with real values (legal name, jurisdiction,
+/// contact, warranty, liability), but NOT reviewed by a lawyer. One
+/// placeholder remains open: the data-protection paragraph (§5) still
+/// asks whether a separate Privacy Policy document is needed — that
+/// hasn't been answered yet. Do not treat this as final or
+/// production-ready until both of those are resolved.
 pub const TERMS_TEXT: &str = r#"smePro Terms & Conditions
 
-Version: 2026-09-19
+Version: 2026-09-19-r2
 
 These Terms & Conditions ("Terms") are an agreement between you and
-DericBI [PLACEHOLDER: exact registered legal name and jurisdiction of
-incorporation, if not Kenya] ("DericBI", "we", "us", "our"), the
-company that develops and licenses smePro. smePro is one of DericBI's
-products, not a separate legal entity. By accepting these Terms you
-agree to them on behalf of yourself and, if you were given access by
-your employer, on behalf of your use of smePro for that business.
+DericBI Ltd, a company registered in Kenya ("DericBI", "we", "us",
+"our"), the company that develops and licenses smePro. smePro is one
+of DericBI's products, not a separate legal entity. By accepting
+these Terms you agree to them on behalf of yourself and, if you were
+given access by your employer, on behalf of your use of smePro for
+that business.
 
 1. What smePro is
    smePro is a business-management application (point of sale,
@@ -82,16 +81,20 @@ your employer, on behalf of your use of smePro for that business.
    security, licensing, or access controls.
 
 7. Warranty disclaimer
-   smePro is provided "as is". [PLACEHOLDER: DericBI's actual warranty
-   position — generic "as is" language is a placeholder only, not
-   confirmed legal advice for this business.]
+   smePro is provided "as is" and "as available", without warranties
+   of any kind, whether express, implied, or statutory, including but
+   not limited to implied warranties of merchantability, fitness for a
+   particular purpose, and non-infringement, to the fullest extent
+   permitted by applicable law. DericBI does not warrant that smePro
+   will be uninterrupted, error-free, or free of harmful components.
 
 8. Limitation of liability
-   [PLACEHOLDER: DericBI's actual liability position. Software that
-   touches accounting and inventory data for real businesses typically
-   needs specific, deliberate limitation-of-liability language, not a
-   generic clause — get a lawyer's input before relying on this
-   section.]
+   To the fullest extent permitted by applicable law, DericBI accepts
+   no liability whatsoever for any direct, indirect, incidental,
+   special, consequential, or punitive damages, or for any loss of
+   profits, revenue, data, or business, arising out of or in
+   connection with your use of, or inability to use, smePro, even if
+   DericBI has been advised of the possibility of such damages.
 
 9. Changes to these Terms
    DericBI may update these Terms from time to time. If the terms
@@ -99,11 +102,10 @@ your employer, on behalf of your use of smePro for that business.
    time they log in before continuing to use smePro.
 
 10. Governing law
-    These Terms are governed by the laws of Kenya [PLACEHOLDER:
-    confirm this is correct for DericBI's actual registration].
+    These Terms are governed by the laws of Kenya.
 
 11. Contact
-    [PLACEHOLDER: real support/contact email or address for DericBI.]
+    dericmarangu@gmail.com
 
 By selecting "I accept" below, you confirm that you have read and
 agree to these Terms.
