@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { createBusiness, setSession, restoreBackupFreshInstall, ApiError } from '../api';
+import { createBusiness, setSession, clearSession, logout, restoreBackupFreshInstall, getTerms, acceptTerms, ApiError } from '../api';
 import { login } from '../api';
 import { parseBackendTimestamp } from '../lib/date';
 
@@ -11,7 +11,7 @@ const BUSINESS_TYPES = [
   { value: 'manufacturing', label: 'Manufacturing' },
 ];
 
-type Step = 'business' | 'owner' | 'recovery-code' | 'done' | 'restore';
+type Step = 'business' | 'owner' | 'recovery-code' | 'terms' | 'done' | 'restore';
 
 export default function FirstRunSetup({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState<Step>('business');
@@ -38,6 +38,15 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
   const [adminCode, setAdminCode] = useState('');
   const [businessId, setBusinessId] = useState('');
   const [savedCodeConfirmed, setSavedCodeConfirmed] = useState(false);
+
+  // Terms & Conditions — same first-login blocking gate as Login.tsx
+  // (see terms.rs on the backend). The owner account created by this
+  // wizard is still a brand-new user with no acceptance on record, so
+  // it goes through the identical gate before `onComplete` is allowed
+  // to fire — there's no separate "setup implies acceptance" path.
+  const [termsText, setTermsText] = useState('');
+  const [termsLoading, setTermsLoading] = useState(false);
+  const [termsAccepting, setTermsAccepting] = useState(false);
 
   function handleBusinessStep(e: FormEvent) {
     e.preventDefault();
@@ -129,15 +138,51 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
     setLoading(true);
     setError(null);
     try {
-      const { token } = await login(username, password, businessId);
-      setSession(token, businessId);
-      onComplete();
+      const result = await login(username, password, businessId);
+      setSession(result.token, businessId);
+      if (result.terms_accepted) {
+        onComplete();
+        return;
+      }
+      setStep('terms');
+      setTermsLoading(true);
+      try {
+        const terms = await getTerms();
+        setTermsText(terms.text);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Could not load the Terms & Conditions');
+      } finally {
+        setTermsLoading(false);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Setup finished, but automatic sign-in failed — please sign in manually.');
       setStep('done');
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleAcceptTerms() {
+    setError(null);
+    setTermsAccepting(true);
+    try {
+      await acceptTerms();
+      onComplete();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not record your acceptance — please try again');
+    } finally {
+      setTermsAccepting(false);
+    }
+  }
+
+  // Mirrors Login.tsx's decline path: abandon this session rather than
+  // block forever with no way out. The account and business already
+  // exist, so declining just returns to the normal sign-in screen —
+  // logging back in will present this same terms gate again.
+  function handleDeclineTerms() {
+    logout().catch(() => {});
+    clearSession();
+    setStep('done');
   }
 
   return (
@@ -314,6 +359,29 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
           </div>
         )}
 
+        {step === 'terms' && (
+          <div style={styles.form}>
+            <div style={styles.hint}>
+              Please review and accept the Terms &amp; Conditions to continue.
+            </div>
+            <div style={styles.termsBox}>
+              {termsLoading ? 'Loading…' : termsText}
+            </div>
+            {error && <div style={styles.error}>{error}</div>}
+            <button
+              className="btn btn-stamp"
+              disabled={termsLoading || termsAccepting || !termsText}
+              onClick={handleAcceptTerms}
+              style={{ width: '100%', justifyContent: 'center' }}
+            >
+              {termsAccepting ? 'Recording…' : 'I accept'}
+            </button>
+            <button type="button" onClick={handleDeclineTerms} style={styles.linkBtn}>
+              Not now — log out
+            </button>
+          </div>
+        )}
+
         {step === 'done' && (
           <div style={styles.form}>
             <div>Your business was created. Please sign in with the username and password you just set.</div>
@@ -336,6 +404,18 @@ const styles: Record<string, React.CSSProperties> = {
   input: { width: '100%' },
   hint: { fontSize: '0.8rem', color: 'var(--ink-soft)', lineHeight: 1.4 },
   error: { background: 'var(--stamp-wash)', color: 'var(--stamp)', padding: '0.5em 0.7em', borderRadius: 3, fontSize: '0.85rem' },
+  linkBtn: { background: 'none', border: 'none', color: 'var(--ink-soft)', fontSize: '0.8rem', cursor: 'pointer', textAlign: 'center', textDecoration: 'underline', padding: '0.3rem' },
+  termsBox: {
+    maxHeight: '45vh',
+    overflowY: 'auto',
+    whiteSpace: 'pre-wrap',
+    fontSize: '0.8rem',
+    lineHeight: 1.5,
+    padding: '0.8em 0.9em',
+    border: '1px solid var(--paper-line)',
+    borderRadius: 4,
+    background: 'var(--paper)',
+  },
   warningBox: { background: 'var(--warn-wash)', color: 'var(--warn)', padding: '0.8em 1em', borderRadius: 3, fontSize: '0.85rem' },
   codeBox: {
     fontSize: '1.3rem', textAlign: 'center', letterSpacing: '0.1em', padding: '0.8em',

@@ -722,16 +722,6 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
               {editingId !== null && (
                 <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)', marginBottom: '0.6rem' }}>Editing record</div>
               )}
-              {editingId !== null && moduleId === 'inventory' && (
-                <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginBottom: '0.6rem' }}>
-                  Stock quantity isn't edited here — use Sell, Receive (via Purchasing), or Repack to change how much is in stock.
-                </div>
-              )}
-              {editingId === null && moduleId === 'inventory' && (
-                <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginBottom: '0.6rem' }}>
-                  New items start at 0 in stock with no price — receive them through Purchasing to bring stock in and set what they cost/sell for.
-                </div>
-              )}
               <div style={styles.formGrid}>
                 {moduleId === 'purchasing' && (
                   <PurchaseItemSelector
@@ -758,9 +748,6 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                       value={formValues.expiry_date ?? ''}
                       onChange={(e) => setFormValues((p) => ({ ...p, expiry_date: e.target.value }))}
                     />
-                    <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginTop: '0.2em' }}>
-                      Optional — leave blank for stock that doesn't expire. Sets the expiry date for the batch this delivery creates; used to sell soon-expiring stock first (FEFO).
-                    </div>
                   </div>
                 )}
                 {schema.fields.filter((f) => !isActionManagedField(moduleId, f.name)
@@ -1218,11 +1205,6 @@ function PurchaseItemSelector({ items, value, required, onChange }: { items: Rec
           </option>
         ))}
       </select>
-      {items.length === 0 && (
-        <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginTop: '0.2em' }}>
-          Create the item in Inventory first. New catalog items start at zero stock; receiving this purchase adds the delivered quantity.
-        </div>
-      )}
     </div>
   );
 }
@@ -1249,11 +1231,6 @@ function FieldInput({ field, value, units, currencies, businessCurrency, onChang
           <option value="">—</option>
           {units.map((u) => <option key={u.id} value={u.name}>{u.name}{u.abbreviation ? ` (${u.abbreviation})` : ''}</option>)}
         </select>
-        {units.length === 0 && (
-          <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginTop: '0.2em' }}>
-            No units defined yet — add some under Admin → Units.
-          </div>
-        )}
       </div>
     );
   }
@@ -1265,11 +1242,6 @@ function FieldInput({ field, value, units, currencies, businessCurrency, onChang
           <option value="">—</option>
           {currencies.map((c) => <option key={c.id} value={c.code}>{c.code}{c.symbol ? ` (${c.symbol})` : ''}</option>)}
         </select>
-        {currencies.length === 0 && (
-          <div style={{ fontSize: '0.72rem', color: 'var(--ink-faint)', marginTop: '0.2em' }}>
-            No currencies defined yet — add some under Admin → Currencies.
-          </div>
-        )}
       </div>
     );
   }

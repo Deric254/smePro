@@ -109,7 +109,7 @@ export default function App() {
   if (needsSetup && !loggedIn) {
     return (
       <>
-        <FirstRunSetup onComplete={() => { setNeedsSetup(false); setLoggedIn(true); }} />
+        <FirstRunSetup onComplete={() => { setNeedsSetup(false); setLoggedIn(hasSession()); }} />
         <UpdateChecker />
         <AndroidUpdateChecker />
       </>
