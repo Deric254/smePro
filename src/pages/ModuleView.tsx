@@ -303,8 +303,15 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
   function startEditBatch(b: { id: string; unit_price: number; unit_cost: number }) {
     setEditingBatchId(b.id);
-    setBatchPriceText((b.unit_price / 100).toFixed(2));
-    setBatchCostText((b.unit_cost / 100).toFixed(2));
+    // Was hardcoded (/100).toFixed(2) — wrong for any currency that
+    // isn't 2-decimal (100x too small for JPY/UGX/RWF, 10x too large
+    // for BHD/KWD/OMR/JOD). formatMoney is already what the read-only
+    // view two lines away uses, and it's the same seed-an-editable-
+    // text-input pattern already established in PointOfSale.tsx's
+    // refund flow (setRefundAmountText(formatMoney(...))) — parseMoneyInput
+    // below already round-trips whatever formatMoney produces.
+    setBatchPriceText(formatMoney(b.unit_price, businessCurrency));
+    setBatchCostText(formatMoney(b.unit_cost, businessCurrency));
     setBatchSaveError(null);
   }
 

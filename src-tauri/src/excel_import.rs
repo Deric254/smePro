@@ -102,7 +102,7 @@ use std::io::Cursor;
 /// different — reconciling counts on items that already exist, the
 /// sanctioned stock-take path — and this function has no part in
 /// producing it.
-pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
+pub fn generate_template(module: &ModuleDef, currency: &str) -> Result<Vec<u8>> {
     let mut wb = rust_xlsxwriter::Workbook::new();
     let sheet = wb.add_worksheet().set_name("Import")?;
 
@@ -194,6 +194,8 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
     // the expected shape without the user having to guess — deleted
     // by them before their real data, same convention as most
     // downloadable import templates.
+    let money_places = crate::money::decimal_places_for(currency) as usize;
+    let money_example = if money_places == 0 { "0".to_string() } else { format!("0.{}", "0".repeat(money_places)) };
     for (col, field) in template_fields.iter().enumerate() {
         let example = match field.field_type.as_str() {
             "integer" => "0".to_string(),
@@ -202,8 +204,16 @@ pub fn generate_template(module: &ModuleDef) -> Result<Vec<u8>> {
             // person should type — the integer-cents conversion this
             // app does internally for "money" fields is not something
             // a spreadsheet-filling business owner should ever need to
-            // know about or type themselves.
-            "money" => "0.00".to_string(),
+            // know about or type themselves. Currency-correct decimal
+            // places: was hardcoded "0.00" regardless of currency,
+            // which showed a misleading example to any non-2dp
+            // business (e.g. "0.00" for a JPY business, which should
+            // never type a fractional yen; "0.00" for a KWD business,
+            // which under-shows the 3 decimal places it actually
+            // needs) — money::parse_money_input still accepts a
+            // correctly-typed real value regardless of this example,
+            // so this was a misleading hint, not a data-corrupting bug.
+            "money" => money_example.clone(),
             "boolean" => "false".to_string(),
             "date" => "2026-01-31".to_string(),
             _ => format!("example {}", field.name),

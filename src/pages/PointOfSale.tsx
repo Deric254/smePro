@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { lookupPosProducts, getPosLowStock, checkout, getOrder, processRefund, getBusinessInfo, ApiError } from '../api';
+import { lookupPosProducts, getPosLowStock, checkout, getOrder, processRefund, getBusinessInfo, getModuleSchema, ApiError } from '../api';
 import ReceiptView from '../components/ReceiptView';
 import CustomerPicker from '../components/CustomerPicker';
 import type { Record_ } from '../types';
@@ -73,6 +73,15 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   const [refundReason, setRefundReason] = useState('');
   const [refundRestock, setRefundRestock] = useState(true);
   const [refundError, setRefundError] = useState<string | null>(null);
+  // Client-side mirror of the server-enforced "sales:refund"
+  // permission (refund.rs::rbac::require(conn, user_id, "sales",
+  // "refund")) — the backend already rejects an unauthorized refund
+  // regardless of this, so this is purely UX: hide the option a Staff
+  // account already knows will 403, same pattern ModuleView.tsx uses
+  // for canDelete/canCreate/etc. Defaults to false (hidden) until the
+  // schema fetch below resolves, so there's no flash of a button that
+  // then has to disappear.
+  const [canRefund, setCanRefund] = useState(false);
   const [refundSubmitting, setRefundSubmitting] = useState(false);
   const [refundSuccess, setRefundSuccess] = useState<string | null>(null);
 
@@ -154,6 +163,12 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
 
   useEffect(() => {
     getPosLowStock().then((r) => setLowStock(r.items)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    getModuleSchema('sales')
+      .then((s: any) => setCanRefund(!!s?.my_permissions?.includes('refund')))
+      .catch(() => {}); // canRefund stays false (hidden) if this fails — fail closed, not open
   }, []);
 
   // Guards against a slow response for an OLDER product-list request
@@ -416,7 +431,9 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
 
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
         <button className={mode === 'sell' ? 'btn' : 'btn btn-outline'} onClick={() => setMode('sell')}>Sell</button>
-        <button className={mode === 'refund' ? 'btn' : 'btn btn-outline'} onClick={() => setMode('refund')}>Refund</button>
+        {canRefund && (
+          <button className={mode === 'refund' ? 'btn' : 'btn btn-outline'} onClick={() => setMode('refund')}>Refund</button>
+        )}
       </div>
 
       {mode === 'refund' && (

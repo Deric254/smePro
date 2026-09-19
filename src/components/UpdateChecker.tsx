@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import DraggableBanner from './DraggableBanner';
 
 // These imports only resolve inside the actual Tauri app (they call into
 // the Rust plugins registered in main.rs) — this component is a no-op
@@ -8,6 +9,14 @@ export default function UpdateChecker() {
   const [available, setAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Dismiss is scoped to the specific version, not "hide forever" —
+  // dismissing v1.2.3 shouldn't also silently hide a genuinely newer
+  // v1.2.4 that shows up on a later check. Session-only (a plain
+  // useState, not localStorage): re-opening the app re-runs the check
+  // effect below from scratch, which is the natural point to remind
+  // someone again if they dismissed and then forgot, without needing
+  // a separate "snooze" mechanism.
+  const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -42,10 +51,10 @@ export default function UpdateChecker() {
     }
   }
 
-  if (!available) return null;
+  if (!available || available.version === dismissedVersion) return null;
 
   return (
-    <div style={styles.banner} className="card update-banner">
+    <DraggableBanner className="card update-banner" style={styles.banner} onDismiss={() => setDismissedVersion(available.version)}>
       <div>
         <strong style={{ fontSize: '0.88rem' }}>Update available — v{available.version}</strong>
         {available.body && <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.2rem' }}>{available.body}</div>}
@@ -54,7 +63,7 @@ export default function UpdateChecker() {
       <button className="btn btn-stamp" onClick={handleInstall} disabled={installing}>
         {installing ? 'Installing…' : 'Install & Restart'}
       </button>
-    </div>
+    </DraggableBanner>
   );
 }
 

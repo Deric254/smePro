@@ -361,7 +361,7 @@ fn test_purchasing_import_template_excludes_system_managed_columns() {
     let module = crate::crud::load_module(&conn, &biz, "purchasing").unwrap();
 
     use calamine::Reader;
-    let bytes = crate::excel_import::generate_template(&module).unwrap();
+    let bytes = crate::excel_import::generate_template(&module, "USD").unwrap();
     let cursor = std::io::Cursor::new(bytes);
     let mut wb: calamine::Xlsx<_> = calamine::open_workbook_from_rs(cursor).unwrap();
     let range = wb.worksheet_range_at(0).unwrap().unwrap();

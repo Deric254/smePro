@@ -57,11 +57,6 @@
       "required": false,
       "default": 5,
       "min": 0
-    },
-    {
-      "name": "expiry_date",
-      "type": "date",
-      "required": false
     }
   ],
   "actions": [

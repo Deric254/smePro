@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import DraggableBanner from './DraggableBanner';
 
 // Everything in this file only does anything on Android — every other
 // platform's early-return on the platform() check makes this a no-op.
@@ -40,6 +41,9 @@ export default function AndroidUpdateChecker() {
   const [status, setStatus] = useState<'idle' | 'downloading' | 'installing' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
+  // Same version-scoped, session-only dismiss as UpdateChecker.tsx —
+  // see that file's comment for why.
+  const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -126,10 +130,10 @@ export default function AndroidUpdateChecker() {
     }
   }
 
-  if (!isAndroid || !release) return null;
+  if (!isAndroid || !release || release.tag_name === dismissedVersion) return null;
 
   return (
-    <div style={styles.banner} className="card update-banner">
+    <DraggableBanner className="card update-banner" style={styles.banner} onDismiss={() => setDismissedVersion(release.tag_name)}>
       <div style={{ flex: 1 }}>
         <strong style={{ fontSize: '0.88rem' }}>Update available — {release.tag_name}</strong>
         {status === 'downloading' && (
@@ -147,7 +151,7 @@ export default function AndroidUpdateChecker() {
       <button className="btn btn-stamp" onClick={handleUpdate} disabled={status === 'downloading' || status === 'installing'}>
         {status === 'downloading' ? 'Downloading…' : status === 'installing' ? 'Installing…' : 'Update'}
       </button>
-    </div>
+    </DraggableBanner>
   );
 }
 

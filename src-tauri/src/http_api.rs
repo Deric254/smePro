@@ -603,19 +603,48 @@ fn route(
         let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
         let temp_token = obj.get("temp_token").and_then(Value::as_str).unwrap_or("");
         let code = obj.get("code").and_then(Value::as_str).unwrap_or("");
+        // Alternative to `code`: one of the 10 single-use recovery codes
+        // shown at 2FA setup time, for a user who has lost their
+        // authenticator device. Only one of `code`/`recovery_code` is
+        // expected per request; if both are sent, recovery_code wins,
+        // since a non-empty recovery_code is an explicit signal the
+        // user chose "use a recovery code instead" in the UI.
+        let recovery_code = obj.get("recovery_code").and_then(Value::as_str).unwrap_or("");
 
         let (pending_user_id, pending_business_id) = match crate::totp::resolve_pending_token(temp_token) {
             Some(pair) => pair,
             None => return json_err(401, "2FA login expired or already used — please log in again"),
         };
 
-        let valid = match crate::totp::verify_login(conn, &pending_user_id, code) {
-            Ok(v) => v,
-            Err(e) => return json_err(400, &e.to_string()),
-        };
-        if !valid {
-            let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "2fa_login_failed", None, None);
-            return json_err(401, "invalid TOTP code");
+        // recovery_used tracks which path succeeded, purely to shape
+        // the response below (recovery_used: true tells the frontend
+        // to warn the user that 2FA is now OFF and they should
+        // re-enroll — use_recovery_code() always disables 2FA on
+        // success, by design, same as the disable() route requiring a
+        // valid TOTP code: proving you lost the authenticator is what
+        // "spends" a recovery code).
+        let recovery_used;
+        if !recovery_code.is_empty() {
+            recovery_used = true;
+            let valid = match crate::totp::use_recovery_code(conn, &pending_user_id, recovery_code) {
+                Ok(v) => v,
+                Err(e) => return json_err(400, &e.to_string()),
+            };
+            if !valid {
+                let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "2fa_recovery_failed", None, None);
+                return json_err(401, "invalid or already-used recovery code");
+            }
+            let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "2fa_recovery_used", None, None);
+        } else {
+            recovery_used = false;
+            let valid = match crate::totp::verify_login(conn, &pending_user_id, code) {
+                Ok(v) => v,
+                Err(e) => return json_err(400, &e.to_string()),
+            };
+            if !valid {
+                let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "2fa_login_failed", None, None);
+                return json_err(401, "invalid TOTP code");
+            }
         }
 
         return match auth::create_session(conn, &pending_user_id, &pending_business_id) {
@@ -625,7 +654,11 @@ fn route(
                 // its comment. A 2FA user needs this exact same gate,
                 // reported the exact same way.
                 let terms_accepted = terms::accepted_current(conn, &pending_user_id).unwrap_or(false);
-                ApiResponse::Json(200, json!({"token": token, "terms_accepted": terms_accepted}))
+                ApiResponse::Json(200, json!({
+                    "token": token,
+                    "terms_accepted": terms_accepted,
+                    "recovery_used": recovery_used,
+                }))
             }
             Err(e) => json_err(500, &e.to_string()),
         };
@@ -1026,7 +1059,10 @@ fn route(
             Ok(m) => m,
             Err(e) => return json_err(404, &e.to_string()),
         };
-        return match excel_import::generate_template(&module) {
+        let currency: String = conn
+            .query_row("SELECT currency FROM businesses WHERE id = ?1", rusqlite::params![business_id], |r| r.get(0))
+            .unwrap_or_else(|_| "USD".to_string());
+        return match excel_import::generate_template(&module, &currency) {
             Ok(bytes) => ApiResponse::Xlsx(200, bytes, format!("{module_id}_import_template.xlsx")),
             Err(e) => json_err(500, &e.to_string()),
         };
@@ -1668,11 +1704,21 @@ fn route(
                     ]
                 })
                 .collect();
+            // No money columns in this particular table (&[] below), so
+            // currency is inert here today — but rows_to_xlsx is a
+            // shared, general-purpose function, and passing the real
+            // value costs one cheap indexed lookup versus leaving a
+            // wrong default sitting here for the next caller that adds
+            // a money column to copy without noticing it's wrong.
+            let currency: String = conn
+                .query_row("SELECT currency FROM businesses WHERE id = ?1", rusqlite::params![business_id], |r| r.get(0))
+                .unwrap_or_else(|_| "USD".to_string());
             return match xlsx_export::rows_to_xlsx(
                 "Audit Log",
                 &["When", "Module", "Action", "Record", "User", "Details"],
                 &table,
                 &[],
+                &currency,
             ) {
                 Ok(bytes) => ApiResponse::Xlsx(200, bytes, "audit_log.xlsx".to_string()),
                 Err(e) => json_err(500, &e.to_string()),
@@ -1798,8 +1844,15 @@ fn route(
             Ok(m) => m,
             Err(e) => return json_err(400, &e.to_string()),
         };
+        // Same currency lookup excel_import.rs already uses correctly
+        // on the way back in — this is the piece records_to_xlsx was
+        // previously never given at all, which is why the export side
+        // silently assumed 2-decimal-places for every currency.
+        let currency: String = conn
+            .query_row("SELECT currency FROM businesses WHERE id = ?1", rusqlite::params![business_id], |r| r.get(0))
+            .unwrap_or_else(|_| "USD".to_string());
         return match crud::list(conn, &business_id, &user_id, module_id, None, 100000, 0) {
-            Ok(records) => match xlsx_export::records_to_xlsx(&records, module_id, &module_def) {
+            Ok(records) => match xlsx_export::records_to_xlsx(&records, module_id, &module_def, &currency) {
                 Ok(bytes) => {
                     let _ = audit::log(conn, &business_id, Some(&user_id), module_id, "export",
                         None, Some(&json!({"record_count": records.len()})));

@@ -11,20 +11,35 @@ use crate::report::ReportPoint;
 /// the "export in Excel" promise: an actual spreadsheet, not a CSV
 /// wearing an xlsx extension.
 ///
-/// `module_def` is what makes this currency-correct: money fields are
-/// stored as integer minor units (cents — see money.rs), and without
-/// knowing which columns those are, this function would otherwise
-/// write the raw cents integer straight into the spreadsheet — a
-/// business owner opening the export would see "1250" where they
-/// should see "12.50". The module's own field list is the single
-/// source of truth for which columns need that conversion, same as
-/// it is for validation and SQL column types.
-pub fn records_to_xlsx(records: &[Value], sheet_name: &str, module_def: &ModuleDef) -> Result<Vec<u8>> {
+/// `module_def` is what makes this currency-correct as to WHICH
+/// columns are money (integer minor units — see money.rs): without
+/// knowing that, this function would otherwise write the raw cents
+/// integer straight into the spreadsheet — a business owner opening
+/// the export would see "1250" where they should see "12.50". The
+/// module's own field list is the single source of truth for that,
+/// same as it is for validation and SQL column types.
+///
+/// `currency` is what makes it correct as to HOW MANY decimal places
+/// and what scale — THE BUG THIS FIXES: this used to hardcode
+/// `cents / 100.0` with a fixed "0.00" format regardless of currency,
+/// which is only right for 2-decimal currencies. For a 0-decimal
+/// currency (JPY, UGX, RWF...) every exported value came out 100x too
+/// small; for a 3-decimal currency (BHD, KWD, OMR, JOD...) 10x too
+/// large — and since excel_import.rs's own cell_to_json already
+/// parses money correctly per-currency on the way back in, the
+/// classic "export, tweak a row, re-import" workflow silently
+/// corrupted every money field by that same factor on a round trip.
+/// Mirrors money::decimal_places_for exactly (same table, same
+/// source of truth as the Rust and TS money-parsing code both use).
+pub fn records_to_xlsx(records: &[Value], sheet_name: &str, module_def: &ModuleDef, currency: &str) -> Result<Vec<u8>> {
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet().set_name(sheet_name)?;
 
     let header_format = Format::new().set_bold().set_background_color("#D9E1F2");
-    let money_format = Format::new().set_num_format("0.00");
+    let places = crate::money::decimal_places_for(currency);
+    let scale = 10f64.powi(places as i32);
+    let num_format_str = if places == 0 { "0".to_string() } else { format!("0.{}", "0".repeat(places as usize)) };
+    let money_format = Format::new().set_num_format(num_format_str.as_str());
 
     let money_fields: std::collections::HashSet<&str> = module_def
         .fields
@@ -66,12 +81,14 @@ pub fn records_to_xlsx(records: &[Value], sheet_name: &str, module_def: &ModuleD
                 match obj.get(col_name) {
                     Some(Value::String(s)) => { sheet.write_string(row, col, s)?; }
                     Some(Value::Number(n)) if is_money => {
-                        // Integer cents -> decimal currency value, the
-                        // ONLY place this division happens: purely for
+                        // Integer minor units -> decimal currency value,
+                        // scaled per this business's currency (see
+                        // this function's own doc comment) — the ONLY
+                        // place this division happens: purely for
                         // display in the exported file, never fed back
                         // into any calculation.
                         let cents = n.as_i64().unwrap_or(0);
-                        sheet.write_number_with_format(row, col, cents as f64 / 100.0, &money_format)?;
+                        sheet.write_number_with_format(row, col, cents as f64 / scale, &money_format)?;
                     }
                     Some(Value::Number(n)) => { sheet.write_number(row, col, n.as_f64().unwrap_or(0.0))?; }
                     Some(Value::Bool(b)) => { sheet.write_boolean(row, col, *b)?; }
@@ -119,20 +136,30 @@ pub fn report_to_xlsx(points: &[ReportPoint], measure_label: &str) -> Result<Vec
 /// minor units and must be written as a real decimal number with a
 /// currency number-format — the exact same cents-to-decimal concern
 /// records_to_xlsx documents above, expressed by position because these
-/// tables have no ModuleDef to look field types up in. Numbers stay real
-/// numbers (never pre-formatted strings) so the person who opens the
-/// file can sum, sort, filter and chart them.
+/// tables have no ModuleDef to look field types up in. `currency` fixes
+/// the same latent bug records_to_xlsx had: a hardcoded /100.0 and
+/// "0.00" format is only correct for 2-decimal currencies. This
+/// function's only current caller (audit-log export) passes no money
+/// columns, so the bug was never actually live here — but a future
+/// caller with money columns would have hit it immediately, so it's
+/// fixed now rather than left as a trap. Numbers stay real numbers
+/// (never pre-formatted strings) so the person who opens the file can
+/// sum, sort, filter and chart them.
 pub fn rows_to_xlsx(
     sheet_name: &str,
     headers: &[&str],
     rows: &[Vec<Value>],
     money_columns: &[usize],
+    currency: &str,
 ) -> Result<Vec<u8>> {
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet().set_name(sheet_name)?;
 
     let header_format = Format::new().set_bold().set_background_color("#D9E1F2");
-    let money_format = Format::new().set_num_format("0.00");
+    let places = crate::money::decimal_places_for(currency);
+    let scale = 10f64.powi(places as i32);
+    let num_format_str = if places == 0 { "0".to_string() } else { format!("0.{}", "0".repeat(places as usize)) };
+    let money_format = Format::new().set_num_format(num_format_str.as_str());
     let money: std::collections::HashSet<usize> = money_columns.iter().copied().collect();
 
     for (col_idx, header) in headers.iter().enumerate() {
@@ -147,7 +174,7 @@ pub fn rows_to_xlsx(
                 Value::String(s) => { sheet.write_string(row, col, s)?; }
                 Value::Number(n) if money.contains(&col_idx) => {
                     let cents = n.as_i64().unwrap_or(0);
-                    sheet.write_number_with_format(row, col, cents as f64 / 100.0, &money_format)?;
+                    sheet.write_number_with_format(row, col, cents as f64 / scale, &money_format)?;
                 }
                 Value::Number(n) => { sheet.write_number(row, col, n.as_f64().unwrap_or(0.0))?; }
                 Value::Bool(b) => { sheet.write_boolean(row, col, *b)?; }

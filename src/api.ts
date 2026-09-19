@@ -174,14 +174,23 @@ export const login = (username: string, password: string, biz: string) =>
     return res.json();
   });
 
-export const login2fa = (tempToken: string, code: string) =>
+// `opts.recoveryCode`, when set, is sent instead of a TOTP code — for
+// a user who has lost their authenticator device. The backend always
+// disables 2FA on a successful recovery-code login (proving you lost
+// the device is what "spends" the code), and reports that back as
+// `recovery_used: true` so the caller can warn the user to re-enroll.
+export const login2fa = (tempToken: string, opts: { code?: string; recoveryCode?: string }) =>
   fetch(`${API_BASE}/auth/2fa/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ temp_token: tempToken, code }),
+    body: JSON.stringify(
+      opts.recoveryCode
+        ? { temp_token: tempToken, recovery_code: opts.recoveryCode }
+        : { temp_token: tempToken, code: opts.code }
+    ),
   }).then(async (res) => {
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new ApiError(res.status, body.error || '2FA verification failed');
+    if (!res.ok) throw new ApiError(res.status, body.error || (opts.recoveryCode ? 'Recovery code verification failed' : '2FA verification failed'));
     return body;
   });
 

@@ -194,6 +194,14 @@ pub fn list(conn: &Connection, business_id: &str, user_id: &str, f: &MovementFil
 
 /// The same rows `list` returns, as a real .xlsx file. Shares
 /// `build_query` with `list` on purpose — see that function's comment.
+///
+/// Columns 4/5 (unit cost, total cost) are real, live money columns —
+/// this was in fact a live instance of the records_to_xlsx/rows_to_xlsx
+/// currency bug (see xlsx_export.rs's doc comments), not merely a
+/// latent one: every stock-movement export had unit/total cost 100x
+/// too small for a 0-decimal currency or 10x too large for a
+/// 3-decimal one, exactly like every other money export, until this
+/// fetched the business's real currency instead of assuming 2dp.
 pub fn export_xlsx(conn: &Connection, business_id: &str, user_id: &str, f: &MovementFilters) -> Result<Vec<u8>> {
     let data = list(conn, business_id, user_id, f)?;
     let movements = data["movements"].as_array().cloned().unwrap_or_default();
@@ -212,11 +220,15 @@ pub fn export_xlsx(conn: &Connection, business_id: &str, user_id: &str, f: &Move
             ]
         })
         .collect();
+    let currency: String = conn
+        .query_row("SELECT currency FROM businesses WHERE id = ?1", params![business_id], |r| r.get(0))
+        .unwrap_or_else(|_| "USD".to_string());
     crate::xlsx_export::rows_to_xlsx(
         "Stock Movements",
         &["When", "Item", "Movement", "Quantity change", "Unit cost", "Total cost", "Reference", "User"],
         &rows,
         // Unit cost and total cost are the integer-cents columns.
         &[4, 5],
+        &currency,
     )
 }
