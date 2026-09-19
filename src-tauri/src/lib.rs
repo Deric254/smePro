@@ -317,13 +317,49 @@ pub fn run() {
     // Runtime from (E0282). Each cfg branch below builds the whole
     // `builder` in one statement instead, keeping the invoke_handler
     // call and its generate_handler! argument together.
+    // THE FIX for two symptoms that were actually one race: this app
+    // never guarded against a second copy of itself running at the
+    // same time (double-clicking the icon twice, launching again while
+    // a previous window was still closing, etc.). Two processes both
+    // trying to open the same SQLCipher-encrypted `erp.db` and both
+    // trying to bind the same 127.0.0.1:8080 collide in two DIFFERENT
+    // ways depending on which step loses the race:
+    //   - If the second process loses on `db::open()` (see db.rs) —
+    //     e.g. the first is mid-migration and holds a write lock past
+    //     `busy_timeout` — `setup()`'s `?` below turns that into an
+    //     `Err`, which Tauri treats as a hard startup failure: the
+    //     window never appears at all, which reads to the user as the
+    //     app needing to be started again ("needs restart").
+    //   - If it loses on the HTTP bind instead (see
+    //     android_service.rs's own comment on this exact failure mode)
+    //     the window opens looking completely normal, but its server
+    //     thread died silently — every screen that needs data then
+    //     shows "Could not load modules. Is the local server running?"
+    //     (see App.tsx's loadModules).
+    // tauri-plugin-single-instance closes this at the root: a second
+    // launch never gets far enough to race either of those — it hands
+    // its argv/cwd to the FIRST process (which does nothing with them
+    // here) and this callback just brings that existing window to the
+    // front instead. Registered before any other plugin, matching the
+    // plugin's own documented requirement to run first. Desktop-only
+    // by necessity: Android/iOS never let a second copy of an app
+    // process run alongside the first, so this specific race can't
+    // happen there.
     #[cfg(desktop)]
-    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
-        get_network_mode,
-        set_network_mode,
-        get_lan_address,
-        rollback_to_manifest
-    ]);
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+                let _ = window.unminimize();
+            }
+        }))
+        .invoke_handler(tauri::generate_handler![
+            get_network_mode,
+            set_network_mode,
+            get_lan_address,
+            rollback_to_manifest
+        ]);
     #[cfg(not(desktop))]
     let builder = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![get_network_mode, set_network_mode, get_lan_address]);
