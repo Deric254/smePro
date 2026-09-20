@@ -432,6 +432,68 @@ fn test_close_applies_a_positive_variance_directly_at_legacy_cost() {
 }
 
 #[test]
+fn test_surplus_on_a_sold_out_batch_item_creates_a_new_priced_batch_not_a_zero_price_gap() {
+    // THE BUG THIS FIXES: an item created after batches existed always
+    // has unit_price = 0 on its own legacy column (see crud.rs) — real
+    // pricing lives entirely on its batch(es). If that item's only
+    // batch sells all the way down to quantity_remaining = 0, and a
+    // stock take then finds MORE physical stock than expected, the old
+    // behavior (bump legacy quantity directly) left that surplus
+    // priced at nothing: pos.rs's lookup_products has no batch left to
+    // read a price from, so it fell through to the permanently-zero
+    // legacy column — real, sellable-looking stock showing up as
+    // $0.00 at the POS screen.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+
+    // A batch-only item: zero legacy price, exactly like crud::create()
+    // would leave it, with all five of its units living on one real,
+    // priced batch.
+    let item_id = seed_inventory_item(&conn, &biz, "GADGET-001", "Gadget", 5, 0, 0);
+    {
+        let tx = conn.transaction().unwrap();
+        crate::batches::create_batch_in_tx(
+            &tx, &biz, &item_id, None, 5, 300, 500, None, "2026-01-01T00:00:00Z", Some(&uid),
+        ).unwrap();
+        tx.commit().unwrap();
+    }
+
+    // Sold all the way down: quantity_remaining hits 0 on that batch,
+    // legacy quantity follows it down to 0 too (mirroring what a real
+    // series of checkouts would leave behind).
+    conn.execute("UPDATE inventory_batches SET quantity_remaining = 0 WHERE inventory_record_id = ?1", rusqlite::params![item_id]).unwrap();
+    conn.execute("UPDATE inventory SET quantity = 0 WHERE id = ?1", rusqlite::params![item_id]).unwrap();
+
+    // A physical count finds 20 on the shelf anyway.
+    let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
+    let stock_take_id = initiated["id"].as_str().unwrap().to_string();
+    let stt_item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
+    crate::stock_take::record_count(
+        &conn, &biz, &uid,
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: stt_item_id, counted_qty: 20 },
+    ).unwrap();
+    crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
+
+    // The surplus must now be real, priced, sellable stock — a new
+    // batch at the item's last known price — not an unpriced legacy
+    // bump.
+    let (new_batch_qty, new_batch_price): (i64, i64) = conn.query_row(
+        "SELECT quantity_remaining, unit_price FROM inventory_batches
+         WHERE inventory_record_id = ?1 AND quantity_remaining > 0",
+        rusqlite::params![item_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!(new_batch_qty, 20, "the full surplus should land on the new batch");
+    assert_eq!(new_batch_price, 500, "priced at the item's last known batch price, not zero");
+
+    // And the exact price the POS screen would show is no longer zero.
+    let products = crate::pos::lookup_products(&conn, &biz, &uid, None, 50).unwrap();
+    let gadget = products.iter().find(|p| p["id"] == serde_json::json!(item_id)).unwrap();
+    assert_eq!(gadget["unit_price"].as_i64().unwrap(), 500, "POS must never show a sold-out-batch item's surplus at $0");
+}
+
+#[test]
 fn test_close_reports_variance_pct_and_write_off_cost_for_shrinkage() {
     let mut conn = test_db();
     let biz = test_business(&mut conn);

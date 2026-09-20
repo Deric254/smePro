@@ -32,13 +32,19 @@
 //!      same FEFO write-down checkout uses — so `inventory_batches`
 //!      stays in sync instead of going stale; the report carries each
 //!      write-off's real cost, not just a unit count. POSITIVE
-//!      variance (physically finding MORE than expected) is applied
-//!      directly at the item's legacy cost/price: legacy quantity is
-//!      already real, already-priced stock (it's simply derived as
-//!      `quantity − sum(batch quantities)`), so raising it alone can't
-//!      desync anything — no new batch, no block needed. Uncounted
-//!      items are untouched and separately reported as "skipped," not
-//!      silently folded into "no change."
+//!      variance (physically finding MORE than expected) creates a new
+//!      batch priced at the item's own most recent batch cost/price,
+//!      if it has ever had one — surplus stock still needs an honest
+//!      sellable price, and the last real price this item actually
+//!      sold at is a far better source for that than leaving it priced
+//!      at nothing (see close()'s own doc comment on why a bare
+//!      legacy-quantity bump used to silently zero out the price of
+//!      any item whose only batch had since sold out). Only a
+//!      genuinely pre-batch item — one that has never had a batch at
+//!      all — keeps the simpler direct-to-legacy-quantity treatment,
+//!      since its legacy price is real, live pricing already.
+//!      Uncounted items are untouched and separately reported as
+//!      "skipped," not silently folded into "no change."
 //!
 //! ONLY ONE STOCK TAKE OPEN AT A TIME, per business — enforced by a
 //! partial unique index in the schema (see db_migrations.rs's v11),
@@ -430,20 +436,89 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
                 Some(stock_take_id),
             )?;
         } else if variance > 0 {
-            // Surplus: legacy quantity is derived (quantity minus what
-            // batches account for), so raising it alone can't desync
-            // anything against the batches that already exist — no new
-            // batch, no cost/price attached to the surplus itself.
+            // THE FIX: this used to always just bump the legacy
+            // `quantity` column, on the assumption (see this branch's
+            // old comment, preserved in spirit but no longer accurate
+            // for every item) that legacy quantity is always
+            // already-priced, already-real stock. That's only true for
+            // a genuinely pre-batch item. For any item created under
+            // crud.rs's forced-zero rule (every new item's
+            // unit_cost/unit_price starts at 0 — see that file's own
+            // comment: a real price only ever enters through a priced
+            // batch from that point on), the legacy unit_price column
+            // is permanently 0, never a real price. Bumping legacy
+            // quantity for one of THOSE items — one whose only-ever
+            // batch has since been fully sold down to
+            // quantity_remaining = 0 — left real, sellable-looking
+            // stock with no price anywhere pos.rs's lookup_products
+            // could find (its COALESCE falls straight through to that
+            // permanently-zero legacy column once no batch has
+            // anything left), showing as a genuine $0.00 at the POS
+            // screen for every user — not a permissions or display
+            // issue, an actual pricing gap this surplus itself created.
+            //
+            // So: if this item has EVER had a batch (even one fully
+            // consumed by now), a surplus creates a NEW batch instead,
+            // priced at the most recent batch's own cost/price —
+            // "found stock, unknown origin" still needs *some* honest
+            // price to sell at, and the last real price this exact
+            // item actually sold at is a far better answer than
+            // silently defaulting to $0. Only a genuinely pre-batch
+            // item (one that has NEVER had a batch at all, so its
+            // legacy unit_price really is live, real pricing) keeps
+            // the original bare-legacy-quantity-bump behavior.
+            //
+            // `i.quantity` is still overwritten to `counted` below
+            // exactly as before either way — it's the TOTAL count
+            // (legacy portion is derived as quantity minus what
+            // batches account for, see batches.rs's module doc
+            // comment), not something this new batch would double up
+            // against: adding `variance` units to a new batch's
+            // quantity_remaining while separately setting `i.quantity`
+            // to `counted` (= expected + variance) leaves the
+            // *legacy* portion exactly where it was before this
+            // close() call — only the surplus itself moves from
+            // unpriced legacy stock to a priced batch.
+            let last_batch_pricing: Option<(i64, i64)> = tx
+                .query_row(
+                    "SELECT unit_cost, unit_price FROM inventory_batches
+                     WHERE inventory_record_id = ?1 AND business_id = ?2 AND deleted_at IS NULL
+                     ORDER BY received_at DESC, id DESC LIMIT 1",
+                    params![inv_id, business_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+
             tx.execute(
                 &format!("UPDATE {table} SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3 AND deleted_at IS NULL"),
                 params![counted, inv_id, business_id],
             )?;
             total_variance_units += variance;
 
-            // Surplus has no cost basis of its own — the stock was
-            // found, not bought — so it is recorded at zero unit cost
-            // rather than inventing one from the item's legacy price.
-            // See the surplus comment directly above.
+            let surplus_unit_cost = match last_batch_pricing {
+                Some((last_cost, last_price)) => {
+                    let received_at = chrono::Utc::now().to_rfc3339();
+                    crate::batches::create_batch_in_tx(
+                        &tx,
+                        business_id,
+                        inv_id,
+                        None,
+                        variance,
+                        last_cost,
+                        last_price,
+                        None,
+                        &received_at,
+                        Some(user_id),
+                    )?;
+                    last_cost
+                }
+                // A genuinely pre-batch item: its legacy unit_price is
+                // real, live pricing, so the original zero-cost
+                // treatment stands — the surplus is real stock at a
+                // real price already, nothing more to attach.
+                None => 0,
+            };
+
             crate::stock_movement::record_in_tx(
                 &tx,
                 business_id,
@@ -452,7 +527,7 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
                 item_name,
                 crate::stock_movement::STOCK_TAKE_SURPLUS,
                 variance,
-                0,
+                surplus_unit_cost,
                 Some(stock_take_id),
             )?;
         }

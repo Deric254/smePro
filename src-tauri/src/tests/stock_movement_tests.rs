@@ -203,6 +203,13 @@ fn test_shrinkage_movement_cost_matches_the_stock_takes_own_write_off() {
 
 #[test]
 fn test_a_surplus_is_recorded_at_zero_cost_not_an_invented_one() {
+    // Scoped to a genuinely pre-batch item (seed_inventory_item never
+    // creates a batch) — its legacy unit_price is real, live pricing,
+    // so a surplus really does have no separate cost basis to invent.
+    // An item whose price lives on a batch instead gets a different,
+    // real cost here — see
+    // test_surplus_on_a_sold_out_batch_item_creates_a_new_priced_batch_not_a_zero_price_gap
+    // in stock_take_tests.rs.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
