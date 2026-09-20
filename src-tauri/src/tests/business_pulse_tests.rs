@@ -43,9 +43,12 @@ fn test_no_data_returns_has_data_false_not_an_error() {
 }
 
 #[test]
-fn test_single_month_of_history_is_not_enough_for_a_trend() {
-    // One data point can't show a trend — reporting "flat" or "up" off
-    // a single month would be a guess wearing a real number's clothes.
+fn test_single_month_of_history_still_reports_real_revenue_without_a_trend() {
+    // One data point can't show a MONTH-OVER-MONTH TREND — reporting
+    // "flat" or "up" off a single month would be a guess wearing a
+    // real number's clothes, so pct_change correctly stays None. But
+    // the single month's own revenue is real, already-available data,
+    // not something to withhold while waiting for a second month.
     let mut conn = test_db();
     let business_id = test_business(&mut conn);
     let (user_id, _) = test_owner(&mut conn, &business_id);
@@ -53,7 +56,9 @@ fn test_single_month_of_history_is_not_enough_for_a_trend() {
     seed_sale(&conn, &business_id, 10000, "2026-01-15 10:00:00");
 
     let pulse = business_pulse::compute(&conn, &business_id, &user_id);
-    assert!(!pulse.has_data);
+    assert!(pulse.has_data);
+    assert_eq!(pulse.revenue_this_period_cents, 10000);
+    assert_eq!(pulse.pct_change, None);
 }
 
 #[test]

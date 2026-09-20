@@ -6,20 +6,24 @@ import DraggableBanner from './DraggableBanner';
 // Desktop already has real auto-update via UpdateChecker.tsx +
 // tauri-plugin-updater, which has no Android/iOS implementation at all,
 // which is the whole reason this separate, Android-specific path
-// exists: it's built from lower-level pieces (http + fs + opener)
-// instead of the higher-level updater plugin.
+// exists: it's built from lower-level pieces (http + fs + a custom
+// install_apk command, see installer.rs) instead of the higher-level
+// updater plugin.
 //
 // UNTESTED ON A REAL DEVICE — built in a sandbox with no Android SDK or
 // emulator available (see MOBILE.md / RELEASE.md for the full context).
-// Every piece here is real, documented Tauri v2 plugin usage, not
-// invented API — but "compiles against the documented API" and
-// "verified working on an actual phone" are different claims, and only
-// the first one is true yet. If this doesn't work first try, the most
-// likely culprit is the capabilities/default.json permission scopes
-// (see the comment there) or the AndroidManifest FileProvider wiring
-// (see mobile-android.sh / the CI workflow's "Apply Android manifest
-// additions" step) — check those first before assuming the JS logic
-// below is wrong.
+// The download half of this flow (fetch + writeFile) was already
+// working per real user reports. The install half used to fail every
+// time — see installer.rs's doc comment for the confirmed root cause
+// (openPath() can't hand Android's installer a raw file:// path) and
+// its fix (a small custom plugin doing the real FileProvider handoff).
+// If install_apk itself still fails, the first things to check are:
+// the FileProvider's authority in InstallerPlugin.kt actually matching
+// the app's real applicationId, and whether AndroidUpdateChecker's
+// appCacheDir() resolves to Android's internal or external cache dir
+// on this device (file_paths.xml declares both, but that assumption
+// itself was never checked against a real device — see the comment on
+// that step in mobile-android.sh).
 
 type ReleaseAsset = { name: string; browser_download_url: string };
 type ReleaseInfo = { tag_name: string; assets: ReleaseAsset[]; body?: string };
@@ -86,7 +90,7 @@ export default function AndroidUpdateChecker() {
       const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
       const { writeFile, mkdir, exists } = await import('@tauri-apps/plugin-fs');
       const { appCacheDir, join } = await import('@tauri-apps/api/path');
-      const { openPath } = await import('@tauri-apps/plugin-opener');
+      const { invoke } = await import('@tauri-apps/api/core');
 
       const res = await tauriFetch(apkAsset.browser_download_url);
       if (!res.ok || !res.body) throw new Error(`Download failed (HTTP ${res.status})`);
@@ -116,12 +120,20 @@ export default function AndroidUpdateChecker() {
       await writeFile(apkPath, bytes);
 
       setStatus('installing');
-      // Hands off to Android's own package installer via FileProvider —
-      // this is the point where Android takes over with its own "Update
-      // this app?" confirmation screen. That confirmation tap is a real
-      // OS security requirement for any app not installed through the
+      // THE FIX: openPath() used to be called here, but on Android it
+      // hands the package installer a raw file:// path — Android has
+      // refused to let one app pass that to another since API 24, so
+      // this silently failed after a full, successful download (see
+      // installer.rs's doc comment for the full story, including the
+      // still-open upstream issue confirming openPath() itself can't
+      // do this). install_apk is a regular command (see lib.rs) that
+      // hands off to InstallerPlugin.kt, which does the FileProvider
+      // handoff that actually works. This is still the same point
+      // where Android takes over with its own "Update this app?"
+      // confirmation screen; that confirmation tap is a real OS
+      // security requirement for any app not installed through the
       // Play Store, not something that can be skipped from here.
-      await openPath(apkPath);
+      await invoke('install_apk', { path: apkPath });
       setStatus('idle');
       setRelease(null);
     } catch (e) {

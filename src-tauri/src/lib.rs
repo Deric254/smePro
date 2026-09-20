@@ -20,6 +20,14 @@ pub mod debt_settlement;
 pub mod excel_import;
 pub mod forecast;
 pub mod http_api;
+// Not gated to target_os = "android" specifically because this
+// codebase has no iOS build at all (no mobile-ios.sh, no ios/ target
+// anywhere) — "not desktop" already means "Android" in practice
+// throughout this file (see e.g. get_lan_address below), and this
+// module follows that same established convention rather than adding
+// a third platform split nothing else here has.
+#[cfg(not(desktop))]
+pub mod installer;
 pub mod invoice;
 pub mod module;
 pub mod money;
@@ -362,7 +370,13 @@ pub fn run() {
         ]);
     #[cfg(not(desktop))]
     let builder = tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_network_mode, set_network_mode, get_lan_address]);
+        .plugin(installer::init())
+        .invoke_handler(tauri::generate_handler![
+            get_network_mode,
+            set_network_mode,
+            get_lan_address,
+            installer::install_apk
+        ]);
 
     // Self-updating via tauri-plugin-updater only makes sense on
     // desktop — that plugin has no Android/iOS implementation.
@@ -376,12 +390,11 @@ pub fn run() {
     // AndroidUpdateChecker.tsx): `os` to detect we're on Android at
     // all, `http` to download the new APK from the GitHub release
     // (bypasses the webview's CORS restrictions, which plain fetch()
-    // would hit), `fs` to write those bytes to a real file Android can
-    // hand to its installer, and `opener` to actually hand it off —
-    // openPath() on an .apk triggers Android's package installer via
-    // FileProvider, the same "tap to confirm" screen a normal reinstall
-    // would show, just launched from inside the app instead of a file
-    // manager.
+    // would hit), `fs` to write those bytes to a real file, and
+    // `opener` for everything else this app opens (the AI-generated
+    // Excel templates, etc.) — the APK handoff itself is
+    // installer::install_apk above instead, not this opener plugin
+    // (see installer.rs's doc comment for why).
     let builder = builder
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_http::init())

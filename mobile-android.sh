@@ -105,16 +105,6 @@ PYEOF
     c_cyan "Adding REQUEST_INSTALL_PACKAGES permission (needed for in-app updates)"
     # Lets the app trigger Android's own package installer on itself —
     # required for AndroidUpdateChecker.tsx's download-then-install flow.
-    # NOTE: whether tauri-plugin-opener's own Android library already
-    # declares its own FileProvider <provider> entry (needed to hand the
-    # downloaded APK to the installer as a content:// URI, since Android
-    # blocks raw file:// URIs across app boundaries) was NOT verified —
-    # built without a real Android SDK/emulator available to check
-    # against. If the in-app update button fails with a
-    # FileUriExposedException or a "no provider" style error, that's the
-    # first thing to check: you likely need to add your own <provider>
-    # block manually (search "FileProvider Android Tauri" for the
-    # current canonical snippet).
     if [ -f "$MANIFEST" ] && ! grep -q "REQUEST_INSTALL_PACKAGES" "$MANIFEST"; then
         python3 - "$MANIFEST" <<'PYEOF'
 import re, sys
@@ -134,7 +124,58 @@ if new_content != content:
 PYEOF
     fi
 
-    c_cyan "Wiring in SmeProApplication (foreground service + edge-to-edge insets)"
+    c_cyan "Adding FileProvider (so the downloaded APK can actually reach the installer)"
+    # THE FIX for AndroidUpdateChecker.tsx's "downloads to 100%, then
+    # fails to install" bug — see installer.rs's doc comment for the
+    # full story. Short version: Android has refused to let one app
+    # hand another a raw file:// path since API 24, so the downloaded
+    # APK has to be wrapped in a content:// URI through a FileProvider
+    # this app declares itself, scoped to wherever
+    # AndroidUpdateChecker.tsx's appCacheDir() actually resolves to on
+    # Android. NOT independently verified against a real device which
+    # of Android's cache dirs that is (internal cacheDir vs.
+    # externalCacheDir), so file_paths.xml below declares BOTH — an
+    # unused <path> entry is harmless, an APK sitting in the one NOT
+    # declared here is a silent "no provider" failure, so this errs
+    # toward covering both rather than guessing.
+    XML_RES_DIR="src-tauri/gen/android/app/src/main/res/xml"
+    mkdir -p "$XML_RES_DIR"
+    cat > "$XML_RES_DIR/file_paths.xml" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="update_apk_internal" path="." />
+    <external-cache-path name="update_apk_external" path="." />
+</paths>
+EOF
+    if [ -f "$MANIFEST" ] && ! grep -q "fileprovider" "$MANIFEST"; then
+        python3 - "$MANIFEST" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+provider = (
+    '    <provider\n'
+    '        android:name="androidx.core.content.FileProvider"\n'
+    '        android:authorities="${applicationId}.fileprovider"\n'
+    '        android:exported="false"\n'
+    '        android:grantUriPermissions="true">\n'
+    '        <meta-data\n'
+    '            android:name="android.support.FILE_PROVIDER_PATHS"\n'
+    '            android:resource="@xml/file_paths" />\n'
+    '    </provider>\n'
+    '</application>'
+)
+new_content = content.replace('</application>', provider, 1)
+if new_content != content:
+    with open(path, 'w') as f:
+        f.write(new_content)
+    print("Added FileProvider")
+else:
+    print("WARNING: could not find </application> tag to patch — add the <provider> block manually, see MOBILE.md")
+PYEOF
+    fi
+
+    c_cyan "Wiring in SmeProApplication (foreground service + edge-to-edge insets) and the installer plugin"
     # Same file, same wiring, same reasoning as the matching step in
     # .github/workflows/release.yml — kept in sync here so a locally
     # built dev/debug APK behaves the same as a CI-built release one,
@@ -142,10 +183,14 @@ PYEOF
     # foreground-service protection and the edge-to-edge inset fix
     # (see SmeProApplication.kt's own doc comments for what each does
     # and why it lives there instead of a patched MainActivity.kt).
+    # InstallerPlugin.kt rides along in the same copy step — see its
+    # own doc comment, and installer.rs on the Rust side that registers
+    # it, for what it's for.
     JAVA_DIR="src-tauri/gen/android/app/src/main/java/com/smepro/app"
     mkdir -p "$JAVA_DIR"
     cp src-tauri/android/com/smepro/app/SmeProForegroundService.kt "$JAVA_DIR/"
     cp src-tauri/android/com/smepro/app/SmeProApplication.kt "$JAVA_DIR/"
+    cp src-tauri/android/com/smepro/app/InstallerPlugin.kt "$JAVA_DIR/"
 
     if [ -f "$MANIFEST" ]; then
         python3 - "$MANIFEST" <<'PYEOF'

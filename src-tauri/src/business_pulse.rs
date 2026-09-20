@@ -10,8 +10,13 @@
 //! simple as "good morning."
 //!
 //! Degrades honestly rather than fabricating: a business with no sales
-//! module enabled, or no sales yet, gets `has_data: false` and a plain
-//! "not enough history yet" message — never an invented trend.
+//! module enabled, or genuinely zero sales AND zero low-stock alerts,
+//! gets `has_data: false` and a plain "no data yet" message. Anything
+//! short of that — even a single day of real sales, with no second
+//! period yet to compare against — still reports its real numbers;
+//! only the month-over-month trend comparison itself is withheld
+//! until there's a second period to compare against, never fabricated
+//! off a single point.
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -53,7 +58,7 @@ impl BusinessPulse {
             pct_change: None,
             forecast_next_period_cents: 0,
             low_stock_count: 0,
-            recommendations: vec!["Not enough sales history yet to show a trend — check back after a few more sales.".to_string()],
+            recommendations: vec!["No sales or stock data recorded yet — check back once you've made a sale or added inventory.".to_string()],
             currency,
         }
     }
@@ -78,23 +83,37 @@ pub fn compute(conn: &Connection, business_id: &str, user_id: &str) -> BusinessP
         Err(_) => return BusinessPulse::no_data(currency),
     };
 
-    if forecast_result.history.len() < 2 {
-        // Zero or one month of history — a trend needs at least two
-        // points to compare, and reporting "flat" or "up" off a
-        // single data point would be a guess dressed as an insight.
+    let low_stock_count = count_low_stock(conn, business_id, user_id);
+
+    // THE FIX: this used to require at least TWO monthly buckets
+    // before showing anything at all — meaning a business with real,
+    // genuine sales already recorded (just not spanning a month
+    // boundary yet) saw nothing but "not enough history," even though
+    // there was real revenue and possibly real low-stock data sitting
+    // right there. A trend comparison genuinely needs two points (see
+    // `last_period` below, which stays honestly absent rather than
+    // comparing against nothing), but the CURRENT period's own
+    // revenue, and low-stock alerts (which don't depend on sales
+    // history at all), are both real, already-available data — there
+    // is no reason to withhold them while waiting for a second month
+    // to elapse. Only when there is truly nothing at all yet — zero
+    // sales ever AND zero low-stock alerts — is there genuinely
+    // nothing to report.
+    if forecast_result.history.is_empty() && low_stock_count == 0 {
         return BusinessPulse::no_data(currency);
     }
 
-    let this_period = forecast_result.history[forecast_result.history.len() - 1].value;
-    let last_period = forecast_result.history[forecast_result.history.len() - 2].value;
-
-    let pct_change = if last_period.abs() > 0.01 {
-        Some(((this_period - last_period) / last_period.abs()) * 100.0)
+    let this_period = forecast_result.history.last().map(|p| p.value).unwrap_or(0.0);
+    let last_period = if forecast_result.history.len() >= 2 {
+        Some(forecast_result.history[forecast_result.history.len() - 2].value)
     } else {
         None
     };
 
-    let low_stock_count = count_low_stock(conn, business_id, user_id);
+    let pct_change = match last_period {
+        Some(lp) if lp.abs() > 0.01 => Some(((this_period - lp) / lp.abs()) * 100.0),
+        _ => None,
+    };
 
     let mut recommendations = Vec::new();
     match pct_change {
@@ -106,6 +125,9 @@ pub fn compute(conn: &Connection, business_id: &str, user_id: &str) -> BusinessP
             p.abs()
         )),
         Some(_) => recommendations.push("Revenue is holding roughly steady month over month.".to_string()),
+        None if last_period.is_none() => recommendations.push(
+            "Not enough history yet for a month-over-month trend — here's what's tracked so far.".to_string(),
+        ),
         None => {}
     }
     if low_stock_count > 0 {
@@ -122,7 +144,7 @@ pub fn compute(conn: &Connection, business_id: &str, user_id: &str) -> BusinessP
     BusinessPulse {
         has_data: true,
         revenue_this_period_cents: this_period.round() as i64,
-        revenue_last_period_cents: last_period.round() as i64,
+        revenue_last_period_cents: last_period.map(|v| v.round() as i64).unwrap_or(0),
         pct_change,
         forecast_next_period_cents: forecast_result.forecast_next.round() as i64,
         low_stock_count,
