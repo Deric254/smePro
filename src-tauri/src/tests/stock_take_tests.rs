@@ -463,7 +463,7 @@ fn test_surplus_on_a_sold_out_batch_item_creates_a_new_priced_batch_not_a_zero_p
     // legacy quantity follows it down to 0 too (mirroring what a real
     // series of checkouts would leave behind).
     conn.execute("UPDATE inventory_batches SET quantity_remaining = 0 WHERE inventory_record_id = ?1", rusqlite::params![item_id]).unwrap();
-    conn.execute("UPDATE inventory SET quantity = 0 WHERE id = ?1", rusqlite::params![item_id]).unwrap();
+    conn.execute("UPDATE module_inventory SET quantity = 0 WHERE id = ?1", rusqlite::params![item_id]).unwrap();
 
     // A physical count finds 20 on the shelf anyway.
     let initiated = crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
