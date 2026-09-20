@@ -943,9 +943,20 @@ pub fn import(
                 // fields when they're genuinely being changed on a
                 // legacy (batch-less) item.
                 if module.id == "inventory" {
+                    // Same fix, same reasoning, as crud.rs::update's
+                    // inventory_has_batches check: only an ACTIVE batch
+                    // (quantity_remaining > 0) means this item's real
+                    // price lives on the batch instead of these two
+                    // columns. Once every batch is sold out, these
+                    // fields are the live price again — a spreadsheet
+                    // reconciliation needs the same ability to correct
+                    // them the UI edit form now has, or bulk-import
+                    // becomes the one remaining door back into the
+                    // exact "priced at nothing, nowhere left to fix it"
+                    // trap that fix closed.
                     let has_batches: bool = tx
                         .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM inventory_batches WHERE inventory_record_id = ?1 AND business_id = ?2 AND deleted_at IS NULL)",
+                            "SELECT EXISTS(SELECT 1 FROM inventory_batches WHERE inventory_record_id = ?1 AND business_id = ?2 AND deleted_at IS NULL AND quantity_remaining > 0)",
                             rusqlite::params![&id, business_id],
                             |r| r.get(0),
                         )
@@ -964,7 +975,7 @@ pub fn import(
                             errors.push(json!({
                                 "row": row_num,
                                 "error": format!(
-                                    "'{field}' cannot be edited here once this item has a real purchase batch behind it — correct the batch's own price instead (see Inventory's batch list for this item)"
+                                    "'{field}' cannot be edited here while this item still has stock in an active purchase batch — correct the batch's own price instead (see Inventory's batch list for this item)"
                                 )
                             }));
                             continue;
