@@ -80,6 +80,52 @@ fn test_inventory_price_fields_blocked_during_stock_take_even_via_bulk_import() 
     assert!(result.is_err(), "bulk_import must not be able to bypass this freeze either");
 }
 
+/// THE BUG THIS FIXES: crud.rs's `inventory_has_batches` check used to
+/// freeze unit_cost/unit_price forever once an item had EVER received
+/// a batch, even after that batch sold all the way out — with no
+/// other field anywhere in the app left able to price whatever stock
+/// remained (a stock-take surplus, in particular — see
+/// stock_take.rs's own fix for the matching half of this). Once every
+/// batch for an item is exhausted (quantity_remaining = 0), these two
+/// columns ARE the live, current price again, so the freeze must lift.
+#[test]
+fn test_inventory_price_fields_unfreeze_once_every_batch_is_sold_out() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = seed_inventory_item(&conn, &biz, "GADGET-001", "Gadget", 0, 0, 0);
+    {
+        let tx = conn.transaction().unwrap();
+        crate::batches::create_batch_in_tx(
+            &tx, &biz, &inv_id, None, 5, 300, 500, None, "2026-01-01T00:00:00Z", Some(&uid),
+        ).unwrap();
+        tx.commit().unwrap();
+    }
+
+    // Still frozen: the batch is active and really does hold the live
+    // price right now.
+    let mut edit = serde_json::Map::new();
+    edit.insert("unit_price".into(), json!(999));
+    let result = crate::crud::update(&conn, &biz, &uid, "inventory", &inv_id, &edit, false);
+    assert!(result.is_err(), "unit_price must stay frozen while an active batch exists");
+
+    // The batch sells out completely.
+    conn.execute("UPDATE inventory_batches SET quantity_remaining = 0 WHERE inventory_record_id = ?1", rusqlite::params![inv_id]).unwrap();
+
+    // Now unfrozen: nothing else in the app can price this item's
+    // remaining/legacy stock any other way.
+    let mut edit = serde_json::Map::new();
+    edit.insert("unit_price".into(), json!(999));
+    edit.insert("unit_cost".into(), json!(400));
+    let result = crate::crud::update(&conn, &biz, &uid, "inventory", &inv_id, &edit, false);
+    assert!(result.is_ok(), "unit_price/unit_cost must unfreeze once no batch has any stock left: {:?}", result.err());
+
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    let item = list.iter().find(|r| r.get("id").unwrap().as_str().unwrap() == inv_id).unwrap();
+    assert_eq!(item.get("unit_price").unwrap().as_i64().unwrap(), 999);
+    assert_eq!(item.get("unit_cost").unwrap().as_i64().unwrap(), 400);
+}
+
 /// Regression test for the bug fixed in module.rs
 /// (business_scoped_unique_constraints) / db_migrations.rs (v13): a
 /// field marked `unique: true` (inventory's `sku`) must only be

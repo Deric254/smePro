@@ -703,22 +703,41 @@ pub fn update(
     // Inventory's own unit_cost/unit_price are the ONE legitimate,
     // ongoing exception to "price only ever enters through Purchasing":
     // correcting a legacy item's price — one that predates the batch
-    // system, or was created before this app ever forced new items to
-    // start at zero — for as long as it has genuinely never been
-    // received through a batch. The moment even one batch exists for
-    // this item, that item's real price now lives on the batch (see
-    // batches.rs), and hand-editing the Inventory record's own fields
-    // would silently disagree with it — no error, nothing re-applied
-    // to Sales' own cost_at_sale history — the exact "inventory has a
-    // price after all" gap this whole session started from. So it's
-    // frozen from that point on, same discipline as
+    // system, was created before this app ever forced new items to
+    // start at zero, or (see below) has an ACTIVE batch behind it. The
+    // moment a batch with real stock still in it (`quantity_remaining
+    // > 0`) exists for this item, that item's real price lives on the
+    // batch (see batches.rs), and hand-editing the Inventory record's
+    // own fields would silently disagree with it — no error, nothing
+    // re-applied to Sales' own cost_at_sale history — the exact
+    // "inventory has a price after all" gap this whole session started
+    // from. So it's frozen while that's true, same discipline as
     // PURCHASING_FROZEN_AFTER_RECEIPT just above; correcting the price
-    // on an item that already has batches means correcting the batch
+    // on an item with an active batch means correcting the batch
     // itself (see batches::update_batch_price), not this record.
+    //
+    // THE FIX: this used to check for ANY batch ever received,
+    // regardless of whether it still had stock in it —
+    // `quantity_remaining > 0` was missing entirely. That meant once
+    // an item had been received through Purchasing even once, this
+    // freeze stayed on FOREVER, even after that batch sold all the way
+    // out. Combined with stock_take.rs's own pre-fix bug (a stock-take
+    // surplus on exactly that kind of item used to land as unpriced
+    // legacy quantity instead of a new batch — see that file's own
+    // fix), this created a genuine dead end: real, physical stock
+    // sitting at $0.00 with literally no field anywhere in the app
+    // still open to price it — not even this one, which looks like it
+    // should be the answer. Scoping the freeze to an ACTIVE batch
+    // closes that hole: once every batch is exhausted, this record's
+    // own unit_cost/unit_price fields ARE the live, current price
+    // again (pos.rs's lookup_products falls back to exactly these two
+    // columns whenever no batch has anything left) — freezing them at
+    // that point serves no purpose and only traps whoever needs to fix
+    // exactly this.
     const INVENTORY_LEGACY_PRICE_FIELDS: [&str; 2] = ["unit_cost", "unit_price"];
     let inventory_has_batches: bool = if module_id == "inventory" && body.keys().any(|k| INVENTORY_LEGACY_PRICE_FIELDS.contains(&k.as_str())) {
         conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM inventory_batches WHERE inventory_record_id = ?1 AND business_id = ?2 AND deleted_at IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM inventory_batches WHERE inventory_record_id = ?1 AND business_id = ?2 AND deleted_at IS NULL AND quantity_remaining > 0)",
             params![record_id, business_id],
             |r| r.get(0),
         )?
@@ -768,7 +787,7 @@ pub fn update(
         }
         if inventory_has_batches && INVENTORY_LEGACY_PRICE_FIELDS.contains(&k.as_str()) {
             return Err(anyhow!(
-                "'{k}' cannot be edited here once this item has a real purchase batch behind it — correct the batch's own price instead (see Inventory's batch list for this item)"
+                "'{k}' cannot be edited here while this item still has stock in an active purchase batch — correct the batch's own price instead (see Inventory's batch list for this item)"
             ));
         }
         if inventory_price_locked_by_stock_take && INVENTORY_LEGACY_PRICE_FIELDS.contains(&k.as_str()) {

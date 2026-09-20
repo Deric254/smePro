@@ -35,11 +35,17 @@
 //! batch's `quantity_remaining`) instead of one.
 //!
 //! DELIBERATE CHOICE: `Inventory.unit_cost`/`unit_price` are NEVER
-//! written by anything in this file. Once a single batch exists for an
-//! item, those two columns are frozen legacy history, nothing more —
-//! not "the current price," not "the front-of-queue price," just
-//! whatever they were the moment the last legacy-affecting write ever
-//! happened. Overwriting them with a live front-of-queue batch's price
+//! written by anything in this file. While a batch with real stock
+//! still in it exists for an item, those two columns are frozen
+//! legacy history, nothing more — not "the current price," not "the
+//! front-of-queue price," just whatever they were the moment the last
+//! legacy-affecting write happened. (Once every batch for an item has
+//! sold out, crud.rs's own update path unfreezes them again — see its
+//! `inventory_has_batches` check — since at that point they genuinely
+//! ARE the live, current price again: pos.rs's lookup_products falls
+//! straight back to them the moment no batch has anything left. That
+//! unfreezing is crud.rs's concern, not this file's; this file still
+//! never writes to them either way.) Overwriting them with a live front-of-queue batch's price
 //! (the more literal reading of "display-only summary") was considered
 //! and rejected: it would make the legacy value itself unrecoverable
 //! the instant it happened, with no way to tell, later, whether legacy
