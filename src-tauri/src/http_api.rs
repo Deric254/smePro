@@ -213,23 +213,25 @@ fn urlish_decode(s: &str) -> String {
     out
 }
 
-/// Handles the two AI-ask routes (`POST /ai/ask` and `POST
-/// /ai/sessions/{id}/ask`) with fine-grained locking instead of the
-/// single whole-request lock `route()` below uses for everything
-/// else. See ai_assistant.rs's `PreparedAiCall` doc comment for why:
-/// the outbound call to the AI provider can take several seconds
-/// (up to its own 30s timeout — see tls_agent()), and this server
-/// shares one `Mutex<Connection>` across every request. Holding that
-/// lock for the network call's whole duration would freeze every
-/// other endpoint, for every user, for that long — which is exactly
-/// what used to happen here. This function does its DB reads (auth,
-/// session history, provider/key/model resolution) under a brief
-/// lock, drops it, makes the network call with NO lock held, then
-/// re-locks briefly to persist the answer.
+/// Handles the AI-ask route (`POST /ai/sessions/{id}/ask`) with
+/// fine-grained locking instead of the single whole-request lock
+/// `route()` below uses for everything else. See ai_assistant.rs's
+/// `PreparedAiCall` doc comment for why: the outbound call to the AI
+/// provider can take several seconds (up to its own 30s timeout —
+/// see tls_agent()), and this server shares one `Mutex<Connection>`
+/// across every request. Holding that lock for the network call's
+/// whole duration would freeze every other endpoint, for every
+/// user, for that long — which is exactly what used to happen here.
+/// This function does its DB reads (auth, session history,
+/// provider/key/model resolution) under a brief lock, drops it,
+/// makes the network call with NO lock held, then re-locks briefly
+/// to persist the answer.
 ///
-/// Returns `None` for any request that isn't one of these two
-/// routes, so `serve()` below falls through to the normal `route()`
-/// dispatch unchanged for everything else.
+/// Returns `None` for any request that isn't this route, so
+/// `serve()` below falls through to the normal `route()` dispatch
+/// unchanged for everything else. (This used to also handle the
+/// legacy sessionless `POST /ai/ask` route; that had no frontend
+/// caller or test coverage and was removed.)
 fn handle_ai_ask(
     conn: &Arc<Mutex<Connection>>,
     method: &Method,
@@ -240,16 +242,12 @@ fn handle_ai_ask(
     let path = url.split('?').next().unwrap_or("");
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
 
-    let is_legacy_ask = parts.as_slice() == ["ai", "ask"] && *method == Method::Post;
-    let session_id: Option<String> =
+    let session_id: String =
         if parts.len() == 4 && parts[0] == "ai" && parts[1] == "sessions" && parts[3] == "ask" && *method == Method::Post {
-            Some(parts[2].to_string())
+            parts[2].to_string()
         } else {
-            None
+            return None;
         };
-    if !is_legacy_ask && session_id.is_none() {
-        return None;
-    }
 
     let token = match bearer {
         Some(t) => t,
@@ -273,13 +271,9 @@ fn handle_ai_ask(
             Ok(pair) => pair,
             Err(e) => return Some(json_err(401, &e.to_string())),
         };
-        let history = if let Some(sid) = &session_id {
-            match ai_chat::history_for_provider(&guard, &business_id, &user_id, sid) {
-                Ok(h) => h,
-                Err(e) => return Some(json_err(404, &e.to_string())),
-            }
-        } else {
-            Vec::new()
+        let history = match ai_chat::history_for_provider(&guard, &business_id, &user_id, &session_id) {
+            Ok(h) => h,
+            Err(e) => return Some(json_err(404, &e.to_string())),
         };
         let prepared = match ai_assistant::prepare(&guard, &business_id, &user_id) {
             Ok(p) => p,
@@ -301,23 +295,18 @@ fn handle_ai_ask(
     // ---- Phase 3: persist the turn and compute the pulse. Brief
     // lock again, released as soon as this block ends. ----
     let mut guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(sid) = &session_id {
-        // record_turn persists the real `answer` text only — the
-        // pulse below is computed fresh and attached to the response
-        // alone, never folded into the stored message. If it were
-        // saved into that same field, it would become part of the
-        // conversation history resent to the provider on every future
-        // turn (see history_for_provider) — wasted tokens narrating
-        // stats the model doesn't need to see again.
-        if let Err(e) = ai_chat::record_turn(&mut guard, &business_id, &user_id, sid, &question, &answer) {
-            return Some(json_err(400, &e.to_string()));
-        }
-        let pulse = crate::business_pulse::compute(&guard, &business_id, &user_id);
-        Some(ApiResponse::Json(200, json!({"answer": answer, "session_id": sid, "business_pulse": pulse})))
-    } else {
-        let pulse = crate::business_pulse::compute(&guard, &business_id, &user_id);
-        Some(ApiResponse::Json(200, json!({"answer": answer, "business_pulse": pulse})))
+    // record_turn persists the real `answer` text only — the pulse
+    // below is computed fresh and attached to the response alone,
+    // never folded into the stored message. If it were saved into
+    // that same field, it would become part of the conversation
+    // history resent to the provider on every future turn (see
+    // history_for_provider) — wasted tokens narrating stats the
+    // model doesn't need to see again.
+    if let Err(e) = ai_chat::record_turn(&mut guard, &business_id, &user_id, &session_id, &question, &answer) {
+        return Some(json_err(400, &e.to_string()));
     }
+    let pulse = crate::business_pulse::compute(&guard, &business_id, &user_id);
+    Some(ApiResponse::Json(200, json!({"answer": answer, "session_id": session_id, "business_pulse": pulse})))
 }
 
 fn route(
@@ -1184,20 +1173,6 @@ fn route(
             Err(e) => return json_err(400, &format!("invalid refund request: {e}")),
         };
         return match refund::process_refund(conn, &business_id, &user_id, req) {
-            Ok(summary) => ApiResponse::Json(200, summary),
-            Err(e) => crud_error(&e),
-        };
-    }
-
-    // ---- Receiving stock: the buying-side counterpart to POS — see
-    // receiving.rs for why this is its own module rather than the
-    // generic update endpoint. ----
-    if parts.as_slice() == ["purchasing", "receive"] && *method == Method::Post {
-        let req: receiving::ReceiveRequest = match serde_json::from_str(body) {
-            Ok(r) => r,
-            Err(e) => return json_err(400, &format!("invalid receive request: {e}")),
-        };
-        return match receiving::receive(conn, &business_id, &user_id, req) {
             Ok(summary) => ApiResponse::Json(200, summary),
             Err(e) => crud_error(&e),
         };

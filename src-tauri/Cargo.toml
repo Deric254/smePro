@@ -97,9 +97,7 @@ rand_core = { version = "=0.6.4", features = ["getrandom"] }
 rand = "=0.8.5"
 rust_xlsxwriter = "=0.77.0"
 ureq = { version = "=2.10.1", default-features = false, features = ["json", "tls"] }
-ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
 base64 = "=0.22.1"
-hmac = "=0.12.1"
 sha2 = "=0.10.8"
 hex = "=0.4.3"
 totp-rs = { version = "=5.7.2", default-features = false, features = ["gen_secret", "otpauth"] }
