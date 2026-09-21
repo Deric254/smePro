@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { getToken, getLogoUrl, markInvoiceSent, markInvoicePaid, cancelInvoice, getInvoiceRefundStatus, ApiError, API_BASE as API } from '../api';
-import { formatMoney } from '../lib/money';
+import { formatMoney, multiplyMoney } from '../lib/money';
 import '../styles/invoice-print.css';
 
 // unit_price, subtotal, tax_amount, total below are all integer minor
@@ -103,7 +103,7 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
   function invoiceText(): string {
     if (!invoice || !business) return '';
     const lines = items.map(
-      (i) => `${i.description} x${i.quantity} — ${business.currency} ${formatMoney(i.quantity * i.unit_price, business.currency)}`
+      (i) => `${i.description} x${i.quantity} — ${business.currency} ${formatMoney(multiplyMoney(i.unit_price, i.quantity), business.currency)}`
     );
     const netTotal = Math.max(0, invoice.total - refundedAmount);
     return [
@@ -206,7 +206,7 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
                 <td style={{...td, textAlign:'left'}}>{item.description}</td>
                 <td style={td}>{item.quantity}</td>
                 <td style={td}>{business.currency} {formatMoney(item.unit_price, business.currency)}</td>
-                <td style={td}>{business.currency} {formatMoney(item.quantity * item.unit_price, business.currency)}</td>
+                <td style={td}>{business.currency} {formatMoney(multiplyMoney(item.unit_price, item.quantity), business.currency)}</td>
               </tr>
             ))}
           </tbody>

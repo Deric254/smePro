@@ -3,7 +3,7 @@ import { lookupPosProducts, getPosLowStock, checkout, getOrder, processRefund, g
 import ReceiptView from '../components/ReceiptView';
 import CustomerPicker from '../components/CustomerPicker';
 import type { Record_ } from '../types';
-import { formatMoney, parseMoneyInput, sumMoney } from '../lib/money';
+import { formatMoney, parseMoneyInput, sumMoney, multiplyMoney } from '../lib/money';
 
 // unit_price, revenue, line_total, subtotal below are all integer
 // minor units (cents) — see src/lib/money.ts. Never do float math on
@@ -274,7 +274,7 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
     }
   }
 
-  const subtotal = sumMoney(cart.map((c) => c.unit_price * c.quantity));
+  const subtotal = sumMoney(cart.map((c) => multiplyMoney(c.unit_price, c.quantity)));
 
   // Enter finalizes the sale; Enter again (once the receipt is
   // showing) starts the next one — the actual, honest version of "one
