@@ -248,8 +248,8 @@ impl ModuleDef {
     /// distinguished by the `business_id` column — see `table_name`
     /// and every query in crud.rs/pos.rs/etc, all of which filter on
     /// it), the same as every hand-written table in db_migrations.rs
-    /// already does correctly (tax_rates: UNIQUE(business_id,
-    /// category), customers: UNIQUE(business_id, phone)). A bare
+    /// already does correctly (customers: UNIQUE(business_id, phone),
+    /// import_batches: UNIQUE(business_id, module_id, file_hash)). A bare
     /// column-level `UNIQUE` on `sku` alone — what this code used to
     /// emit — enforces uniqueness across ALL businesses at once, not
     /// within one: two completely unrelated businesses on the same

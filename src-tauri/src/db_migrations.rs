@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 37;
+const CURRENT_VERSION: i32 = 38;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -81,7 +81,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 35 { v35_stock_movements(conn)?; }
     if current < 36 { v36_import_batches(conn)?; }
     if current < 37 { v37_users_terms_acceptance(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 37, "bump this alongside the last `if current < N` check above");
+    if current < 38 { v38_remove_hr_tax_totp(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 38, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2553,6 +2554,85 @@ fn v37_users_terms_acceptance(conn: &mut Connection) -> Result<()> {
         tx.execute("ALTER TABLE users ADD COLUMN terms_accepted_version TEXT", [])?;
     }
     tx.execute("INSERT INTO _schema_version (version) VALUES (37)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Removes three features cut from the app entirely: per-category tax
+/// rates (never actually applied to real sales/invoices — see tax.rs's
+/// former doc comment; the flat `businesses.tax_rate` is the only tax
+/// rate that was ever real, and this migration does not touch it), 2FA
+/// (totp.rs and the `/auth/2fa/*` routes are gone), and the HR/Staff
+/// module (`modules/hr.json` no longer ships — see `MODULE_DEFS` in
+/// lib.rs — so a business can no longer enable, re-enable, or read this
+/// module through the app either way; this migration cleans up what
+/// remains of it).
+///
+/// `tax_rates` and the two `totp_*` columns hold nothing a real
+/// business depends on losing without warning (an unapplied preview
+/// rate; a 2FA enrollment the login flow can no longer honor), so those
+/// are dropped outright, `IF EXISTS`/existence-guarded the same way
+/// v32's notifications-table drop was — a no-op on any install that
+/// never touched either feature, not an error.
+///
+/// `module_hr`'s row data is different: a business may have entered
+/// real salary records into it, and this app's own rule (see
+/// business_panel::disable_module's doc comment) is that disabling a
+/// module never destroys its data. So this only ever DROPs that table
+/// when it's empty; a business with real HR rows keeps the table (and
+/// its data, still there if this module is ever reintroduced) — only
+/// the registry row, permissions, and any queued import-batch entries
+/// referencing it are cleaned up, which is what actually removes the
+/// page from the sidebar (see api.ts's `/modules` — the sidebar only
+/// ever lists rows still present in the `modules` table).
+fn v38_remove_hr_tax_totp(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    tx.execute("DROP TABLE IF EXISTS tax_rates", [])?;
+
+    for (table, column) in [("users", "totp_secret"), ("users", "totp_recovery_codes"), ("users", "totp_enabled")] {
+        let has_column: i64 = tx.query_row(
+            &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name='{column}'"),
+            [],
+            |r| r.get(0),
+        )?;
+        if has_column == 1 {
+            tx.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])?;
+        }
+    }
+
+    tx.execute("DELETE FROM permissions WHERE module_id = 'hr'", [])?;
+    // import_batches only exists from v36 onward, but this migration
+    // can run on a database that was already past v36 before reaching
+    // here — same "don't assume, check" approach as everywhere else in
+    // this file that touches a table introduced by a later-numbered
+    // migration than the one currently running.
+    let has_import_batches: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='import_batches'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_import_batches == 1 {
+        tx.execute("DELETE FROM import_batches WHERE module_id = 'hr'", [])?;
+    }
+
+    let hr_table_exists: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_hr'",
+        [],
+        |r| r.get(0),
+    )?;
+    if hr_table_exists == 1 {
+        let hr_row_count: i64 = tx.query_row("SELECT count(*) FROM module_hr", [], |r| r.get(0))?;
+        if hr_row_count == 0 {
+            tx.execute("DROP TABLE module_hr", [])?;
+        }
+        // else: real data present — table is kept, only the registry
+        // row below is removed, so the module simply disappears from
+        // the UI without touching a single row of it.
+    }
+    tx.execute("DELETE FROM modules WHERE id = 'hr'", [])?;
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (38)", [])?;
     tx.commit()?;
     Ok(())
 }

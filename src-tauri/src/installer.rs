@@ -38,9 +38,8 @@
 //! tauri-plugin-http, has). Routing JS -> this ordinary command ->
 //! the Kotlin plugin underneath instead means it's covered by the
 //! `core:default` permission this app's capabilities/default.json
-//! already grants, same as get_network_mode and every other
-//! first-party command — one less place to get a permission scope
-//! wrong for a fix this narrow.
+//! already grants, same as every other first-party command — one
+//! less place to get a permission scope wrong for a fix this narrow.
 //!
 //! Not gated to `target_os = "android"` specifically because this
 //! codebase has no iOS build at all (see lib.rs's `pub mod installer`

@@ -14,33 +14,28 @@ import {
   MOVEMENT_TYPES,
   getBusinessInfo,
   getCurrencyRates, convertCurrency, refreshCurrencyRates,
-  listTaxRates, setTaxRate, computeTax,
   changeBusinessType,
   listModules, listAvailableModules, getModuleSchema, enableModule, disableModule,
   listReleases, checkRollbackTarget,
   getToken,
   ApiError,
 } from '../api';
-import type { StockMovementResult, AuditLogEntry, AiSettingsStatus, CurrencyRate, TaxComputeItem, TaxComputeResult, AvailableModule, ReleaseOption } from '../api';
+import type { StockMovementResult, AuditLogEntry, AiSettingsStatus, CurrencyRate, AvailableModule, ReleaseOption } from '../api';
 import type { Role, UserAccount, Unit, Currency, ModuleListItem } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
 import { parseBackendTimestamp } from '../lib/date';
 import BusinessBranding from '../components/BusinessBranding';
-import TwoFactorSetup from '../components/TwoFactorSetup';
 
-export type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'tax' | 'settings' | 'backup' | 'audit' | 'movements' | 'business' | 'security' | 'ai' | 'network';
+export type Tab = 'roles' | 'users' | 'units' | 'currencies' | 'settings' | 'backup' | 'audit' | 'movements' | 'business' | 'ai';
 
 export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'roles', label: 'Roles' },
   { id: 'users', label: 'Users' },
   { id: 'units', label: 'Units' },
   { id: 'currencies', label: 'Currencies' },
-  { id: 'tax', label: 'Tax Rates' },
   { id: 'settings', label: 'Theme & Settings' },
   { id: 'business', label: 'Business' },
   { id: 'ai', label: 'AI Settings' },
-  { id: 'security', label: 'Security' },
-  { id: 'network', label: 'Network' },
   { id: 'backup', label: 'Backup & Restore' },
   { id: 'audit', label: 'Audit Log' },
   { id: 'movements', label: 'Stock Movements' },
@@ -63,11 +58,8 @@ export default function AdminPanel({ tab, onModulesChanged }: { tab: Tab; onModu
       {tab === 'users' && <UsersTab />}
       {tab === 'units' && <UnitsTab />}
       {tab === 'currencies' && <CurrenciesTab />}
-      {tab === 'tax' && <TaxRatesTab />}
       {tab === 'settings' && <SettingsTab />}
       {tab === 'business' && <BusinessTab onModulesChanged={onModulesChanged} />}
-      {tab === 'security' && <TwoFactorSetup />}
-      {tab === 'network' && <NetworkTab />}
       {tab === 'ai' && <AiSettingsTab />}
       {tab === 'backup' && <BackupTab />}
       {tab === 'audit' && <AuditLogTab />}
@@ -655,189 +647,6 @@ function CurrenciesTab() {
         </div>
         {convError && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginTop: '0.5rem' }}>{convError}</div>}
         {convResult && <div style={{ fontSize: '0.9rem', marginTop: '0.5rem', fontWeight: 600 }}>{convResult}</div>}
-      </div>
-    </div>
-  );
-}
-
-// ----------------------------------------------------------- Tax Rates
-
-function TaxRatesTab() {
-  const [rates, setRates] = useState<{ category: string; rate: number }[]>([]);
-  const [category, setCategory] = useState('');
-  const [rateText, setRateText] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const refresh = () => listTaxRates().then((r) => setRates(r.rates)).catch(() => {});
-  useEffect(() => { refresh(); }, []);
-
-  async function handleSetRate(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    const rate = parseFloat(rateText);
-    if (!category.trim() || Number.isNaN(rate) || rate < 0) {
-      setError('Enter a category name and a rate (e.g. 16 for 16%).');
-      return;
-    }
-    setSaving(true);
-    try {
-      await setTaxRate(category.trim(), rate);
-      setCategory('');
-      setRateText('');
-      await refresh();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save this rate — owner permission required.');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // Calculator/preview state
-  const [calcItems, setCalcItems] = useState<{ category: string; unit_price_text: string; quantity: number }[]>([
-    { category: '', unit_price_text: '0.00', quantity: 1 },
-  ]);
-  const [taxInclusive, setTaxInclusive] = useState(false);
-  const [calcResult, setCalcResult] = useState<TaxComputeResult | null>(null);
-  const [calcError, setCalcError] = useState<string | null>(null);
-  const [calculating, setCalculating] = useState(false);
-
-  function updateCalcItem(i: number, patch: Partial<{ category: string; unit_price_text: string; quantity: number }>) {
-    setCalcItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
-  }
-
-  async function handleCompute() {
-    setCalcError(null);
-    setCalcResult(null);
-    const parsedItems: TaxComputeItem[] = [];
-    for (const it of calcItems) {
-      if (!it.category.trim()) continue;
-      const cents = parseMoneyInput(it.unit_price_text, 'USD');
-      if (cents === null || !(it.quantity > 0)) {
-        setCalcError(`"${it.category}" has an invalid price or quantity.`);
-        return;
-      }
-      parsedItems.push({ category: it.category.trim(), unit_price: cents, quantity: it.quantity });
-    }
-    if (parsedItems.length === 0) {
-      setCalcError('Add at least one line item with a category.');
-      return;
-    }
-    setCalculating(true);
-    try {
-      setCalcResult(await computeTax(parsedItems, taxInclusive));
-    } catch (err) {
-      setCalcError(err instanceof ApiError ? err.message : 'Could not compute tax for these items');
-    } finally {
-      setCalculating(false);
-    }
-  }
-
-  return (
-    <div>
-      <div className="card" style={{ borderColor: 'var(--stamp)', marginBottom: '1rem' }}>
-        <strong style={{ color: 'var(--stamp)' }}>Heads up:</strong>{' '}
-        <span style={{ fontSize: '0.85rem' }}>
-          These per-category tax rates are <strong>not currently applied</strong> to real sales or invoices —
-          Point of Sale and Invoicing both use a single flat tax rate instead, set under Admin → Business.
-          What's below lets you configure and preview category rates, but changing them here won't change
-          what a customer is actually charged yet. If you need per-category tax to actually apply at
-          checkout, that's a real feature to build deliberately — ask, don't assume this page already does it.
-        </span>
-      </div>
-
-      <div className="card" style={{ marginBottom: '1rem' }}>
-        <h3 style={{ marginTop: 0 }}>Category rates</h3>
-        <form onSubmit={handleSetRate} style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-end', marginBottom: '0.8rem' }}>
-          <div style={{ flex: 1 }}>
-            <label>Category</label>
-            <input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Food" style={{ width: '100%' }} />
-          </div>
-          <div style={{ width: 100 }}>
-            <label>Rate (%)</label>
-            <input value={rateText} onChange={(e) => setRateText(e.target.value)} placeholder="16" style={{ width: '100%' }} />
-          </div>
-          <button className="btn btn-stamp" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Set rate'}</button>
-        </form>
-        <ErrorBox error={error} />
-        <table className="data-table" style={styles.table}>
-          <thead><tr><th style={styles.th}>Category</th><th style={styles.th}>Rate</th></tr></thead>
-          <tbody>
-            {rates.length === 0 && <tr><td colSpan={2} style={{ ...styles.td, display: 'block', textAlign: 'center' }}>No category rates set yet.</td></tr>}
-            {rates.map((r) => (
-              <tr key={r.category}>
-                <td style={styles.td} data-label="Category">{r.category}</td>
-                <td className="mono" style={styles.td} data-label="Rate">{r.rate}%</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="card">
-        <h3 style={{ marginTop: 0 }}>Preview calculator</h3>
-        {calcItems.map((it, i) => (
-          <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', alignItems: 'flex-end' }}>
-            <div style={{ flex: 1 }}>
-              <label>Category</label>
-              <input value={it.category} onChange={(e) => updateCalcItem(i, { category: e.target.value })} style={{ width: '100%' }} />
-            </div>
-            <div style={{ width: 100 }}>
-              <label>Unit price</label>
-              <input
-                type="text"
-                inputMode="decimal"
-                value={it.unit_price_text}
-                onChange={(e) => updateCalcItem(i, { unit_price_text: e.target.value })}
-                style={{ width: '100%' }}
-              />
-            </div>
-            <div style={{ width: 70 }}>
-              <label>Qty</label>
-              <input
-                type="number"
-                min={1}
-                value={it.quantity}
-                onChange={(e) => updateCalcItem(i, { quantity: parseInt(e.target.value, 10) || 1 })}
-                style={{ width: '100%' }}
-              />
-            </div>
-          </div>
-        ))}
-        <button
-          className="btn btn-outline"
-          type="button"
-          onClick={() => setCalcItems((prev) => [...prev, { category: '', unit_price_text: '0.00', quantity: 1 }])}
-          style={{ marginBottom: '0.8rem' }}
-        >
-          + Add line
-        </button>
-
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.8rem' }}>
-          <input type="checkbox" checked={taxInclusive} onChange={(e) => setTaxInclusive(e.target.checked)} />
-          Prices already include tax
-        </label>
-
-        <button className="btn btn-stamp" onClick={handleCompute} disabled={calculating}>
-          {calculating ? 'Computing…' : 'Compute'}
-        </button>
-
-        {calcError && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem', marginTop: '0.6rem' }}>{calcError}</div>}
-
-        {calcResult && (
-          <div style={{ marginTop: '0.8rem', fontSize: '0.85rem' }}>
-            {calcResult.lines.map((l) => (
-              <div key={l.category} style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span>{l.category} ({l.rate}%)</span>
-                <span className="mono">{formatMoney(l.taxable_amount, 'USD')} + {formatMoney(l.tax_amount, 'USD')} tax</span>
-              </div>
-            ))}
-            <div style={{ borderTop: '1px solid var(--paper-line)', marginTop: '0.5rem', paddingTop: '0.5rem', fontWeight: 600, display: 'flex', justifyContent: 'space-between' }}>
-              <span>Total</span>
-              <span className="mono">{formatMoney(calcResult.total, 'USD')}</span>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -1617,129 +1426,6 @@ function AiSettingsTab() {
           </div>
         );
       })}
-    </div>
-  );
-}
-
-// --------------------------------------------------------- Network
-
-interface NetworkModeState {
-  mode: 'standalone' | 'host' | 'client';
-  host_address: string | null;
-}
-
-// Reads/writes device network mode via Tauri's IPC (not the HTTP API —
-// see network_mode.rs's own doc comment on why: a "client" device may
-// have no local server running at all to ask over HTTP). Every change
-// here needs an app restart to actually take effect, since the server
-// bind address and whether a local database even opens are decided
-// once at startup (see lib.rs's setup()) — deliberately not attempting
-// a live in-place teardown/rebind of a running server and database
-// connection, which is a much larger source of bugs for very little
-// benefit over "restart the app."
-function NetworkTab() {
-  const [state, setState] = useState<NetworkModeState | null>(null);
-  const [lanAddress, setLanAddress] = useState<string | null>(null);
-  const [hostInput, setHostInput] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [pendingRestart, setPendingRestart] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const current = await invoke<NetworkModeState>('get_network_mode');
-        if (!cancelled) setState(current);
-        if (current.mode === 'host') {
-          const addr = await invoke<string | null>('get_lan_address');
-          if (!cancelled) setLanAddress(addr);
-        }
-      } catch {
-        // Not running inside Tauri (e.g. plain browser dev) — network
-        // mode has no meaning there, so this tab just shows nothing
-        // rather than a confusing error about a feature that only
-        // exists in the real desktop/Android app.
-        if (!cancelled) setState({ mode: 'standalone', host_address: null });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  async function applyMode(mode: 'standalone' | 'host' | 'client', hostAddress?: string) {
-    setError(null);
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('set_network_mode', { mode, hostAddress: hostAddress ?? null });
-      setPendingRestart(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save this');
-    }
-  }
-
-  async function handleRestart() {
-    try {
-      const { relaunch } = await import('@tauri-apps/plugin-process');
-      await relaunch();
-    } catch {
-      setError('Please close and reopen the app for this to take effect.');
-    }
-  }
-
-  if (!state) return <p style={{ color: 'var(--ink-soft)' }}>Loading…</p>;
-
-  if (pendingRestart) {
-    return (
-      <div className="card" style={{ maxWidth: 420 }}>
-        <p>Saved. Restart the app for this to take effect.</p>
-        <button className="btn btn-stamp" onClick={handleRestart}>Restart now</button>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxWidth: 480 }}>
-      <div className="card">
-        <strong>Currently: {state.mode === 'standalone' ? 'Standalone (own copy)' : state.mode === 'host' ? 'Hosting for other devices' : `Connected to ${state.host_address}`}</strong>
-      </div>
-
-      {error && <div style={{ color: 'var(--stamp)', fontSize: '0.85rem' }}>{error}</div>}
-
-      {state.mode !== 'standalone' && (
-        <button className="btn btn-outline" onClick={() => applyMode('standalone')}>
-          Switch back to standalone (own copy)
-        </button>
-      )}
-
-      {state.mode !== 'host' && (
-        <div className="card">
-          <strong style={{ display: 'block', marginBottom: '0.4rem' }}>Host this business</strong>
-          <button className="btn btn-stamp" onClick={() => applyMode('host')}>Make this device the host</button>
-        </div>
-      )}
-      {state.mode === 'host' && (
-        <div className="card">
-          <strong>Other devices should connect to:</strong>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '1.1rem', marginTop: '0.4rem' }}>
-            {lanAddress ? `${lanAddress}:8080` : 'Could not detect a network address'}
-          </div>
-        </div>
-      )}
-
-      {state.mode !== 'client' && (
-        <div className="card">
-          <strong style={{ display: 'block', marginBottom: '0.4rem' }}>Connect to another device</strong>
-          <input
-            value={hostInput}
-            onChange={(e) => setHostInput(e.target.value)}
-            placeholder="192.168.1.42:8080"
-            style={{ width: '100%', marginBottom: '0.5rem' }}
-          />
-          <button className="btn btn-stamp" onClick={() => applyMode('client', hostInput.trim())} disabled={!hostInput.trim()}>
-            Connect
-          </button>
-        </div>
-      )}
     </div>
   );
 }

@@ -148,21 +148,13 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// CORS is wide-open (`*`). This API binds to 127.0.0.1-only in the
-/// app's default ("standalone") mode — not reachable from outside the
-/// device, so the usual cross-origin risk model doesn't apply the way
-/// it would for a public API — but can also bind to every network
-/// interface in "host" mode (see network_mode.rs and lib.rs's setup()),
-/// specifically so other devices on the same WiFi can reach it. In
-/// that mode this really is reachable from other devices on the
-/// network, same as most in-store POS/register hardware already is —
-/// every request still requires a valid bearer token (see
-/// `auth::current_user` below), so this is "no un-authenticated
-/// endpoint is exposed," not "no security boundary at all." Traffic
-/// itself is plain HTTP, not HTTPS, on both binding modes — a
-/// deliberate simplicity trade-off for a single-shop LAN, not an
-/// oversight; anyone sharing that same WiFi could in principle observe
-/// traffic, same as they could with many real point-of-sale setups.
+/// CORS is wide-open (`*`). The app binds this API to 127.0.0.1 only
+/// (see lib.rs's setup()) — not reachable from outside the device, so
+/// the usual cross-origin risk model doesn't apply the way it would
+/// for a public API. Every request still requires a valid bearer token
+/// (see `auth::current_user` below), so this is "no un-authenticated
+/// endpoint is exposed," not "no security boundary at all." Traffic is
+/// plain HTTP, not HTTPS — loopback only, so nothing crosses a network.
 fn cors_headers() -> Vec<Header> {
     vec![
         Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
@@ -564,15 +556,6 @@ fn route(
         };
         auth_limiter.reset(&limiter_key);
 
-        // If this user has 2FA enabled, don't issue a real session yet —
-        // hand back a short-lived pending token instead. The frontend
-        // then calls /auth/2fa/login with that token + a TOTP code to
-        // actually get a session.
-        if crate::totp::status(conn, &logged_in_user_id).map(|s| s.enabled).unwrap_or(false) {
-            let temp_token = crate::totp::issue_pending_token(&logged_in_user_id, biz);
-            return ApiResponse::Json(202, json!({"requires_2fa": true, "temp_token": temp_token}));
-        }
-
         return match auth::create_session(conn, &logged_in_user_id, biz) {
             Ok(token) => {
                 let _ = audit::log(conn, biz, Some(&logged_in_user_id), "_auth", "login_success", None, None);
@@ -584,70 +567,6 @@ fn route(
                 // or who accepted an older version since superseded.
                 let terms_accepted = terms::accepted_current(conn, &logged_in_user_id).unwrap_or(false);
                 ApiResponse::Json(200, json!({"token": token, "terms_accepted": terms_accepted}))
-            }
-            Err(e) => json_err(500, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["auth", "2fa", "login"] && *method == Method::Post {
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let temp_token = obj.get("temp_token").and_then(Value::as_str).unwrap_or("");
-        let code = obj.get("code").and_then(Value::as_str).unwrap_or("");
-        // Alternative to `code`: one of the 10 single-use recovery codes
-        // shown at 2FA setup time, for a user who has lost their
-        // authenticator device. Only one of `code`/`recovery_code` is
-        // expected per request; if both are sent, recovery_code wins,
-        // since a non-empty recovery_code is an explicit signal the
-        // user chose "use a recovery code instead" in the UI.
-        let recovery_code = obj.get("recovery_code").and_then(Value::as_str).unwrap_or("");
-
-        let (pending_user_id, pending_business_id) = match crate::totp::resolve_pending_token(temp_token) {
-            Some(pair) => pair,
-            None => return json_err(401, "2FA login expired or already used — please log in again"),
-        };
-
-        // recovery_used tracks which path succeeded, purely to shape
-        // the response below (recovery_used: true tells the frontend
-        // to warn the user that 2FA is now OFF and they should
-        // re-enroll — use_recovery_code() always disables 2FA on
-        // success, by design, same as the disable() route requiring a
-        // valid TOTP code: proving you lost the authenticator is what
-        // "spends" a recovery code).
-        let recovery_used;
-        if !recovery_code.is_empty() {
-            recovery_used = true;
-            let valid = match crate::totp::use_recovery_code(conn, &pending_user_id, recovery_code) {
-                Ok(v) => v,
-                Err(e) => return json_err(400, &e.to_string()),
-            };
-            if !valid {
-                let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "2fa_recovery_failed", None, None);
-                return json_err(401, "invalid or already-used recovery code");
-            }
-            let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "2fa_recovery_used", None, None);
-        } else {
-            recovery_used = false;
-            let valid = match crate::totp::verify_login(conn, &pending_user_id, code) {
-                Ok(v) => v,
-                Err(e) => return json_err(400, &e.to_string()),
-            };
-            if !valid {
-                let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "2fa_login_failed", None, None);
-                return json_err(401, "invalid TOTP code");
-            }
-        }
-
-        return match auth::create_session(conn, &pending_user_id, &pending_business_id) {
-            Ok(token) => {
-                let _ = audit::log(conn, &pending_business_id, Some(&pending_user_id), "_auth", "login_success", None, None);
-                // Same reporting as the non-2FA login route above — see
-                // its comment. A 2FA user needs this exact same gate,
-                // reported the exact same way.
-                let terms_accepted = terms::accepted_current(conn, &pending_user_id).unwrap_or(false);
-                ApiResponse::Json(200, json!({
-                    "token": token,
-                    "terms_accepted": terms_accepted,
-                    "recovery_used": recovery_used,
-                }))
             }
             Err(e) => json_err(500, &e.to_string()),
         };
@@ -1892,8 +1811,8 @@ fn route(
     // via report::run and ai_context::build_snapshot), same
     // has_data:false degrade path. No new calculation logic here.
     // Reports-gated on top of that (see rbac::require_reports_access) —
-    // this standalone Dashboard route only; NOT applied to /ai/ask or
-    // /ai/sessions/{id}/ask, which still attach business_pulse to a
+    // this standalone Dashboard route only; NOT applied to
+    // /ai/sessions/{id}/ask, which still attaches business_pulse to a
     // chat answer regardless of this flag. Narrowing that too was out
     // of scope for this pass — worth a deliberate follow-up if the
     // chat panel should respect the same boundary.
@@ -1916,10 +1835,10 @@ fn route(
         return ApiResponse::Json(200, json!(highlights));
     }
 
-    // ---- AI chat history: sessions. (The two actual ask/answer
-    // routes — POST /ai/ask and POST /ai/sessions/{id}/ask — are
-    // handled by handle_ai_ask() above, before serve() ever reaches
-    // route() at all; see that function's doc comment for why.) ----
+    // ---- AI chat history: sessions. (The actual ask/answer route —
+    // POST /ai/sessions/{id}/ask — is handled by handle_ai_ask()
+    // above, before serve() ever reaches route() at all; see that
+    // function's doc comment for why.) ----
     // GET /ai/sessions — list this user's own conversations, most
     // recently active first.
     if parts.as_slice() == ["ai", "sessions"] && *method == Method::Get {
@@ -2134,80 +2053,6 @@ fn route(
             Err(e) => json_err(400, &e.to_string()),
         };
     }
-    // ---- 2FA management (setup/verify/status/disable — the login-time
-    // check is up in the public routes section above, alongside
-    // /auth/login and /auth/2fa/login) ----
-    if parts.as_slice() == ["auth", "2fa", "setup"] && *method == Method::Post {
-        let username: String = conn.query_row(
-            "SELECT username FROM users WHERE id = ?1", rusqlite::params![user_id], |r| r.get(0)
-        ).unwrap_or_default();
-        return match crate::totp::generate_secret(conn, &user_id, &username) {
-            Ok(setup) => ApiResponse::Json(200, json!(setup)),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["auth", "2fa", "verify"] && *method == Method::Post {
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let code = obj.get("code").and_then(Value::as_str).unwrap_or("");
-        return match crate::totp::verify_and_enable(conn, &user_id, code) {
-            Ok(true) => ApiResponse::Json(200, json!({"enabled": true})),
-            Ok(false) => json_err(400, "invalid TOTP code — 2FA not enabled"),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["auth", "2fa", "status"] && *method == Method::Get {
-        return match crate::totp::status(conn, &user_id) {
-            Ok(s) => ApiResponse::Json(200, json!(s)),
-            Err(e) => json_err(500, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["auth", "2fa", "disable"] && *method == Method::Post {
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let code = obj.get("code").and_then(Value::as_str).unwrap_or("");
-        return match crate::totp::disable(conn, &user_id, code) {
-            Ok(()) => ApiResponse::Json(200, json!({"disabled": true})),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-
-    // ---- Tax engine ----
-    if parts.as_slice() == ["tax", "rates"] && *method == Method::Get {
-        return match crate::tax::list_rates(conn, &business_id) {
-            Ok(rates) => ApiResponse::Json(200, json!({"rates": rates})),
-            Err(e) => json_err(500, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["tax", "rates"] && *method == Method::Post {
-        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let category = obj.get("category").and_then(Value::as_str).unwrap_or("");
-        let rate = obj.get("rate").and_then(Value::as_f64).unwrap_or(0.0);
-        return match crate::tax::set_category_rate(conn, &business_id, &user_id, category, rate) {
-            Ok(()) => ApiResponse::Json(200, json!({"ok": true})),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["tax", "compute"] && *method == Method::Post {
-        let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "invalid body") };
-        let empty = Vec::new();
-        let items = obj.get("items").and_then(Value::as_array).unwrap_or(&empty);
-        let tax_inclusive = obj.get("tax_inclusive").and_then(Value::as_bool).unwrap_or(false);
-        let parsed: Vec<(String, i64, i64)> = items.iter().filter_map(|v| {
-            let cat = v.get("category")?.as_str()?.to_string();
-            // Integer minor units (cents) on the wire — see money.rs.
-            // A caller sending a fractional dollar value here is a bug
-            // upstream, not something to coerce; as_i64() correctly
-            // returns None for it rather than silently truncating.
-            let price = v.get("unit_price")?.as_i64()?;
-            let qty = v.get("quantity")?.as_i64()?;
-            Some((cat, price, qty))
-        }).collect();
-        return match crate::tax::compute(conn, &business_id, &parsed, tax_inclusive) {
-            Ok(summary) => ApiResponse::Json(200, json!(summary)),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-
     // ---- Currency exchange ----
     if parts.as_slice() == ["currency", "rates"] && *method == Method::Get {
         let q = query_params(url);

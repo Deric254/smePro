@@ -21,8 +21,6 @@ mod crash_report_tests;
 #[cfg(test)]
 mod money_migration_tests;
 #[cfg(test)]
-mod network_mode_tests;
-#[cfg(test)]
 mod module_disable_tests;
 #[cfg(test)]
 mod customers_tests;
@@ -30,8 +28,6 @@ mod customers_tests;
 mod service_sale_tests;
 #[cfg(test)]
 mod business_pulse_tests;
-#[cfg(test)]
-mod totp_tests;
 #[cfg(test)]
 mod pos_tests;
 #[cfg(test)]

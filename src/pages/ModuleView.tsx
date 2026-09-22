@@ -197,8 +197,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
   // Same reasoning as PointOfSale.tsx's own focus listener: this page
   // has no live push/sync mechanism telling it when something changed
-  // elsewhere — another module's action, another window, or a second
-  // device on the same LAN server (see API_BASE in api.ts). Ordinary
+  // elsewhere — another module's action, or another window. Ordinary
   // in-app navigation away and back already remounts this component
   // fresh with a brand new `moduleId` effect run above; this covers
   // the gap that alone doesn't: returning focus to the window while

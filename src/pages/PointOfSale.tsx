@@ -209,11 +209,9 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   // React tears this one down and builds a new one — that alone
   // re-runs the effect above from scratch). This listener is the
   // belt to that suspenders: it also refetches whenever the window
-  // itself regains focus — switching back from another app, another
-  // window, or a second device's browser tab pointed at the same LAN
-  // server (see API_BASE in api.ts) — so stock is never more than a
-  // window-switch stale, even in a scenario the remount alone
-  // wouldn't cover.
+  // itself regains focus — switching back from another app or
+  // another window — so stock is never more than a window-switch
+  // stale, even in a scenario the remount alone wouldn't cover.
   useEffect(() => {
     function onFocus() { refreshProducts(); }
     window.addEventListener('focus', onFocus);

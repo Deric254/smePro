@@ -161,12 +161,21 @@ fn test_v2_v4_v7_migrations_are_idempotent_when_rerun() {
     // before it was fixed. These three are lower-traffic tables
     // (businesses, users, sessions) so nothing had exercised the
     // rerun path for them until now.
+    //
+    // v4's own totp_secret/totp_enabled columns are no longer a good
+    // fixture for this test: v38 (2FA removal) drops them again later
+    // in this same full rerun, on purpose — asserting their presence
+    // here would fail for a reason that has nothing to do with what
+    // this test actually checks (ADD COLUMN idempotency). `slogan` and
+    // `last_activity` still cover v2 and v7 the same way; v4 is
+    // covered instead by v38's own rerun-safety, asserted separately
+    // in `test_v38_is_idempotent_when_rerun` below.
     let mut conn = test_db();
     conn.execute("DELETE FROM _schema_version WHERE version >= 2", []).unwrap();
     crate::db_migrations::run(&mut conn).expect("first rerun from v2 must succeed");
     crate::db_migrations::run(&mut conn).expect("second rerun must no-op, not fail with 'duplicate column name'");
 
-    for (table, column) in [("businesses", "slogan"), ("users", "totp_secret"), ("users", "totp_enabled"), ("sessions", "last_activity")] {
+    for (table, column) in [("businesses", "slogan"), ("sessions", "last_activity")] {
         let count: i64 = conn.query_row(
             &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name='{column}'"),
             [],
@@ -174,4 +183,97 @@ fn test_v2_v4_v7_migrations_are_idempotent_when_rerun() {
         ).unwrap();
         assert_eq!(count, 1, "{table}.{column} must exist exactly once, not zero and not duplicated");
     }
+}
+
+/// v38 removes tax_rates, the two totp_* columns, and the HR module
+/// registry row — but the HR module's own DATA TABLE must survive if
+/// it holds any real rows (see v38's own doc comment: disabling/
+/// removing a module never destroys a business's existing data). This
+/// hand-builds a pre-v38 database with a real `module_hr` row present,
+/// the same way `seed_legacy_inventory_business` above hand-builds a
+/// pre-money-migration inventory table — `module_json("hr")` no longer
+/// exists to go through the normal `enable_module` path, since hr.json
+/// itself is gone.
+#[test]
+fn test_v38_keeps_hr_data_but_removes_hr_from_the_registry() {
+    let mut conn = test_db();
+    let biz = crate::business_panel::create_business(&mut conn, "HR Test Biz", "USD", "UTC")
+        .expect("create business");
+
+    conn.execute_batch(&format!(
+        "CREATE TABLE module_hr (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL, full_name TEXT NOT NULL,
+            salary INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            created_by TEXT, deleted_at TEXT
+         );
+         INSERT INTO module_hr (id, business_id, full_name, salary, created_at, updated_at)
+         VALUES ('row1', '{biz}', 'A Real Employee', 250000, datetime('now'), datetime('now'));
+         INSERT INTO modules (id, business_id, display_name, schema_json, enabled, table_created, created_at)
+         VALUES ('hr', '{biz}', 'HR / Staff', '{{}}', 1, 1, datetime('now'));"
+    )).expect("hand-seed pre-v38 hr module + real row");
+
+    // Roll `_schema_version` back below 38 so `run()` (which gates
+    // purely on that table's MAX(version), not on what the seeded
+    // rows above look like) actually re-executes v38 against this
+    // hand-built "pre-v38" state — the same fix the v8 test above
+    // needed for the identical reason, spelled out in its comment.
+    conn.execute("DELETE FROM _schema_version WHERE version >= 38", []).unwrap();
+
+    crate::db_migrations::run(&mut conn).expect("v38 must succeed with real hr data present");
+
+    // Data is untouched.
+    let salary: i64 = conn.query_row("SELECT salary FROM module_hr WHERE id = 'row1'", [], |r| r.get(0)).unwrap();
+    assert_eq!(salary, 250000, "a business's real HR data must never be silently deleted");
+
+    // But it's gone from the registry, which is what actually hides it
+    // from the UI (see api.ts's /modules).
+    let registry_count: i64 = conn.query_row(
+        "SELECT count(*) FROM modules WHERE business_id = ?1 AND id = 'hr'",
+        rusqlite::params![biz], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(registry_count, 0);
+}
+
+/// The empty-table counterpart to the test above: a business that
+/// enabled HR but never actually entered a record should have the
+/// dead table cleaned up entirely, not left behind as orphaned schema
+/// — the same "don't leave dead code or mess" the notifications-table
+/// drop (v32) already established for a fully-removed feature with no
+/// real data to protect.
+#[test]
+fn test_v38_drops_module_hr_table_when_empty() {
+    let mut conn = test_db();
+    let biz = crate::business_panel::create_business(&mut conn, "Empty HR Biz", "USD", "UTC")
+        .expect("create business");
+
+    conn.execute_batch(&format!(
+        "CREATE TABLE module_hr (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL, full_name TEXT NOT NULL,
+            salary INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            created_by TEXT, deleted_at TEXT
+         );
+         INSERT INTO modules (id, business_id, display_name, schema_json, enabled, table_created, created_at)
+         VALUES ('hr', '{biz}', 'HR / Staff', '{{}}', 1, 1, datetime('now'));"
+    )).expect("hand-seed pre-v38 hr module, no rows");
+
+    // Same schema-version rollback the test above needs, for the
+    // same reason — see that test's comment.
+    conn.execute("DELETE FROM _schema_version WHERE version >= 38", []).unwrap();
+
+    crate::db_migrations::run(&mut conn).expect("v38 must succeed with an empty hr table present");
+
+    let table_exists: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_hr'", [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(table_exists, 0, "an empty module_hr table should be dropped, not left as dead schema");
+}
+
+/// v38 is a rerun-safety test in the same spirit as the v2/v4/v7 test
+/// above: running the DROP COLUMN / DROP TABLE statements a second
+/// time against a database that already has them gone must no-op, not
+/// error — the same guard-before-mutate shape this whole file uses.
+#[test]
+fn test_v38_is_idempotent_when_rerun() {
+    let mut conn = test_db(); // already fully migrated, including v38
+    crate::db_migrations::run(&mut conn).expect("rerunning v38 against an already-migrated db must no-op");
 }

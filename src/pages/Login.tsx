@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { login, login2fa, setSession, clearSession, logout, getTerms, acceptTerms, getResolvedBusinessId, getPublicBranding, getSecurityQuestions, recoverViaSecurityQuestions, recoverViaAdminCode, API_BASE, ApiError } from '../api';
+import { login, setSession, clearSession, logout, getTerms, acceptTerms, getResolvedBusinessId, getPublicBranding, getSecurityQuestions, recoverViaSecurityQuestions, recoverViaAdminCode, API_BASE, ApiError } from '../api';
 
-type Mode = 'login' | '2fa' | 'terms' | 'recover-questions' | 'recover-admin-code' | 'recover-success' | '2fa-recovery-notice';
+type Mode = 'login' | 'terms' | 'recover-questions' | 'recover-admin-code' | 'recover-success';
 
 export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [businessId, setBusinessId] = useState(localStorage.getItem('erp_business_id') || '');
@@ -13,13 +13,6 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<Mode>('login');
-  const [tempToken, setTempToken] = useState('');
-  const [twoFaCode, setTwoFaCode] = useState('');
-  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
-  // Holds the token/terms_accepted from a successful recovery-code
-  // login while the "2FA is now off" notice is shown — completeLogin
-  // itself runs only after the user acknowledges it, via handleContinueAfterRecovery.
-  const [pendingRecoveryLogin, setPendingRecoveryLogin] = useState<{ token: string; termsAccepted: boolean } | null>(null);
 
   // Recovery form state — shared field names across both methods where
   // they overlap (username, new password) to keep this simple.
@@ -65,11 +58,10 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
       .finally(() => setTermsLoading(false));
   }, [mode]);
 
-  // Shared by both login paths (normal + 2FA) below — the terms gate
-  // applies identically to either. `token` is stored via setSession
-  // immediately either way (acceptTerms below needs an authenticated
-  // session to call), but onLoggedIn() — the actual entry into the
-  // rest of the app — only fires once terms_accepted is true.
+  // `token` is stored via setSession immediately (acceptTerms below
+  // needs an authenticated session to call), but onLoggedIn() — the
+  // actual entry into the rest of the app — only fires once
+  // terms_accepted is true.
   function completeLogin(token: string, termsAccepted: boolean) {
     setSession(token, businessId);
     if (termsAccepted) {
@@ -126,11 +118,6 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     setLoading(true);
     try {
       const result = await login(username, password, businessId);
-      if (result.requires_2fa) {
-        setTempToken(result.temp_token);
-        setMode('2fa');
-        return;
-      }
       completeLogin(result.token, result.terms_accepted);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not reach the server');
@@ -139,41 +126,9 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     }
   }
 
-  async function handleTwoFaSubmit(e: FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
-    try {
-      const result = useRecoveryCode
-        ? await login2fa(tempToken, { recoveryCode: twoFaCode })
-        : await login2fa(tempToken, { code: twoFaCode });
-      if (result.recovery_used) {
-        // Don't complete the login silently — 2FA just got disabled on
-        // this account as a side effect, and the user needs to know
-        // that before we move on, not discover it later.
-        setPendingRecoveryLogin({ token: result.token, termsAccepted: result.terms_accepted });
-        setMode('2fa-recovery-notice');
-        return;
-      }
-      completeLogin(result.token, result.terms_accepted);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : (useRecoveryCode ? 'Could not verify recovery code' : 'Could not verify code'));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function handleContinueAfterRecovery() {
-    if (pendingRecoveryLogin) {
-      completeLogin(pendingRecoveryLogin.token, pendingRecoveryLogin.termsAccepted);
-      setPendingRecoveryLogin(null);
-    }
-  }
-
   function resetRecoveryFields() {
     setRecoverUsername(''); setAnswer1(''); setAnswer2(''); setAdminCode('');
     setNewPassword(''); setConfirmNewPassword(''); setError(null);
-    setTempToken(''); setTwoFaCode(''); setUseRecoveryCode(false); setPendingRecoveryLogin(null);
     setFetchedQuestions(null); setQuestionsLoading(false);
   }
 
@@ -246,7 +201,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
           )}
           <div>
             <div style={styles.eyebrow}>{branding.name || 'SME Pro'}</div>
-            <h1 style={{ margin: 0 }}>{mode === 'login' ? 'Sign in' : mode === '2fa' ? 'Verify your identity' : mode === 'terms' ? 'Terms & Conditions' : 'Reset your password'}</h1>
+            <h1 style={{ margin: 0 }}>{mode === 'login' ? 'Sign in' : mode === 'terms' ? 'Terms & Conditions' : 'Reset your password'}</h1>
             {branding.slogan && mode === 'login' && (
               <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', fontStyle: 'italic', marginTop: '0.15rem' }}>{branding.slogan}</div>
             )}
@@ -283,65 +238,6 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
               Forgot your password?
             </button>
           </form>
-        )}
-
-        {mode === '2fa' && (
-          <form onSubmit={handleTwoFaSubmit} style={styles.form}>
-            <div style={styles.hint}>
-              {useRecoveryCode
-                ? 'Enter one of the 8-character recovery codes you saved when you set up 2FA.'
-                : 'Enter the 6-digit code from your authenticator app.'}
-            </div>
-            <div>
-              <label htmlFor="totp">{useRecoveryCode ? 'Recovery code' : 'Authentication code'}</label>
-              <input
-                id="totp"
-                className="mono"
-                value={twoFaCode}
-                onChange={(e) => setTwoFaCode(e.target.value)}
-                required
-                autoFocus
-                inputMode={useRecoveryCode ? 'text' : 'numeric'}
-                maxLength={8}
-                style={styles.input}
-              />
-            </div>
-
-            {error && <div style={styles.error}>{error}</div>}
-
-            <button type="submit" className="btn btn-stamp" disabled={loading} style={{ width: '100%', justifyContent: 'center' }}>
-              {loading ? 'Verifying…' : 'Verify'}
-            </button>
-            <button
-              type="button"
-              onClick={() => { setUseRecoveryCode(!useRecoveryCode); setTwoFaCode(''); setError(null); }}
-              style={styles.linkBtn}
-            >
-              {useRecoveryCode ? 'Use your authenticator app instead' : "Lost your device? Use a recovery code"}
-            </button>
-            <button type="button" onClick={() => switchMode('login')} style={styles.linkBtn}>
-              Back to sign in
-            </button>
-          </form>
-        )}
-
-        {mode === '2fa-recovery-notice' && (
-          <div style={styles.form}>
-            <div style={styles.hint}>
-              You're signed in — but using that recovery code has turned
-              off two-factor authentication on your account, and it
-              can't be un-used. We'd recommend heading to Settings to
-              re-enable 2FA with your authenticator app once you're in.
-            </div>
-            <button
-              type="button"
-              className="btn btn-stamp"
-              onClick={handleContinueAfterRecovery}
-              style={{ width: '100%', justifyContent: 'center' }}
-            >
-              Continue
-            </button>
-          </div>
         )}
 
         {mode === 'terms' && (

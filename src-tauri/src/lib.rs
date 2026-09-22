@@ -23,7 +23,8 @@ pub mod http_api;
 // Not gated to target_os = "android" specifically because this
 // codebase has no iOS build at all (no mobile-ios.sh, no ios/ target
 // anywhere) — "not desktop" already means "Android" in practice
-// throughout this file (see e.g. get_lan_address below), and this
+// throughout this file (see e.g. the `#[cfg(not(desktop))]` builder in
+// `run()` below), and this
 // module follows that same established convention rather than adding
 // a third platform split nothing else here has.
 #[cfg(not(desktop))]
@@ -31,7 +32,6 @@ pub mod installer;
 pub mod invoice;
 pub mod module;
 pub mod money;
-pub mod network_mode;
 pub mod onboarding;
 pub mod pos;
 pub mod profit;
@@ -48,11 +48,9 @@ pub mod security;
 pub mod stock_health;
 pub mod stock_movement;
 pub mod stock_take;
-pub mod tax;
 #[cfg(test)]
 mod tests;
 pub mod terms;
-pub mod totp;
 
 /// Where the bundled `modules/*.json` files actually live at runtime.
 /// Resolved ONCE at startup (see `run()` below) via Tauri's own
@@ -152,36 +150,6 @@ pub mod rollback;
 pub mod settings;
 pub mod users;
 pub mod xlsx_export;
-
-/// The frontend needs to know this device's network mode BEFORE it can
-/// make its first HTTP call at all (see main.tsx) — a client device's
-/// entire API base URL depends on it (see api.ts's setApiBase). That's
-/// a genuine chicken-and-egg problem for an app that otherwise talks
-/// to its backend purely over HTTP (see http_api.rs's own doc
-/// comments): there's no HTTP server to ask yet when a client device
-/// hasn't even started one. Tauri's IPC bridge is the one channel that
-/// works regardless — these three are this app's first-ever
-/// `#[tauri::command]`s, deliberately kept to exactly the bootstrap
-/// question "how should this device even reach its data," nothing more.
-#[tauri::command]
-fn get_network_mode(app: tauri::AppHandle) -> Result<network_mode::NetworkModeConfig, String> {
-    use tauri::Manager;
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    Ok(network_mode::load(&dir))
-}
-
-#[tauri::command]
-fn set_network_mode(app: tauri::AppHandle, mode: String, host_address: Option<String>) -> Result<(), String> {
-    use tauri::Manager;
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let config = network_mode::NetworkModeConfig { mode, host_address };
-    network_mode::save(&dir, &config).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn get_lan_address() -> Option<String> {
-    network_mode::local_lan_ip()
-}
 
 /// Installs one specific past release the Owner picked via
 /// `rollback::list_releases`/`check_rollback_target`. This command's
@@ -301,10 +269,10 @@ async fn rollback_to_manifest(app: tauri::AppHandle, token: String, tag: String)
 /// item, and doc comments (`///`) don't count as that item. A previous
 /// version of this file had three `#[tauri::command]` functions'
 /// worth of doc comments and attributes sitting between this attribute
-/// and `run()`, which silently attached the mobile entry point to
-/// `get_network_mode` instead — a real compile error on Android
-/// (`mobile_entry_point` requires a zero-argument function;
-/// `get_network_mode` takes one), caught by a real Android CI build
+/// and `run()`, which silently attached the mobile entry point to the
+/// first of those commands instead — a real compile error on Android
+/// (`mobile_entry_point` requires a zero-argument function; that
+/// command took an argument), caught by a real Android CI build
 /// after every desktop platform had already compiled and passed
 /// cleanly, since desktop builds never evaluate this `cfg_attr` at
 /// all (`mobile` is false there).
@@ -362,21 +330,11 @@ pub fn run() {
                 let _ = window.unminimize();
             }
         }))
-        .invoke_handler(tauri::generate_handler![
-            get_network_mode,
-            set_network_mode,
-            get_lan_address,
-            rollback_to_manifest
-        ]);
+        .invoke_handler(tauri::generate_handler![rollback_to_manifest]);
     #[cfg(not(desktop))]
     let builder = tauri::Builder::default()
         .plugin(installer::init())
-        .invoke_handler(tauri::generate_handler![
-            get_network_mode,
-            set_network_mode,
-            get_lan_address,
-            installer::install_apk
-        ]);
+        .invoke_handler(tauri::generate_handler![installer::install_apk]);
 
     // Self-updating via tauri-plugin-updater only makes sense on
     // desktop — that plugin has no Android/iOS implementation.
@@ -429,25 +387,6 @@ pub fn run() {
                 .map_err(|e| format!("could not resolve the app data directory: {e}"))?;
             std::fs::create_dir_all(&app_data_dir)
                 .map_err(|e| format!("could not create the app data directory: {e}"))?;
-
-            // Network mode (see network_mode.rs) decides everything
-            // from here on. Reading it this early, before the database
-            // is even opened, is what makes "client" mode possible at
-            // all — a client device genuinely has no local database
-            // and never starts a local server; it exists purely to
-            // point the frontend (via api.ts's setApiBase, driven by
-            // the get_network_mode Tauri command above) at some OTHER
-            // device's server instead. Anything that isn't "client"
-            // falls through to the exact same startup every install
-            // has always had — a missing or corrupt config file reads
-            // back as "standalone" (see network_mode::load's own doc
-            // comment on why that's the safe default), so an install
-            // that has never touched Admin → Network is completely
-            // unaffected by any of this existing.
-            let net_config = network_mode::load(&app_data_dir);
-            if net_config.mode == "client" {
-                return Ok(());
-            }
 
             let db_path = app_data_dir.join("erp.db").to_string_lossy().to_string();
 
@@ -518,20 +457,10 @@ pub fn run() {
                 }
             }
 
-            // "host" binds to every network interface (0.0.0.0) so
-            // other devices on the same WiFi can reach this one — see
-            // network_mode.rs's module doc comment for the full
-            // standalone/host/client picture. Anything other than
-            // "host" (i.e. "standalone", and any unrecognized value —
-            // fails safe toward the more restrictive option) keeps the
-            // original 127.0.0.1-only binding every install has always
-            // had. Both are 'static string literals, which is what
-            // start_server_platform's signature requires — this is
-            // choosing between two fixed addresses, not building one
-            // at runtime, so there's no lifetime issue picking between
-            // them here.
-            let bind_addr: &'static str = if net_config.mode == "host" { "0.0.0.0:8080" } else { "127.0.0.1:8080" };
-            crate::android_service::start_server_platform(conn, bind_addr, &app_data_dir);
+            // Loopback only — the API is never reachable from another
+            // device. (`start_server_platform` takes `&'static str`,
+            // which this literal satisfies.)
+            crate::android_service::start_server_platform(conn, "127.0.0.1:8080", &app_data_dir);
 
             Ok(())
         })

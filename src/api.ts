@@ -1,22 +1,7 @@
-// A `let`, not a `const` — this is a live ES-module binding, so every
-// file that does `import { API_BASE } from '../api'` sees the updated
-// value automatically the moment `setApiBase` below reassigns it, with
-// no getter function needed. That matters here specifically: this
-// device might be a LAN "client" pointed at a different device
-// entirely (see network.ts / Admin → Network), and every request in
-// the whole app — not just the ones that already went through this
-// file's own `request()` helper — needs to follow that, or switching
-// modes would silently leave some features still talking to
-// 127.0.0.1 while others correctly follow the host.
-export let API_BASE = 'http://127.0.0.1:8080';
-export function setApiBase(url: string) {
-  API_BASE = url.trim().replace(/\/+$/, '');
-}
-
-export function apiBaseForHost(address: string): string {
-  const trimmed = address.trim().replace(/\/+$/, '');
-  return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-}
+// The backend only ever binds to loopback (see lib.rs's setup()) — a
+// plain constant, not a live binding, since there's no longer a "point
+// this app at a different device" mode to switch it at runtime.
+export const API_BASE = 'http://127.0.0.1:8080';
 
 // Branding paths come from the backend's filesystem and are Windows paths
 // in the desktop build. Only the filename belongs in the public uploads URL.
@@ -80,14 +65,12 @@ async function request(path: string, options: RequestInit = {}, needsBusinessId 
   // Windows, WebKit elsewhere) is a different HTTP stack per platform
   // than a regular desktop browser, with its own historically
   // inconsistent record on respecting cache-control for the local
-  // fetch() calls this app makes against its own 127.0.0.1 server —
-  // and this app also supports pointing at a REMOTE host over LAN
-  // (see API_BASE above), adding a real network path with its own
-  // potential caching layers in between. A unique URL per request
-  // can't be served from a stale cache entry no matter which layer in
-  // that chain didn't honor the header — it doesn't rely on anyone's
-  // policy being followed correctly. Harmless on the backend: its own
-  // router matches routes by splitting the URL on '?' before looking
+  // fetch() calls this app makes against its own 127.0.0.1 server. A
+  // unique URL per request can't be served from a stale cache entry
+  // no matter whether that header was honored — it doesn't rely on
+  // anyone's policy being followed correctly. Harmless on the
+  // backend: its own router matches routes by splitting the URL on
+  // '?' before looking
   // at the path (see http_api.rs's query_params/route dispatch), so
   // an extra query param it never looks for is silently ignored.
   const method = (options.method ?? 'GET').toUpperCase();
@@ -174,29 +157,9 @@ export const login = (username: string, password: string, biz: string) =>
     return res.json();
   });
 
-// `opts.recoveryCode`, when set, is sent instead of a TOTP code — for
-// a user who has lost their authenticator device. The backend always
-// disables 2FA on a successful recovery-code login (proving you lost
-// the device is what "spends" the code), and reports that back as
-// `recovery_used: true` so the caller can warn the user to re-enroll.
-export const login2fa = (tempToken: string, opts: { code?: string; recoveryCode?: string }) =>
-  fetch(`${API_BASE}/auth/2fa/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(
-      opts.recoveryCode
-        ? { temp_token: tempToken, recovery_code: opts.recoveryCode }
-        : { temp_token: tempToken, code: opts.code }
-    ),
-  }).then(async (res) => {
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new ApiError(res.status, body.error || (opts.recoveryCode ? 'Recovery code verification failed' : '2FA verification failed'));
-    return body;
-  });
-
 // ---- Terms & Conditions — see terms.rs. `getTerms` is public (a user
 // must be able to read the terms before logging in), `acceptTerms`
-// requires the session `login`/`login2fa` just issued. ----
+// requires the session `login` just issued. ----
 export const getTerms = (): Promise<{ version: string; text: string }> => request('/terms');
 export const acceptTerms = (): Promise<{ version: string; accepted: boolean }> =>
   request('/terms/accept', { method: 'POST' });
@@ -859,27 +822,6 @@ export const convertCurrency = (from: string, to: string, amountCents: number): 
   request('/currency/convert', { method: 'POST', body: JSON.stringify({ from, to, amount: amountCents }) });
 export const refreshCurrencyRates = (base: string) =>
   request(`/currency/refresh?base=${encodeURIComponent(base)}`, { method: 'POST' });
-
-// ---- Tax rates by category, and a compute preview — see tax.rs.
-// IMPORTANT, and surfaced in the UI, not just here: these per-category
-// rates are NOT currently applied by real checkouts or invoices —
-// pos.rs and invoice.rs both use a single flat business-wide tax rate
-// instead. This is a genuine gap in the backend itself, not a UI
-// limitation — see the note shown in TaxRatesTab.
-export interface TaxRate { category: string; rate: number }
-export const listTaxRates = (): Promise<{ rates: TaxRate[] }> => request('/tax/rates');
-export const setTaxRate = (category: string, rate: number) =>
-  request('/tax/rates', { method: 'POST', body: JSON.stringify({ category, rate }) });
-export interface TaxComputeItem { category: string; unit_price: number; quantity: number }
-export interface TaxComputeResult {
-  subtotal: number;
-  total_tax: number;
-  total: number;
-  tax_inclusive: boolean;
-  lines: { category: string; rate: number; taxable_amount: number; tax_amount: number }[];
-}
-export const computeTax = (items: TaxComputeItem[], taxInclusive: boolean): Promise<TaxComputeResult> =>
-  request('/tax/compute', { method: 'POST', body: JSON.stringify({ items, tax_inclusive: taxInclusive }) });
 
 // ---- Settings (theme, locale, etc.) ----
 export const getSettings = () => request('/settings');

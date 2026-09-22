@@ -43,13 +43,13 @@ pub fn login(conn: &Connection, business_id: &str, username: &str, password: &st
     create_session(conn, &user_id, business_id)
 }
 
-/// Verifies username/password ONLY — does not issue a session. This is
-/// the first step of the two-step 2FA login flow (see totp.rs): the
-/// caller checks whether the resolved user has 2FA enabled before
-/// deciding whether to call `create_session` immediately or hold off
-/// until a TOTP code is also verified. Kept separate from `login()`
-/// (which still does both steps for the common non-2FA case) so nothing
-/// about existing non-2FA behavior changes.
+/// Verifies username/password ONLY — does not issue a session. Kept
+/// separate from `login()` because the `/auth/login` HTTP route (see
+/// http_api.rs) needs the resolved `user_id` on its own, before a
+/// session exists, to write the `login_success`/`login_failed` audit
+/// entry against the right user either way. `login()` still does both
+/// steps in one call for callers (tests, `demo_seed`) that don't need
+/// that intermediate value.
 ///
 /// Rate-limiting for this lives one layer up, in http_api.rs's
 /// `auth_limiter` (see rate_limit.rs) — this function itself does no
@@ -72,9 +72,8 @@ pub fn verify_password(conn: &Connection, business_id: &str, username: &str, pas
 }
 
 /// Issues a new session token for an already-authenticated user. Split
-/// out from `login()` so the 2FA flow can create the real session only
-/// after both factors are verified, instead of ever holding a live
-/// session for a login that hasn't finished.
+/// out from `login()` for the same reason as `verify_password` above —
+/// see its doc comment.
 pub fn create_session(conn: &Connection, user_id: &str, business_id: &str) -> Result<String> {
     let token = Uuid::new_v4().to_string();
     conn.execute(
