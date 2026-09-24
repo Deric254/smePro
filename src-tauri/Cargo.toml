@@ -99,7 +99,6 @@ rust_xlsxwriter = "=0.77.0"
 ureq = { version = "=2.10.1", default-features = false, features = ["json", "tls"] }
 base64 = "=0.22.1"
 sha2 = "=0.10.8"
-hex = "=0.4.3"
 regex = "1.10"
 calamine = { version = "=0.26.1", features = ["dates"] }
 
