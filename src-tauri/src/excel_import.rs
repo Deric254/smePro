@@ -256,17 +256,10 @@ pub fn import(
     // silently succeed as an unauthorized overwrite.
     crate::rbac::require(conn, user_id, &module.id, "create")?;
 
-    // THE ACTUAL FIX for a real bug: a module with no unique field
-    // (purchasing has none until a po_number exists) treats every row
-    // of every import as a brand-new record, since there is no key to
-    // match an existing one against. Re-uploading the identical file a
-    // second time silently created a second full set of records — and
-    // since Purchasing auto-receives whatever it creates (see the
-    // "THE ACTUAL FIX Deric asked for" block further down), that meant
-    // the same stock applied to Inventory a second, third, or fifth
-    // time from one real delivery. Hashed and checked before any row is
-    // parsed or touched, so a rejected re-upload changes nothing.
-    // db_migrations.rs's v36 has the fuller explanation.
+    // A module with no unique field (e.g. purchasing before a po_number
+    // exists) treats every row as new on re-import, with no key to
+    // match against. This hashes the file up front and rejects an exact
+    // re-upload before any row is touched — see db_migrations.rs's v36.
     let file_hash = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -1095,41 +1088,16 @@ pub fn import(
                 match crud::insert_validated_record(&tx, business_id, module, &record) {
                     Ok(new_id) => {
                         created += 1;
-                        // THE ACTUAL FIX Deric asked for: a purchase
-                        // order imported from Excel is, in every real
-                        // case this template exists for, stock that
-                        // has ALREADY arrived — the whole reason
-                        // someone is recording it now is that it's
-                        // sitting in front of them. Requiring a
-                        // separate manual "Receive" click per row
-                        // afterward (150 of them, for a 150-row
-                        // import) added a whole second pass over the
-                        // same data with zero new information in it.
-                        // So: the moment a new purchasing row is
-                        // created here, it's received immediately, in
-                        // this SAME transaction — `receive_in_tx` is
-                        // the exact mechanics `receiving::receive`
-                        // itself runs (weighted-average cost, the
-                        // Purchasing expense post, the rounding
-                        // reconciliation, all of it), just reused
-                        // directly against the transaction this import
-                        // already has open, rather than duplicating
-                        // that logic here or opening a second nested
-                        // transaction (which rusqlite can't do against
-                        // the same connection anyway). Quantity
-                        // received is always the row's own ordered
-                        // `quantity` — an Excel import has no separate
-                        // "partial delivery" column, so there's no
-                        // other number it could mean.
-                        //
-                        // Deliberately only for freshly-CREATED rows
-                        // (this `Ok(new_id)` arm), never for the
-                        // `Some(id)` update branch above: re-uploading
-                        // a spreadsheet to correct an existing order's
-                        // details is not a second delivery of the same
-                        // stock, and `received` is already a
-                        // permanently blocked field on that path (see
-                        // crud.rs) for exactly that reason.
+                        // Purchasing rows imported from Excel represent
+                        // stock that has already arrived, so each new
+                        // row is received immediately in this same
+                        // transaction via receive_in_tx (the same
+                        // mechanics receiving::receive uses). Quantity
+                        // received is the row's own `quantity` — no
+                        // partial-delivery column exists in the import.
+                        // Only for freshly-created rows, never on
+                        // update — `received` is a blocked field on
+                        // that path (see crud.rs).
                         if module.id == "purchasing" {
                             let quantity = record.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0);
                             let purchasing_table = module.table_name();

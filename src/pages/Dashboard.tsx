@@ -5,12 +5,8 @@ import type { DebtSummary, GrossProfitSummary, BusinessPulse, ReportHighlights }
 import { formatMoney } from '../lib/money';
 import BusinessPulseCard from '../components/BusinessPulseCard';
 
-// Lazy-loaded specifically because it's the only thing in the app that
-// pulls in recharts, which roughly doubles the JS bundle on its own —
-// no reason every screen (login, POS, admin) should pay that cost just
-// because the Dashboard exists somewhere in the app. This chunk only
-// downloads the moment someone actually views the dashboard with sales
-// data, not before.
+// Lazy-loaded: it's the only place recharts is used, and that roughly
+// doubles the bundle size — only downloaded when Dashboard is viewed.
 const AnalyticsSection = lazy(() => import('../components/AnalyticsSection'));
 
 function initials(name: string) {
@@ -19,13 +15,9 @@ function initials(name: string) {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
-// Whole numbers stay whole (unit counts, headcounts). A metric whose
-// measure field is "money" is ALWAYS integer cents — see
-// src/lib/money.ts — and must go through formatMoney regardless of
-// whether the raw number happens to look whole (e.g. exactly $4,500.00
-// is stored as 450000, which is itself an integer, so "is this value
-// a whole number" can never be used to detect money — only the
-// field's own declared type can).
+// Money fields are always integer cents (see lib/money.ts) regardless
+// of whether the value looks whole — only the field's declared type
+// (isMoney) can be used to decide, never the number's own shape.
 function formatMetricValue(value: number, isMoney: boolean, currency: string): string {
   if (isMoney) return formatMoney(value, currency);
   return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -254,17 +246,9 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
   );
 }
 
-// Gross profit KPI — same "one card, distilled to the single figure
-// that matters most" shape as DebtStandingKpi just below.
-//
-// THE ACTUAL FIX Deric asked for: this used to hide behind a single
-// boolean (`has_cost_data`) that only ever warned when cost data was
-// COMPLETELY absent — a business with, say, 2 real-cost sales out of
-// 50 got no warning at all, because "some" was enough to satisfy a
-// flag that couldn't distinguish "some" from "all". Now it always
-// shows the real fraction whenever coverage isn't complete, so an
-// 87.5% margin sitting on top of 4 out of 50 real-cost sales is
-// visibly what it is, not a number that looks fully earned.
+// Gross profit KPI card. Shows the real cost-data coverage fraction
+// whenever it's incomplete (not just a boolean "some missing" flag),
+// so e.g. an 87.5% margin on 4 of 50 real-cost sales reads honestly.
 function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; currency: string; onOpen: () => void }) {
   const isProfit = data.profit_cents >= 0;
   const missingCostCount = data.sales_count - data.cost_bearing_sales_count;
@@ -307,16 +291,8 @@ function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; 
   );
 }
 
-// Answers the one question "debt standing" actually means, at a
-// glance, with no ambiguity: net position (owed to you minus what you
-// owe — positive means you're net owed money, negative means you owe
-// more than you're owed) and an unmissable overdue alarm if anything
-// has actually gone past its due date. Both numbers come straight from
-// debt_settlement::summary — real SQL SUM/COUNT over the whole table,
-// not a client-side estimate — so this is the same truthful total
-// shown on the Debt & Credit module's own summary tiles, just
-// distilled to the single figure that matters most from the
-// dashboard.
+// Net debt position (owed to business minus owed by business) plus an
+// overdue alarm, sourced from debt_settlement::summary.
 function DebtStandingKpi({ data, currency, onOpen }: { data: DebtSummary; currency: string; onOpen: () => void }) {
   const netPosition = data.owed_to_business_unpaid - data.owed_by_business_unpaid;
   const hasOverdue = data.overdue_count > 0;

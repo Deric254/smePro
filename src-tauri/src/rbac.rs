@@ -167,27 +167,14 @@ pub fn read_scope(conn: &Connection, user_id: &str, module_id: &str) -> Result<R
 
 /// What THIS signed-in user can actually see/do, as a single navigation-
 /// level summary — see api.ts's `getMyCapabilities` on the frontend for
-/// what it powers.
-///
-/// THE ACTUAL FIX Deric asked for: the sidebar used to show every
-/// enabled module, the entire Admin menu, Sell, and Stock Take
-/// unconditionally to every signed-in user, regardless of whether their
-/// role actually had any access to them at all. A Staff account with
-/// zero permissions on, say, Accounting or Refunds still saw it listed under
-/// Operations, clicked in, and hit a wall it could have been told about
-/// up front — not the "disable the button that would 403" fix
-/// ModuleView.tsx's own `my_permissions` already does WITHIN a module,
-/// but the same idea one level up, for whether to show the module (or
-/// Admin, or Sell) as a destination at all.
+/// what it powers. Lets the sidebar hide modules/Admin/Sell/Stock Take
+/// this user's role has no access to, rather than showing everything
+/// and letting a click hit a 403.
 ///
 /// Built from the exact same `rbac::is_allowed`/`require_admin_tier`
-/// every other permission check in this app already goes through — no
-/// second, parallel notion of "can this person see X" that could drift
-/// out of sync with the real one. A business whose default roles (see
-/// each module's own `default_roles` map) grant Staff broad `read`
-/// access will still SHOW broad access here — this reports what a
-/// role can actually do, it does not itself decide what a role SHOULD
-/// be able to do; narrowing that is a Roles/Permissions decision an
+/// every other permission check goes through — no second, parallel
+/// notion of "can this person see X". This reports what a role can
+/// actually do; narrowing that is a Roles/Permissions decision an
 /// Owner makes in Admin, not something this function imposes.
 #[derive(Debug, serde::Serialize)]
 pub struct MyCapabilities {
@@ -199,18 +186,10 @@ pub struct MyCapabilities {
 }
 
 pub fn my_capabilities(conn: &Connection, business_id: &str, user_id: &str) -> anyhow::Result<MyCapabilities> {
-    // THE ACTUAL FIX Deric asked for: performance. `is_allowed()` looks
-    // up this user's `role_id` fresh on every single call (it has to —
-    // it's the one choke point every OTHER caller in this app reaches
-    // with just a user_id, no role_id in hand yet), and this function
-    // used to call it 2 + (one per enabled module) times in a row for
-    // the exact same user — same role_id, refetched from `users` every
-    // time for no reason. Resolved once here instead, then checked
-    // directly against the `permissions` table (still the exact same
-    // query `is_allowed` itself runs, just without repeating the user
-    // lookup that led to it) — same result, same real permission data,
-    // fewer redundant round trips for a sidebar load that already does
-    // one query per enabled module by nature.
+    // role_id resolved once here rather than refetched by is_allowed()
+    // on every one of this function's several permission checks, then
+    // checked directly against `permissions` (same query is_allowed
+    // itself runs) — fewer redundant round trips per sidebar load.
     let role_id: String = conn
         .query_row("SELECT role_id FROM users WHERE id = ?1 AND active = 1", [user_id], |r| r.get(0))
         .map_err(|_| anyhow::anyhow!("user not found or inactive"))?;

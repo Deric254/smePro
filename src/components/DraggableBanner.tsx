@@ -1,26 +1,10 @@
 import { useRef, useState } from 'react';
 
-// Shared by UpdateChecker.tsx and AndroidUpdateChecker.tsx (and any
-// future fixed-position notification banner) so "can this be dragged
-// out of the way, and dismissed" is implemented once and behaves
-// identically everywhere, rather than as two independently-maintained
-// copies that could drift apart.
-//
-// Drag is via Pointer Events (onPointerDown/Move/Up) rather than
-// separate mouse/touch handlers — one code path natively covers both
-// mouse and touch in Tauri's webview, no extra dependency needed for
-// something this small. Position is applied as a CSS `transform`
-// layered on top of whatever `style` the caller already anchors the
-// banner with (its existing `position: fixed; bottom/left/right`) —
-// so the initial placement (already correct, including the mobile
-// safe-area/tab-bar clearance in mobile.css's `.update-banner` rule)
-// is untouched until the user actually drags, at which point the
-// translate offset moves it away from that anchor. Dragging does NOT
-// persist across a remount (a fresh check() call, or navigating away
-// and back) — same session-only scope as the dismiss state below, and
-// for the same reason: an update notification is inherently
-// temporary, not something worth the complexity of persisting a
-// screen position for.
+// Shared draggable/dismissible notification banner (used by
+// UpdateChecker.tsx and AndroidUpdateChecker.tsx). Drag uses Pointer
+// Events for unified mouse/touch support, applied as a CSS transform
+// on top of the caller's own fixed position. Drag position and
+// dismissal don't persist across remounts — session-only.
 export default function DraggableBanner({
   className,
   style,

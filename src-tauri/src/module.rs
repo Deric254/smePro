@@ -327,44 +327,14 @@ impl ModuleDef {
         );
         tx.execute(&index_sql, [])?;
 
-        // Inventory-specific: `excel_import::find_inventory_id_by_name`
-        // (used on every single row of a Purchasing import, to resolve
-        // `item_name` to the actual Inventory record) looks records up
-        // by `LOWER(TRIM(name))`, and nothing above gives it anything
-        // to use — the business-scoped unique index only exists for
-        // fields actually marked `unique` (sku), and name isn't one of
-        // those. Without this, that lookup is a full scan of every
-        // inventory row this business has, for every single row of
-        // every Purchasing import — fine at a handful of SKUs,
-        // genuinely slow at the thousands a real catalog reaches.
-        //
-        // THE ACTUAL FIX Deric asked for: this index used to just be a
-        // plain (non-unique) lookup accelerator — it made the lookup
-        // above fast, but did nothing to stop two DIFFERENT SKUs from
-        // sharing the same item name, which is real, confusing
-        // duplication a shop owner never wants (two "Rice" rows with
-        // different SKUs is a data-entry mistake almost every time, not
-        // a legitimate distinct product). Making it a genuine UNIQUE
-        // index — on the exact same `LOWER(TRIM(name))` expression the
-        // lookup query above already uses, so it still serves that
-        // lookup exactly as fast as the plain index did — closes that
-        // gap at the one place it can never be forgotten or bypassed:
-        // the database itself, covering create, update, AND import
-        // alike, not just whichever single code path remembered to
-        // check first.
-        //
-        // `WHERE deleted_at IS NULL` is deliberate, not decorative: a
-        // soft-deleted "Rice" must not permanently block a real, later
-        // "Rice" from ever being added again — every other query
-        // against this table already treats a soft-deleted row as
-        // gone (see idx_..._business above, crud::list, etc.); this
-        // index holds itself to the same standard. Deliberately
-        // case- and whitespace-insensitive (`LOWER(TRIM(...))`) for
-        // the same reason `find_inventory_id_by_name` already resolves
-        // names that way: "Rice", "rice", and " Rice " are the same
-        // real-world item to a cashier typing fast, and treating them
-        // as three different products would be its own kind of
-        // inconsistency.
+        // Inventory-specific: find_inventory_id_by_name (used on every
+        // row of a Purchasing import) looks records up by
+        // LOWER(TRIM(name)); this UNIQUE index accelerates that lookup
+        // and also prevents two different SKUs sharing the same item
+        // name (a data-entry mistake almost every time). Case/whitespace-
+        // insensitive and scoped to `WHERE deleted_at IS NULL`, matching
+        // how find_inventory_id_by_name and every other query already
+        // treat a soft-deleted row as gone.
         if self.id == "inventory" {
             tx.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_module_inventory_unique_name

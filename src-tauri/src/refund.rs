@@ -133,41 +133,19 @@ pub fn process_refund(conn: &mut Connection, business_id: &str, user_id: &str, r
         ));
     }
 
-    // THE ACTUAL FIX Deric asked for: a refund used to only reverse
-    // `revenue` (see the comment just below) — it never touched
-    // `cost_at_sale` at all, so a fully refunded sale still counted
-    // its full original cost against gross profit (see profit.rs)
-    // with none of the matching revenue left to offset it, permanently
-    // understating profit by exactly the cost of every refunded sale
-    // forever. Whether cost gets reversed at all depends on `restock`,
-    // deliberately, because the two cases are economically different
-    // facts, not the same event with a checkbox: if the item comes
-    // BACK onto the shelf (restock), the business hasn't actually lost
-    // anything — reversing both revenue and cost nets this sale to
-    // zero, as if it never happened. If it does NOT come back (damaged,
-    // expired, given away), the business already paid for that unit
-    // and it's gone — cost_at_sale is left exactly as it was, so the
-    // reversed revenue with no matching cost reversal shows up as a
-    // real loss on that sale, which is the true economic outcome, not
-    // a bug to paper over.
+    // Whether cost gets reversed depends on `restock`: if the item
+    // comes back onto the shelf, reversing both revenue and cost nets
+    // this sale to zero. If it doesn't (damaged, expired, given away),
+    // cost_at_sale is left as-is, so the reversed revenue with no
+    // matching cost reversal correctly shows as a real loss.
     //
-    // THE BUG THIS FIXES: the proportional math below needs the sale's
-    // ORIGINAL cost_at_sale — fixed, from the moment it was sold — but
-    // `current_cost_at_sale` just fetched above is whatever's left
-    // AFTER any earlier refunds on this sale have already decremented
-    // it (see the UPDATE further down, the same one every refund call
-    // runs). Using that shrinking, already-reduced number as if it
-    // were the fixed original meant every refund after the first
-    // computed its "share" against a smaller and smaller base, so
-    // three partial refunds of the same sale reversed LESS than the
-    // real total cost, stranding real money in `cost_at_sale` forever
-    // (verified: a 3-unit, 3000-cent sale refunded one unit at a time
-    // reversed 1000, then 333, then 334 — 1667 total, not 3000). The
-    // original is always recoverable exactly, though, because it's an
-    // invariant that never breaks: original = whatever's currently
-    // left + whatever's already been given back. `already_refunded_cost`
-    // is computed the same "sum of every refund already recorded"
-    // way `already_refunded` (the quantity) above already is.
+    // The proportional math below needs the sale's ORIGINAL
+    // cost_at_sale, not `current_cost_at_sale` (already decremented by
+    // any earlier refunds) — recovered as current + already_refunded_cost,
+    // an invariant that always holds. Using the shrinking current value
+    // directly would make each successive partial refund reverse less
+    // than its real share of cost (verified: a 3-unit sale refunded one
+    // unit at a time reversed less than the true total).
     let already_refunded_cost: i64 = tx
         .query_row(
             &format!(

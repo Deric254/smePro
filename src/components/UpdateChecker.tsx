@@ -1,10 +1,7 @@
 import { useEffect, useState } from 'react';
 import DraggableBanner from './DraggableBanner';
 
-// These imports only resolve inside the actual Tauri app (they call into
-// the Rust plugins registered in main.rs) — this component is a no-op
-// when the frontend is loaded in a plain browser during web development,
-// since `check()` will simply reject and we swallow that silently.
+// Only resolves inside the Tauri app — a no-op in a plain browser.
 export default function UpdateChecker() {
   const [available, setAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [installing, setInstalling] = useState(false);

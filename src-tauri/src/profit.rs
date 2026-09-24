@@ -36,18 +36,9 @@ pub struct GrossProfitSummary {
     /// missing comparison period.
     pub margin_pct: Option<f64>,
     pub sales_count: i64,
-    /// THE ACTUAL FIX Deric asked for: this used to be a single `bool`
-    /// — true the moment even ONE sale anywhere had real cost data,
-    /// which could make a business with, say, 2 real-cost sales out of
-    /// 50 look exactly as trustworthy as one where all 50 do. A margin
-    /// computed mostly from cost-blind sales (see db_migrations.rs's
-    /// v17 doc comment — hand-created sales, and anything sold before
-    /// this feature existed, are permanently stuck at cost_at_sale =
-    /// 0) is not a lie exactly, but it IS a number built on incomplete
-    /// information the person reading it has no way to see. This is
-    /// the real count, so the frontend can say "42 of 50 sales have
-    /// real cost data" — or, just as importantly, "2 of 50" — instead
-    /// of a flag that treats both situations identically.
+    /// Real count of sales with cost data, not a boolean — so the
+    /// frontend can show "42 of 50 sales have real cost data" instead
+    /// of a flag that can't distinguish 2-of-50 from 50-of-50.
     pub cost_bearing_sales_count: i64,
     /// All-time confirmed shrinkage cost from CLOSED stock takes only
     /// (a cancelled one wrote nothing — see stock_take.rs::cancel) —

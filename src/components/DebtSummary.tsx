@@ -3,14 +3,9 @@ import { getDebtSummary, getBusinessInfo, ApiError } from '../api';
 import type { DebtSummary as DebtSummaryData } from '../api';
 import { formatMoney } from '../lib/money';
 
-// Shown at the top of the Debt & Credit module screen (see ModuleView).
-// Deliberately its own fetch against a real backend aggregate
-// (debt_settlement::summary), not a client-side reduce over whatever
-// page of records ModuleView already has loaded — see the comment on
-// that endpoint for why: the generic record list caps at 1000 rows,
-// which would make a client-side sum quietly wrong for a business
-// with more open debt than that. "Clean truthful" numbers here means
-// numbers computed over every row, every time.
+// Own fetch against debt_settlement::summary (a real server-side
+// aggregate over every row), not a client-side reduce over ModuleView's
+// capped record list.
 export default function DebtSummaryWidget({ refreshKey }: { refreshKey: number }) {
   const [data, setData] = useState<DebtSummaryData | null>(null);
   const [error, setError] = useState<string | null>(null);

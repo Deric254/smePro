@@ -12,64 +12,21 @@ import InvoiceView from '../components/InvoiceView';
 import ReceiptView from '../components/ReceiptView';
 import DebtSummaryWidget from '../components/DebtSummary';
 
-// Some fields must only ever change through a specific, purpose-built
-// backend action — never through the generic create/edit form — because
-// that action does more than set the field: purchasing's `received`
-// flag is set atomically alongside a real inventory quantity/cost
-// update inside receiving.rs::receive(), and letting the generic form
-// touch it would silently skip all of that (receiving.rs's own doc
-// comment calls this out explicitly as the one gap its "atomic receive"
-// guarantee doesn't cover). Excluded from both create and edit — even
-// creating a purchase order as already-received would be the same
-// bypass as editing one into that state.
-//
-// debt_credit's `settled` is the same situation: settling atomically
-// posts the real cash movement to Bookkeeping inside
-// debt_settlement.rs::settle(), and the generic form touching it
-// directly would silently skip that (debt_settlement.rs's own doc
-// comment calls out the same limitation receiving.rs does — this
-// hides the field from the intended path, it can't forbid a raw API
-// call from a role that still holds "update").
-//
-// inventory's `quantity` is the same category of field, but stricter
-// still: every inventory item starts at zero stock, full stop, on
-// BOTH create and edit — sell (pos.rs), receive (receiving.rs), refund
-// (refund.rs), and repack (repack.rs) are the only paths that should
-// ever move a stock level, each with its own oversell/floor
-// protections a plain field edit doesn't have. Unlike
-// `received`/`settled`, this one doesn't even need the `isEditing`
-// distinction — there's no legitimate caller-supplied opening count on
-// this form; stock enters the system exactly one way, by Purchasing
-// receiving an order. The real enforcement lives server-side in
-// crud.rs (`create()` forces quantity to 0; `is_single_record_edit_blocked_field`
-// blocks it on update); hiding the input here is just so nobody sees a
-// field they can't actually change.
-//
-// purchasing's `po_number` joins this list for the same "generated,
-// never hand-typed" reason as `received`, just generated at creation
-// instead of by a separate action — see crud.rs::create's purchasing
-// block and db_migrations.rs's v14 for the full story of why this
-// field exists at all (it's what fixed same-supplier Excel imports
-// silently colliding with each other).
+// Fields that are only ever set by a dedicated backend action, not the
+// generic form: purchasing's `received`/`po_number` (receiving.rs),
+// debt_credit's `settled`/`payment_method`/`source_order_id`/`entry_number`
+// (debt_settlement.rs), and inventory's `quantity` (stock only moves via
+// sell/receive/refund/repack). Enforced server-side too — this just
+// keeps the form from showing a field the user can't actually edit.
 function isActionManagedField(moduleId: string, fieldName: string): boolean {
   return (moduleId === 'purchasing' && (fieldName === 'received' || fieldName === 'po_number'))
     || (moduleId === 'debt_credit' && fieldName === 'settled')
     || (moduleId === 'debt_credit' && (fieldName === 'payment_method' || fieldName === 'source_order_id'))
-    // debt_credit's `entry_number` joins this list for the same
-    // "generated, never hand-typed" reason as purchasing's `po_number`
-    // just above — see crud.rs::create's debt_credit block and
-    // db_migrations.rs's v16 for why this field exists at all (it's
-    // what makes an Excel re-import of Debt & Credit able to safely
-    // match an existing row without matching on `party_name`, which
-    // one party can legitimately have many separate entries under).
     || (moduleId === 'debt_credit' && fieldName === 'entry_number')
     || (moduleId === 'inventory' && fieldName === 'quantity');
 }
 
-// Reads a File into a bare base64 string (no "data:...;base64," prefix
-// — the backend expects raw base64, same contract as the logo upload
-// in BusinessBranding.tsx, just pulled out into a reusable helper
-// here since this is the second place that needs it).
+// Reads a File into a bare base64 string (no data URL prefix).
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -87,11 +44,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [records, setRecords] = useState<Record_[]>([]);
   const [search, setSearch] = useState('');
   const [showForm, setShowForm] = useState(false);
-  // null = the form is creating a new record; a string = the form is
-  // editing that existing record's id. Same form, same FieldInput
-  // rendering, same money-field text-buffer discipline either way —
-  // only the submit handler's target endpoint (createRecord vs
-  // updateRecord) and the initial formValues differ.
+  // null = creating a new record; a string = editing that record's id.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showExcelImport, setShowExcelImport] = useState(false);
   const [excelKeyField, setExcelKeyField] = useState('');
@@ -133,23 +86,8 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
   const [formValues, setFormValues] = useState<Record<string, string>>({});
-  // THE ACTUAL FIX Deric asked for: an edit used to always resend
-  // EVERY field's current value, not just the one(s) actually
-  // changed — startEdit seeds the whole form from the record, and the
-  // old submit loop sent every non-empty field regardless of whether
-  // it matched what startEdit seeded it with. That's not a real PATCH,
-  // it's a full resubmission that happens to skip blank boxes — and
-  // for inventory specifically, it meant editing a completely
-  // unrelated field (the name, a typo, anything) silently re-sent the
-  // item's existing unit_cost and unit_price too, which re-triggers
-  // crud::update's own "never sell at a loss" check against whatever
-  // was ALREADY stored — so an item that had ended up with a price
-  // below its cost for any reason became permanently un-editable for
-  // ANY reason, with an error about a price the person never touched.
-  // Tracked here as the values startEdit seeded the form with, so
-  // submit can compare against them and only send what actually
-  // changed — the same real-PATCH behavior the backend (crud::update)
-  // already provides, that this form just wasn't taking advantage of.
+  // Values startEdit seeded the form with, so submit sends only what
+  // actually changed (a real PATCH, not a full resubmission).
   const [originalFormValues, setOriginalFormValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'records' | 'report'>('records');
@@ -157,10 +95,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [units, setUnits] = useState<Unit[]>([]);
   const [currencies, setCurrencies] = useState<Currency[]>([]);
   const [inventoryItems, setInventoryItems] = useState<Record_[]>([]);
-  // The business's own currency — needed everywhere a "money"-typed
-  // field is parsed (form input) or displayed (records table), so
-  // decimal places are correct for e.g. JPY (0dp) or KWD (3dp), not
-  // just assumed to be USD's 2dp. See src/lib/money.ts.
+  // Needed for correct money-field decimal places (e.g. JPY 0dp, KWD 3dp).
   const [businessCurrency, setBusinessCurrency] = useState('USD');
 
   useEffect(() => {
@@ -177,15 +112,9 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       .then(([s, r]) => {
         setSchema(s);
         setRecords(r.records);
-        // "repack" lives on inventory.json's own actions list, so when
-        // this page IS Inventory, its own schema already has the
-        // answer — no separate fetch needed (unlike "receive", which
-        // is checked from the Purchasing page and needs Inventory's
-        // permissions fetched separately, since that's a different
-        // module's schema than the one loaded here).
+        // Inventory's own schema already lists "repack" permissions.
         setInventoryCanRepack(moduleId === 'inventory' && s.my_permissions.includes('repack'));
-        // Only fetch the reference-data lists this module actually needs
-        // — a module with no unit/currency fields shouldn't pay for it.
+        // Only fetch the reference-data lists this module actually needs.
         const needsUnits = s.fields.some((f: FieldDef) => f.type === 'unit');
         const needsCurrencies = s.fields.some((f: FieldDef) => f.type === 'currency');
         if (needsUnits) listUnits().then((res) => setUnits(res.units)).catch(() => {});
@@ -1156,10 +1085,7 @@ function formatCell(v: unknown, fieldType?: string, currency?: string) {
   return String(v);
 }
 
-// Invoice records table only: combines customer + customer_email +
-// customer_phone into one cell. All three values are still exactly what's
-// stored on the record — nothing is dropped, just laid out compactly
-// (name on top, contact details smaller underneath, each only if present).
+// Combines customer/email/phone into one cell for the invoice table.
 function renderInvoiceCustomerCell(r: Record_) {
   const name = r.customer;
   const email = typeof r.customer_email === 'string' ? r.customer_email : '';
@@ -1173,9 +1099,7 @@ function renderInvoiceCustomerCell(r: Record_) {
   );
 }
 
-// Invoice records table only: combines tax_rate + tax_amount into one
-// cell ("rate% · amount"). Same underlying values as the two separate
-// fields would have shown — just one column instead of two.
+// Combines tax_rate + tax_amount into one "rate% · amount" cell.
 function renderInvoiceTaxCell(r: Record_, currency: string) {
   const rate = typeof r.tax_rate === 'number' ? r.tax_rate : null;
   const amount = typeof r.tax_amount === 'number' ? r.tax_amount : null;
@@ -1404,11 +1328,8 @@ export function ReportPanel({ moduleId, schema, canExport, businessCurrency }: {
   );
 }
 
-// Editing state keeps the unit price as raw typed text — not
-// integer cents directly — so the input never fights the user's
-// cursor by reformatting mid-keystroke (the same bug class fixed in
-// PointOfSale.tsx's refund amount field). Only converted to actual
-// integer cents (via money.ts's strict parser) at submit time.
+// unit_price_text is raw typed text, converted to integer cents at
+// submit time — keeps the input from reformatting mid-keystroke.
 interface EditableInvoiceItem {
   description: string;
   quantity: number;

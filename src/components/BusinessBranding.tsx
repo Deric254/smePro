@@ -6,11 +6,7 @@ export default function BusinessBranding() {
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
-  // The flat tax rate applied to every real sale and invoice — see
-  // pos.rs / invoice.rs. This used to have no working way to be set
-  // anywhere in the app at all: the backend function that updates it
-  // existed but had zero HTTP route calling it, so every business was
-  // permanently stuck at the schema's 0.0 default.
+  // Flat tax rate applied to every sale/invoice — see pos.rs / invoice.rs.
   const [taxRateText, setTaxRateText] = useState('0');
   const [taxSaving, setTaxSaving] = useState(false);
   const [taxMessage, setTaxMessage] = useState('');

@@ -5,9 +5,8 @@ import CustomerPicker from '../components/CustomerPicker';
 import type { Record_ } from '../types';
 import { formatMoney, parseMoneyInput, sumMoney, multiplyMoney } from '../lib/money';
 
-// unit_price, revenue, line_total, subtotal below are all integer
-// minor units (cents) — see src/lib/money.ts. Never do float math on
-// them directly; go through formatMoney/parseMoneyInput/sumMoney.
+// unit_price, revenue, line_total, subtotal are integer minor units
+// (cents) — see lib/money.ts. Never do float math directly on them.
 interface CartLine {
   inventory_record_id: string;
   name: string;

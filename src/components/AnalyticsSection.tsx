@@ -9,26 +9,16 @@ import {
   PieChart, Pie, Cell,
 } from 'recharts';
 
-// A small, fixed palette reused across every chart on this page —
-// deliberately not derived from data (e.g. hashing a label to a
-// color), so the same payment method or item always reads the same
-// color if it happens to appear in more than one chart.
+// Fixed palette (not derived from data) so a given payment method or
+// item reads the same color across every chart.
 const PALETTE = ['var(--stamp)', '#7c9885', '#c98a4b', '#5b7b9a', '#a15c5c', '#8a7ca8'];
 
 type Bucket = 'day' | 'week' | 'month';
 
-// The backend hands back sortable-but-opaque bucket keys ("2026-08-11"
-// for a day, "2026-08" for a month, and — since report.rs's week
-// bucket is now the Monday date that starts the week — "2026-08-11"
-// for a week too, meaning day/week share a raw format and only differ
-// in how they're displayed here). This turns those into what someone
-// actually wants to read on a chart axis: "Aug 11", "Aug 2026", or a
-// real week range like "Aug 11–17".
-//
-// Parsed with an explicit UTC midnight timestamp and formatted back
-// out in UTC deliberately — these are calendar dates with no time
-// component, and letting the browser's local timezone touch them
-// could shift a date backward by a day for anyone west of UTC.
+// Turns the backend's raw bucket key ("2026-08-11" or "2026-08") into
+// a readable chart-axis label ("Aug 11", "Aug 2026", "Aug 11–17").
+// Parsed/formatted in UTC since these are calendar dates with no time
+// component.
 function formatBucketLabel(bucket: Bucket, label: string): string {
   if (bucket === 'month') {
     const [year, month] = label.split('-').map(Number);
@@ -39,9 +29,7 @@ function formatBucketLabel(bucket: Bucket, label: string): string {
     const start = new Date(`${label}T00:00:00Z`);
     const end = new Date(start.getTime() + 6 * 86_400_000);
     const startStr = start.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-    // Only repeat the month name if the week actually crosses into a
-    // new one ("Aug 29 – Sep 4") — otherwise it's just noise ("Aug 11
-    // – Aug 17" is harder to scan at a glance than "Aug 11–17").
+    // Repeat the month name only if the week crosses into a new one.
     const endStr = start.getUTCMonth() === end.getUTCMonth()
       ? String(end.getUTCDate())
       : end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -51,12 +39,8 @@ function formatBucketLabel(bucket: Bucket, label: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
-// Deliberately the ONLY file in the app that imports recharts. Kept
-// separate on purpose — lazy-loaded from Dashboard.tsx via React.lazy
-// — because recharts alone roughly doubles the JS bundle. Every other
-// screen (login, POS, admin, module views) should stay fast and never
-// pay that cost; only someone actually looking at the sales chart
-// should trigger loading it.
+// The only file that imports recharts — lazy-loaded from Dashboard.tsx
+// so other screens don't pay for the bundle size.
 export default function AnalyticsSection() {
   const [range, setRange] = useState<DateRange>(defaultRange());
   const [revenue, setRevenue] = useState<number | null>(null);

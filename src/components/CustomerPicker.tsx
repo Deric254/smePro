@@ -3,18 +3,10 @@ import { searchCustomers, ApiError } from '../api';
 import type { CustomerMatch } from '../api';
 
 /**
- * Two plain inputs (name, phone) that ALSO show a debounced dropdown
- * of existing customers matching whatever's been typed so far — click
- * one to fill both fields from it. This is the actual fix for
- * accidental duplicate customers: normalizing phone numbers (see
- * customers.rs) reconciles near-duplicates AFTER the fact, but a
- * cashier who can see "Asha · 0712345678" already exists while typing
- * "Asha" never creates the near-duplicate in the first place.
- *
- * Selecting a suggestion doesn't lock the fields — the cashier can
- * still edit them afterward (e.g. correcting a name), which just goes
- * through the normal find-or-create matching on submit like any other
- * typed entry.
+ * Two plain inputs (name, phone) with a debounced dropdown of matching
+ * existing customers — click one to fill both fields, helping avoid
+ * accidental duplicate customers. Selecting a suggestion doesn't lock
+ * the fields; edits still go through normal find-or-create on submit.
  */
 export default function CustomerPicker({
   name,

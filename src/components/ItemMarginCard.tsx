@@ -1,10 +1,8 @@
 import type { ItemProfit } from '../api';
 import { formatMoney } from '../lib/money';
 
-// Same "real fraction, not a hidden flag" honesty as the Dashboard's
-// GrossProfitKpi — an item's margin built on partial cost data stays
-// visibly partial, per item, rather than blending into one business-
-// wide number that could look more complete than it is.
+// Per-item margin stays visibly partial when cost data is incomplete,
+// rather than blending into one business-wide number.
 export default function ItemMarginCard({ items, currency }: { items: ItemProfit[]; currency: string }) {
   if (items.length === 0) {
     return (

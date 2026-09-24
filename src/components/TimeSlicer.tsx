@@ -9,42 +9,16 @@ export interface DateRange {
 function pad(n: number) { return n.toString().padStart(2, '0'); }
 function dateStr(d: Date) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 
-// The backend stamps every record's created_at with SQLite's
-// `datetime('now')`, which is always UTC — never local time (see any
-// of the many `datetime('now')` calls across src-tauri/src/*.rs; none
-// use the 'localtime' modifier). Reports then compare these range
-// bounds against created_at as plain strings.
-//
-// The previous version of this file built those bounds from the
-// browser's LOCAL calendar date/time and sent them as-is, with no
-// timezone conversion — correct only for a browser sitting in UTC+0.
-// This app runs in Kenya (UTC+3, EAT): a sale rung up at, say,
-// 11:30pm local time is stored as "…20:30:00" UTC, already the NEXT
-// day's date once it rolls past 9pm local. Asking for "Today" sent a
-// literal local-looking string that the backend read as a UTC
-// boundary, so the last few hours of every real business day —
-// closing time, exactly when a shop does a lot of its selling — were
-// silently missing from "Today", landing under "yesterday" instead,
-// in every report, KPI, and the dashboard's own chart. Same
-// mechanism, opposite direction, at the start of each day.
-//
-// The fix: a `Date` object's own getTime() already IS the correct UTC
-// instant for whatever local moment it represents — the bug was only
-// ever in which calendar fields got read back OUT of it. Reading the
-// UTC fields instead of the local ones here converts "midnight local"
-// into the true UTC timestamp string the backend actually needs, so a
-// business day's boundary means the same real moment in time on both
-// ends, not just the same-looking digits.
+// Backend timestamps (created_at) are always UTC. These convert a
+// LOCAL calendar date/time to the correct UTC timestamp string so
+// "today" means this calendar day in the business's own timezone,
+// not UTC+0 — reading Date's UTC fields, not local ones.
 function toBackendTimestamp(d: Date): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
 
-// Both take a Date already carrying the intended LOCAL calendar day
-// (from presetRange's `today`, or applyCustom's locally-constructed
-// picks below) and pin it to that day's real local midnight /
-// 23:59:59 before converting to the UTC string the backend compares
-// against — so "today" genuinely means this calendar day in the
-// business's own timezone, start to finish.
+// Pins a Date's intended local calendar day to that day's real local
+// midnight / 23:59:59 before converting to the backend's UTC string.
 function endOfDay(d: Date) { return toBackendTimestamp(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59)); }
 function startOfDay(d: Date) { return toBackendTimestamp(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0)); }
 

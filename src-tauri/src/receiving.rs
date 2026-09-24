@@ -124,18 +124,10 @@ pub struct ReceiveRequest {
 
 /// Creates a new Purchasing order and receives it immediately, in one
 /// transaction — the on-screen "+ New" counterpart to what
-/// `excel_import::import()` already does for a bulk-imported
-/// purchasing row (see that file's own "THE ACTUAL FIX Deric asked
-/// for" comment). Before this, only the spreadsheet path skipped the
-/// separate manual "Receive" click; a purchase order typed in by hand
-/// through the ordinary form still landed unreceived, sitting at
-/// quantity 0 in Inventory until someone came back and clicked
-/// Receive on it — two different behaviors for recording the exact
-/// same real-world fact (stock that has already arrived). This closes
-/// that gap: the moment a purchasing record is created here, it's
-/// received in the same transaction, via the exact same
-/// `receive_in_tx` mechanics `receive()` below and the Excel import
-/// path both already share.
+/// `excel_import::import()` already does for a bulk-imported purchasing
+/// row. The moment a purchasing record is created here, it's received
+/// in the same transaction via the same `receive_in_tx` mechanics
+/// `receive()` below and the Excel import path both share.
 pub fn create_and_receive(
     conn: &mut Connection,
     business_id: &str,
@@ -293,22 +285,10 @@ pub(crate) fn receive_in_tx(
 
     let new_qty = current_qty + quantity_received;
 
-    // THE ACTUAL FIX Deric asked for (round two): a batch's selling
-    // price is now REQUIRED to be its own — it is never silently
-    // inherited from the item's frozen legacy `unit_price` anymore.
-    // "Its own" no longer means "must be typed again right now at the
-    // receive step", though: since v31_purchasing_unit_price, the
-    // purchase order itself carries a selling price, decided at the
-    // same moment as its cost — "I'm paying this, I will sell this,
-    // period." So the real default here is the PO's *own* declared
-    // price, not Inventory's frozen legacy field — that distinction is
-    // exactly what the original fix was protecting against, and it
-    // still holds: this is never a fallback to some OTHER record's
-    // price, only to this purchase's own. `unit_price_override` still
-    // exists for the case where today's actual delivery genuinely
-    // needs a different price than what was planned when it was
-    // ordered (a supplier price change, a manual correction) — supply
-    // it to override, omit it to just use what this PO already says.
+    // A batch's selling price defaults to the purchase order's own
+    // declared price (never Inventory's frozen legacy unit_price).
+    // unit_price_override exists for when today's actual delivery needs
+    // a different price than planned (a supplier price change).
     let batch_unit_price = unit_price_override.unwrap_or(po_unit_price);
     if batch_unit_price < 0 {
         return Err(anyhow!("price cannot be negative"));

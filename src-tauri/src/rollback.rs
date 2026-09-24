@@ -55,17 +55,10 @@ pub fn list_releases(conn: &Connection, user_id: &str) -> Result<Vec<ReleaseOpti
 
     let response = match call_result {
         Ok(r) => r,
-        // THE ACTUAL FIX Deric asked for: a bare "status code 403"
-        // conflates two genuinely different situations that need
-        // different responses from a person reading it — an
-        // unauthenticated GitHub REST API request is capped at 60/hour
-        // per IP, and GitHub returns exactly this status (403, not the
-        // more usual 429) once that's exhausted, with
-        // `X-RateLimit-Remaining: 0` on the response — versus a repo
-        // that's genuinely inaccessible for some other reason. Checked
-        // here, from the actual response headers, rather than guessed
-        // from the status code alone, so the message can say which one
-        // this actually is.
+        // 403 with X-RateLimit-Remaining: 0 means GitHub's 60/hour
+        // unauthenticated rate limit is exhausted — distinguished here
+        // from a genuinely inaccessible repo, so the message can say
+        // which one this actually is.
         Err(ureq::Error::Status(403, resp)) => {
             let remaining = resp.header("x-ratelimit-remaining");
             let reset_display = resp

@@ -1,29 +1,14 @@
 import { useEffect, useState } from 'react';
 import DraggableBanner from './DraggableBanner';
 
-// Everything in this file only does anything on Android — every other
-// platform's early-return on the platform() check makes this a no-op.
-// Desktop already has real auto-update via UpdateChecker.tsx +
-// tauri-plugin-updater, which has no Android/iOS implementation at all,
-// which is the whole reason this separate, Android-specific path
-// exists: it's built from lower-level pieces (http + fs + a custom
-// install_apk command, see installer.rs) instead of the higher-level
-// updater plugin.
+// Android-only auto-update path (desktop uses UpdateChecker.tsx +
+// tauri-plugin-updater, which has no Android support). Built on
+// http + fs + a custom install_apk command (see installer.rs).
 //
-// UNTESTED ON A REAL DEVICE — built in a sandbox with no Android SDK or
-// emulator available (see MOBILE.md / RELEASE.md for the full context).
-// The download half of this flow (fetch + writeFile) was already
-// working per real user reports. The install half used to fail every
-// time — see installer.rs's doc comment for the confirmed root cause
-// (openPath() can't hand Android's installer a raw file:// path) and
-// its fix (a small custom plugin doing the real FileProvider handoff).
-// If install_apk itself still fails, the first things to check are:
-// the FileProvider's authority in InstallerPlugin.kt actually matching
-// the app's real applicationId, and whether AndroidUpdateChecker's
-// appCacheDir() resolves to Android's internal or external cache dir
-// on this device (file_paths.xml declares both, but that assumption
-// itself was never checked against a real device — see the comment on
-// that step in mobile-android.sh).
+// Untested on a real device (no Android SDK/emulator in this sandbox
+// — see MOBILE.md/RELEASE.md). If install_apk fails, check:
+// InstallerPlugin.kt's FileProvider authority matches applicationId,
+// and whether appCacheDir() resolves to the right cache dir on-device.
 
 type ReleaseAsset = { name: string; browser_download_url: string };
 type ReleaseInfo = { tag_name: string; assets: ReleaseAsset[]; body?: string };

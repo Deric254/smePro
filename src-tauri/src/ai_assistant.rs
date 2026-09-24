@@ -4,28 +4,15 @@ use serde_json::{json, Value};
 
 use crate::ai_context;
 
-/// THE ACTUAL FIX Deric asked for: the previous default and fallback
-/// were the exact same model id, so once NVIDIA retired it (the
-/// screenshot this fix was written against shows the API's own 410
-/// "end of life" response), EVERY business on default settings had no
-/// working fallback at all — `model != fallback_model` was always
-/// false, so the fallback branch in `ask_nvidia_nim` below could never
-/// actually run.
-///
-/// IMPORTANT — NEEDS VERIFICATION: these two model ids are this app's
-/// best information as of its last update, not a live-checked current
-/// catalog — NVIDIA periodically retires models the same way it just
-/// retired the previous default, and I have no way to confirm from
-/// here whether either of these two is still live today. If the AI
-/// assistant still doesn't work after this fix, the real, current
-/// answer is whatever's listed at https://build.nvidia.com/models
-/// right now — set it under Admin → AI Settings, which always
-/// overrides both of these without needing a code change.
+/// Default and fallback models must be genuinely different (not just
+/// different versions) so one vendor retiring a model doesn't take
+/// down the fallback too. Providers periodically retire models — if
+/// the AI assistant stops working, check https://build.nvidia.com/models
+/// and set the current model under Admin → AI Settings (overrides both
+/// without a code change).
 const DEFAULT_NVIDIA_MODEL: &str = "meta/llama-3.1-70b-instruct";
-/// Deliberately a different model FROM A DIFFERENT VENDOR than the
-/// default above, not just a different Llama version — reduces the
-/// odds that whatever event retires one also takes down the other at
-/// the same time.
+/// Different vendor than the default above, not just a different Llama
+/// version — reduces the odds both go down from the same event.
 const FALLBACK_NVIDIA_MODEL: &str = "mistralai/mixtral-8x7b-instruct-v0.1";
 
 /// Which AI backend to call. NVIDIA NIM is the default because it's

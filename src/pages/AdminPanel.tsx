@@ -41,14 +41,8 @@ export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'movements', label: 'Stock Movements' },
 ];
 
-// Navigation into a specific admin section now lives entirely in the
-// sidebar (a collapsible "Admin" group, the same pattern as
-// "Operations" — see Sidebar.tsx), not in a horizontal tab-strip
-// crammed at the top of this page. That strip used to wrap across
-// many rows on a phone screen before any actual content was visible
-// — genuinely "no space left for navigation" on mobile, which is
-// exactly the problem this removes. `tab` is now fully controlled by
-// whatever the sidebar has selected.
+// Navigation is controlled by the sidebar's Admin group (Sidebar.tsx),
+// not a tab-strip on this page.
 export default function AdminPanel({ tab, onModulesChanged }: { tab: Tab; onModulesChanged?: () => void }) {
   return (
     <div>
@@ -820,17 +814,9 @@ function SettingsTab() {
         setUpdateStatus('none');
       }
     } catch (err) {
-      // THE ACTUAL FIX Deric asked for: this used to be a bare `catch
-      // {}` that discarded whatever the updater plugin actually threw
-      // and always showed the same generic "no connection to the
-      // update server" message — indistinguishable from a real network
-      // outage whether the true cause was a dropped connection, a 404
-      // because no release has ever actually been published yet (see
-      // the release workflow's own "publish-release" job — this is
-      // exactly the failure mode that was happening, on every version,
-      // for every user, until that job existed), a signature mismatch,
-      // or anything else. Logged to the console and kept for display
-      // below, so the real cause is never silently lost again.
+      // Logged and kept for display so the real failure cause (network,
+      // no release published yet, signature mismatch, etc.) isn't lost
+      // behind a generic message.
       const detail = err instanceof Error ? err.message : String(err);
       console.error('Update check failed:', err);
       setUpdateErrorDetail(detail);

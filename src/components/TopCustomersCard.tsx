@@ -1,10 +1,6 @@
 import { formatMoney } from '../lib/money';
 
-// No new backend route for this one — report.rs's Category dimension
-// already accepts any field on the module, and Sales already has a
-// `customer` field, so this is the same call AnalyticsSection.tsx
-// already makes for top-selling items, just grouped by customer
-// instead of item_name. Already sorted DESC server-side.
+// Uses report.rs's Category dimension grouped by customer, sorted DESC.
 export default function TopCustomersCard({ customers, currency }: { customers: { label: string; value: number }[]; currency: string }) {
   if (customers.length === 0) {
     return (

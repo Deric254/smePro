@@ -483,15 +483,10 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         let mut sale_ids: Vec<String> = Vec::with_capacity(portions.len());
 
         for portion in &portions {
-            // THE ACTUAL FIX Deric asked for: "the system must ensure
-            // no possibility of selling at a loss" — held per portion
-            // now, not per line, since each portion can carry a
-            // different price/cost (a batch's own price/cost is
-            // already guaranteed price >= cost at the point it was
-            // created or last edited — see batches::create_batch_in_tx
-            // / update_batch_price — so this is defense-in-depth here,
-            // the same role it always played for the single-price
-            // case this replaced).
+            // Never-sell-at-a-loss check, held per portion (each can
+            // carry a different price/cost) as defense-in-depth —
+            // batches::create_batch_in_tx / update_batch_price already
+            // guarantee price >= cost at creation/edit time.
             if portion.unit_price < portion.unit_cost {
                 let price_display = crate::money::format_money(portion.unit_price, &business_currency);
                 let cost_display = crate::money::format_money(portion.unit_cost, &business_currency);

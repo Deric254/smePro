@@ -2,9 +2,8 @@ import { useState } from 'react';
 import type { HourOfDayPattern } from '../api';
 import { formatMoney } from '../lib/money';
 
-// Fixed display order for the four period buckets — not alphabetical,
-// not the order the backend happens to emit rows in, but the order a
-// business day actually runs in.
+// Fixed display order matching a business day's actual flow, not
+// alphabetical or backend row order.
 const PERIOD_ORDER = ['Morning', 'Afternoon', 'Evening', 'Night'];
 
 export default function HourOfDayCard({ items, currency }: { items: HourOfDayPattern[]; currency: string }) {

@@ -5,8 +5,7 @@ import { formatBackendDateTime } from '../lib/date';
 import '../styles/receipt-print.css';
 
 // unit_price, line_total, subtotal, tax_amount, total, refunded_amount,
-// net_total below are all integer minor units (cents) — see
-// src/lib/money.ts.
+// net_total are integer minor units (cents) — see lib/money.ts.
 interface ReceiptLine {
   item_name: string;
   quantity: number;

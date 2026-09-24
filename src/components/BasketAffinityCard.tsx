@@ -1,9 +1,8 @@
 import type { BasketPair } from '../api';
 import { formatMoney } from '../lib/money';
 
-// Plain, read-only list — no chart library needed for a handful of
-// item-pair rows, and keeping this out of AnalyticsSection.tsx means
-// it doesn't force recharts to load on screens that never show it.
+// Plain read-only list — kept out of AnalyticsSection.tsx so it
+// doesn't force recharts to load where it isn't needed.
 export default function BasketAffinityCard({ pairs, currency }: { pairs: BasketPair[]; currency: string }) {
   if (pairs.length === 0) {
     return (

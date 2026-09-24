@@ -1,14 +1,8 @@
 import type { SeasonalMonthPattern } from '../api';
 import { formatMoney } from '../lib/money';
 
-// THE HONESTY THIS CARD IS BUILT AROUND: a business with one good
-// December and eleven other months would otherwise show "December
-// runs 340% above average" — true of the one December on record, and
-// meaningless as a claim about December itself. years_seen is shown
-// right next to every bar for exactly that reason: a bar with
-// years_seen: 1 is one data point wearing an average's clothing, and
-// this card says so instead of hiding it behind a confident-looking
-// chart. See sales_patterns::seasonal_month_pattern's own doc comment.
+// years_seen is shown next to each bar so a single-year spike doesn't
+// read as a confident multi-year average.
 export default function SeasonalCard({ items, currency }: { items: SeasonalMonthPattern[]; currency: string }) {
   const withData = items.filter((m) => m.years_seen > 0);
   if (withData.length === 0) {

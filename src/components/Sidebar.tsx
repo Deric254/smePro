@@ -81,19 +81,10 @@ export default function Sidebar({
     onCloseMobile?.();
   }
 
-  // THE ACTUAL FIX Deric asked for: `enabledModules` used to be every
-  // module the BUSINESS has turned on, shown to every signed-in user
-  // regardless of their own role's actual access to it — a Staff
-  // account with zero permissions on Accounting still saw it listed
-  // here. Narrowed to the ones `capabilities.readable_modules` (a real
-  // `rbac::is_allowed(..., "read")` check per module, computed
-  // server-side — see api.ts's own comment on getMyCapabilities) says
-  // this specific person can actually open.
-  //
-  // `capabilities === null` — not yet loaded, or the fetch failed —
-  // means treat every gated item below as NOT permitted, not as
-  // permitted-by-default: a permission check that hasn't run yet must
-  // never fail open into showing something it hasn't actually cleared.
+  // Narrowed to modules this specific user can actually read
+  // (capabilities.readable_modules), not just modules the business has
+  // enabled. capabilities === null (not loaded / fetch failed) treats
+  // every gated item as not permitted — never fail open.
   const readableModuleIds = new Set(capabilities?.readable_modules ?? []);
   const enabledModules = modules.filter((m) => m.enabled && readableModuleIds.has(m.id));
   const inventoryEnabled = modules.some((m) => m.id === 'inventory' && m.enabled);

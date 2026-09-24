@@ -25,15 +25,8 @@ import HourOfDayCard from '../components/HourOfDayCard';
 import PeriodTrendCard from '../components/PeriodTrendCard';
 import SeasonalCard from '../components/SeasonalCard';
 
-// Same collapsible +/− pattern the per-module report list at the
-// bottom of this page already used — extended here to every section
-// on the page, not just that one. Collapsed by default, on purpose:
-// this page now holds a lot of reports, and showing all of them
-// expanded at once is exactly the cluttered view this was built to
-// avoid. `onExpand` fires once, the first time a section opens — its
-// data is fetched then, not on page load, so visiting Reports and
-// glancing at the section titles costs nothing beyond the currency
-// lookup and the module list itself.
+// Collapsed by default. onExpand fires once, on first open, so its
+// data loads lazily rather than on page load.
 function CollapsibleSection({ title, onExpand, loading, children }: {
   title: string;
   onExpand?: () => void;

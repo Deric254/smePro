@@ -1292,50 +1292,29 @@ fn v17_sales_cost_at_sale(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// THE ACTUAL FIX Deric asked for: "we can't have duplicate item name
-/// even if sku is different." Upgrades v15's plain (non-unique)
-/// `idx_module_inventory_name_lookup` into a genuine UNIQUE index on
-/// the exact same `LOWER(TRIM(name))` expression — same case- and
-/// whitespace-insensitive matching `find_inventory_id_by_name` already
-/// uses, same `WHERE deleted_at IS NULL` scoping every other query
-/// against this table already holds itself to (a soft-deleted "Rice"
-/// must not permanently block a real, later "Rice"). See
-/// module.rs::create_table's matching comment for the full reasoning;
-/// this migration exists only to give that same protection to
-/// businesses whose Inventory table was already created before this
-/// change landed — `create_table` itself only ever runs once, at the
-/// moment a module is first enabled, so an already-enabled business
-/// never sees a change made there on its own.
+/// Upgrades v15's plain `idx_module_inventory_name_lookup` into a real
+/// UNIQUE index on `LOWER(TRIM(name))` (case/whitespace-insensitive,
+/// scoped to `WHERE deleted_at IS NULL`) — for businesses whose
+/// Inventory table already existed before this rule was added to
+/// `module.rs::create_table` (which only runs for newly-enabled
+/// modules, never retroactively).
 ///
-/// The real complication, and the reason this isn't just "run the same
-/// CREATE UNIQUE INDEX everywhere": every business's inventory rows
-/// live in the SAME physical `module_inventory` table (see
-/// `business_scoped_unique_constraints`'s own doc comment on why), so
-/// this single index either succeeds for every business at once or
-/// fails for every business at once — there is no way to add it for
-/// one business without touching the others. If ANY business anywhere
-/// on this install already has two inventory items sharing a name
-/// (case/whitespace-insensitively), attempting the index would fail
-/// outright, which — run unconditionally at every app startup, as all
-/// migrations here are — would mean the app refuses to start at all
-/// for EVERY business until that one business's data is manually
-/// cleaned up. That would be a far worse outcome than the gap this
-/// migration closes, so: check for existing collisions FIRST, and only
-/// create the index if there are none. A business with no pre-existing
-/// duplicates gets the real protection immediately; if any duplicates
-/// exist anywhere, the index is skipped for now (logged below, not
-/// silently), and the app starts normally — a data problem someone
-/// needs to go clean up, not something that should be able to lock
-/// everyone out of the app the moment this update ships.
+/// All businesses share one physical `module_inventory` table, so this
+/// index either applies for everyone or fails for everyone — there's
+/// no per-business rollout. If any business anywhere already has a
+/// name collision, creating the index outright would fail and, since
+/// migrations run unconditionally at every startup, would block the
+/// app from starting for every business. So: check for collisions
+/// first, and only create the index if there are none (logged either
+/// way). A business with no duplicates gets protection immediately; if
+/// duplicates exist anywhere, the index is skipped and the app starts
+/// normally — a data problem to clean up manually, not a startup
+/// blocker.
 ///
-/// Being a normal versioned migration (`if current < 18` in `run()`
-/// above), this only ever RUNS once per install — if it's skipped here
-/// because of an existing collision, it stays skipped forever, even
-/// after that collision is fixed, since nothing re-checks a migration
-/// whose version has already been recorded as applied. Resolving the
-/// duplicate afterward does not retroactively add the protection on
-/// its own; that needs a later migration version to actually pick it
-/// back up.
+/// This is a normal versioned migration — it runs once per install. If
+/// skipped due to a collision, it stays skipped even after the
+/// collision is resolved; picking the protection back up needs a later
+/// migration version.
 fn v18_inventory_unique_name(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
 
@@ -1383,26 +1362,13 @@ fn v18_inventory_unique_name(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// THE ACTUAL FIX Deric asked for: performance, not correctness — a
-/// refund now runs TWO lookups filtered by `sale_id` (the pre-existing
-/// SUM(quantity_refunded), plus SUM(cost_reversed) added alongside
-/// gross profit tracking — see refund.rs's own doc comment), and
-/// nothing in this table was ever indexed on that column. A business
-/// with a long refund history would have every refund from here on
-/// scan its ENTIRE refund table twice, every time, to find prior
-/// refunds against one sale. See module.rs::create_table's matching
-/// comment for the full reasoning; this migration exists only to give
-/// that same index to businesses whose Refunds table was already
-/// created before this fix landed — `create_table` itself only ever
-/// runs once, at the moment a module is first enabled, so an
-/// already-enabled business never sees a change made there on its own.
-///
-/// Unlike v18's inventory-name index, this one is plain (not UNIQUE) —
-/// there is no possible pre-existing data that could make adding it
-/// fail, so unlike v18 there's no detect-and-skip dance needed here:
-/// it either applies immediately, every time, or the table simply
-/// doesn't exist yet (module never enabled on this install), in which
-/// case `create_table` will build it correctly whenever it first is.
+/// Adds an index on `sale_id` for the Refunds table, for businesses
+/// whose table already existed before this index was added to
+/// `module.rs::create_table` (which only runs for newly-enabled
+/// modules). Without it, every refund lookup by sale_id scans the
+/// whole table. Plain (not UNIQUE) index, so unlike v18 there's no
+/// collision risk — it applies immediately, or the table simply
+/// doesn't exist yet and `create_table` builds it correctly later.
 fn v19_refunds_sale_id_index(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
 
@@ -1523,25 +1489,18 @@ fn v22_backfill_sale_date(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-// THE ACTUAL FIX Deric asked for: POS discounts, integrated correctly
-// with cost-floor protection, tax, and receipts (see pos::checkout's
-// own comment on the discount math, and receipt.rs for how it's
-// surfaced). `discount_amount` is a frozen, as-sold snapshot — same
-// "historical fact, never touched by a later refund" role
-// `cost_at_sale` already plays (see v17 above) — so refund.rs's
-// existing `revenue = MAX(0, revenue - refund_amount)` math keeps
-// working completely unchanged: it already refunds out of whatever
-// `revenue` currently holds, which correctly starts as the
-// POST-discount amount.
+// Adds POS discounts (see pos::checkout for the discount math,
+// receipt.rs for how it's surfaced). `discount_amount` is a frozen
+// as-sold snapshot, same role as `cost_at_sale` (v17) — so refund.rs's
+// existing revenue-reduction math keeps working unchanged, since
+// `revenue` already starts as the post-discount amount.
 //
-// Same two-part shape as v17 above, and for the identical reason:
-// adding the column to the physical table isn't enough on its own —
-// `modules.schema_json` is a per-business snapshot taken at
-// enable-time, so an already-enabled Sales module also needs its
-// stored schema patched or crud::insert_validated_record would
-// silently drop this field on every future checkout, since its
-// column-building loop only ever walks the fields a module's OWN
-// schema says it has.
+// Same two-part shape as v17: adding the column to the table isn't
+// enough — `modules.schema_json` is a per-business snapshot taken at
+// enable-time, so an already-enabled Sales module needs its stored
+// schema patched too, or crud::insert_validated_record would silently
+// drop this field (its column-building loop only walks the module's
+// own schema).
 fn v23_sales_discount_amount(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
 
@@ -2390,37 +2349,18 @@ fn v33_rebuild(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// Adds `write_off_cost_cents` to `stock_take_items` — a plain
-/// additive column (SQLite CAN do this one in-place, no CHECK
-/// constraint involved, so no v33-style rebuild needed here) so
-/// stock_take.rs::close()'s real, correctly-computed shrinkage cost
-/// becomes a permanent, queryable fact instead of living only in the
-/// ephemeral close() response and the audit log. THE ACTUAL FIX Deric
-/// asked for: without this, a business could take a real shrinkage
-/// loss and their profit/margin reports (see profit.rs) would never
-/// reflect it — the write-off happened, but nowhere kept a number a
-/// report could later add up. Defaults to 0, so every pre-existing
-/// row (all counted before this column existed) reads as "no
-/// write-off cost on record for this item" — accurate for a surplus
-/// or an exact match, understated for a pre-existing shrinkage row,
-/// which is the best this migration alone can do: the true cost for
-/// those was computed once at close time and was never stored
-/// anywhere retrievable, not even the audit log in a
-/// migration-readable shape (see audit.rs — its payload is a free-form
-/// JSON blob per entry, not a column this migration could reliably
-/// parse back out across every past audit-log version).
+/// Adds `write_off_cost_cents` to `stock_take_items` (plain additive
+/// column, no rebuild needed) so stock_take.rs::close()'s shrinkage
+/// cost becomes a permanent, queryable fact for profit.rs reports,
+/// instead of living only in the ephemeral close() response and the
+/// free-form audit log. Defaults to 0 — accurate for a surplus or exact
+/// match, understated for pre-existing shrinkage rows (their true cost
+/// was never stored anywhere retrievable).
 fn v34_stock_take_items_write_off_cost(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    // SQLite has no `ADD COLUMN IF NOT EXISTS` — same pragma_table_info
-    // guard this file already uses elsewhere (see v17/v25) for exactly
-    // the scenario this fixes a real failure in: a test (or a real
-    // install) rolling `_schema_version` back and re-running `run()`
-    // re-applies every migration from that point forward, and a bare
-    // `ALTER TABLE ADD COLUMN` is not idempotent the way `CREATE TABLE
-    // IF NOT EXISTS` is — the second run fails outright with "duplicate
-    // column name" instead of harmlessly no-op'ing. Confirmed via
-    // money_migration_tests.rs's own v8 test, which does exactly that
-    // rollback-and-rerun and failed for real before this guard was added.
+    // No `ADD COLUMN IF NOT EXISTS` in SQLite — guard against re-running
+    // this migration (e.g. a rolled-back _schema_version) hitting
+    // "duplicate column name" on a non-idempotent ALTER TABLE.
     let already_has_column: i64 = tx.query_row(
         "SELECT count(*) FROM pragma_table_info('stock_take_items') WHERE name='write_off_cost_cents'",
         [],

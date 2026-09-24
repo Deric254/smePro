@@ -460,13 +460,9 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         target_unit_price
     };
 
-    // THE ACTUAL FIX Deric asked for (restored), same rule as
-    // crud::create()/crud::update()/receiving.rs — held per BATCH now:
-    // a repack can never produce a batch priced below what it cost to
-    // produce. Checked BEFORE either UPDATE below runs, so a rejected
-    // repack changes nothing at all — not even the source's stock —
-    // rather than leaving the source decremented (and its batches
-    // already drawn down) with no matching target batch created.
+    // Never-sell-at-a-loss, same rule as crud::create()/update()/
+    // receiving.rs, held per batch. Checked before either UPDATE below
+    // runs, so a rejected repack changes nothing at all.
     if new_batch_unit_price < new_batch_unit_cost {
         let business_currency: String = tx
             .query_row("SELECT currency FROM businesses WHERE id = ?1", params![business_id], |r| r.get(0))
