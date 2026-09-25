@@ -420,6 +420,22 @@ export interface ItemProfit {
 export const getProfitByItem = (limit = 20): Promise<{ items: ItemProfit[] }> =>
   request(`/sales/profit-by-item?limit=${limit}`);
 
+// Category-level margin — same fields/semantics as GrossProfitSummary,
+// just one row per Inventory category ("Uncategorized" for a sale
+// whose item_name matches no current Inventory item). See
+// profit::by_category. Requires both Sales and Inventory enabled.
+export interface CategoryProfit {
+  category: string;
+  revenue_cents: number;
+  cost_cents: number;
+  profit_cents: number;
+  margin_pct: number | null;
+  sales_count: number;
+  cost_bearing_sales_count: number;
+}
+export const getProfitByCategory = (): Promise<{ categories: CategoryProfit[] }> =>
+  request('/sales/profit-by-category');
+
 // Debtor aging (30/60/90) — see debt_settlement::aging_buckets.
 export interface DebtAgingSummary {
   bucket_1_30_amount: number;

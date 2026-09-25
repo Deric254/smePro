@@ -492,13 +492,16 @@ fn test_crud_create_forces_zero_even_when_quantity_is_omitted() {
 }
 
 #[test]
-fn test_crud_create_forces_sales_cost_at_sale_to_zero() {
-    // Same "starts at a forced, correct baseline" rule as inventory's
-    // quantity above — a hand-created (or raw-POSTed) sales record was
-    // never rung up through pos.rs::checkout(), so there's no real
-    // Inventory unit_cost to snapshot for it. Whatever cost_at_sale
-    // the caller tries to supply is silently discarded, same as
-    // inventory's quantity is.
+fn test_crud_create_rejects_sales() {
+    // A "sale" created through the generic single-record form has no
+    // checkout behind it: no stock is ever consumed, no
+    // stock_movements row is ever written, and there is no real
+    // Inventory unit_cost to snapshot for cost_at_sale. Rather than
+    // silently forcing cost_at_sale to 0 (the old behavior), creation
+    // is rejected outright — every sale now has to come from
+    // pos::checkout or pos::create_service_sale, both of which insert
+    // directly via insert_validated_record_by and never call this
+    // function.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -507,12 +510,11 @@ fn test_crud_create_forces_sales_cost_at_sale_to_zero() {
     record.insert("item_name".into(), json!("Hand-entered sale"));
     record.insert("quantity".into(), json!(1));
     record.insert("revenue".into(), json!(5000));
-    record.insert("cost_at_sale".into(), json!(9999)); // must be ignored, not honored
-    let id = crate::crud::create(&conn, &biz, &uid, "sales", &record).unwrap();
+    let result = crate::crud::create(&conn, &biz, &uid, "sales", &record);
+    assert!(result.is_err(), "direct sales creation must be rejected");
 
     let list = crate::crud::list(&conn, &biz, &uid, "sales", None, 50, 0).unwrap();
-    let created = list.iter().find(|r| r["id"] == json!(id)).unwrap();
-    assert_eq!(created["cost_at_sale"], json!(0), "cost_at_sale must be forced to 0 regardless of what was supplied");
+    assert!(list.is_empty(), "a rejected create must not leave a row behind");
 }
 
 #[test]
@@ -520,7 +522,11 @@ fn test_crud_update_rejects_direct_cost_at_sale_edit_on_sales() {
     // Same rule as inventory's quantity block below: cost_at_sale is a
     // "post-action state" field, written only by checkout()/refund(),
     // never hand-editable — see crud::is_update_blocked_field's own
-    // comment on why.
+    // comment on why. Seeded via insert_validated_record (the same
+    // system-insert path checkout/service-sale/legacy data use)
+    // rather than crud::create, since crud::create now rejects
+    // "sales" outright — this test is about update's own guard, not
+    // create's.
     let mut conn = test_db();
     let biz = test_business(&mut conn);
     let (uid, _) = test_owner(&mut conn, &biz);
@@ -529,7 +535,11 @@ fn test_crud_update_rejects_direct_cost_at_sale_edit_on_sales() {
     record.insert("item_name".into(), json!("Hand-entered sale"));
     record.insert("quantity".into(), json!(1));
     record.insert("revenue".into(), json!(5000));
-    let id = crate::crud::create(&conn, &biz, &uid, "sales", &record).unwrap();
+    record.insert("cost_at_sale".into(), json!(0));
+    record.insert("discount_amount".into(), json!(0));
+    let module = crate::crud::load_module(&conn, &biz, "sales").unwrap();
+    let record_map: std::collections::HashMap<String, Value> = record.clone().into_iter().collect();
+    let id = crate::crud::insert_validated_record(&conn, &biz, &module, &record_map).unwrap();
 
     let mut body = serde_json::Map::new();
     body.insert("cost_at_sale".into(), json!(4000));

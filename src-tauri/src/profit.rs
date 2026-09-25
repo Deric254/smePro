@@ -232,3 +232,82 @@ pub fn by_item(conn: &Connection, business_id: &str, user_id: &str, limit: i64) 
 
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct CategoryProfit {
+    pub category: String,
+    pub revenue_cents: i64,
+    pub cost_cents: i64,
+    pub profit_cents: i64,
+    /// Same "undefined, not zero" rule as GrossProfitSummary::margin_pct.
+    pub margin_pct: Option<f64>,
+    pub sales_count: i64,
+    /// Same per-row meaning as GrossProfitSummary's own field, just
+    /// scoped to this one category.
+    pub cost_bearing_sales_count: i64,
+}
+
+/// "Which line of the business is actually making money" — the same
+/// revenue-minus-cost arithmetic as `by_item` above, just grouped one
+/// level higher, by Inventory's own `category` field instead of by
+/// item name.
+///
+/// Sales and Inventory are only ever linked by matching `item_name` to
+/// `name` as plain text — there is no foreign key between the two
+/// tables anywhere in this codebase (see stock_health.rs's own module
+/// doc comment, which documents this exact convention and its one
+/// limitation: a renamed item's older sales won't match under the new
+/// name). This function relies on that same convention via a LEFT
+/// JOIN, not a new one. A sale whose item_name matches no current
+/// Inventory item — a Service Sale (no inventory link at all), a
+/// discontinued or renamed item, or a category left blank — is
+/// grouped honestly under "Uncategorized" rather than silently
+/// dropped or guessed at.
+///
+/// Requires both Sales and Inventory enabled, same as `slow_movers` in
+/// stock_health.rs requires both for the same reason: without
+/// Inventory there is no `category` to group by at all.
+pub fn by_category(conn: &Connection, business_id: &str, user_id: &str) -> Result<Vec<CategoryProfit>> {
+    crate::rbac::require(conn, user_id, "sales", "read")?;
+    let sales_module = crate::crud::load_module(conn, business_id, "sales")
+        .map_err(|_| anyhow!("the Sales module isn't enabled for this business"))?;
+    let inventory_module = crate::crud::load_module(conn, business_id, "inventory")
+        .map_err(|_| anyhow!("the Inventory module isn't enabled for this business — category breakdown needs it"))?;
+    let sales_table = sales_module.table_name();
+    let inventory_table = inventory_module.table_name();
+
+    let sql = format!(
+        "SELECT COALESCE(NULLIF(TRIM(i.category), ''), 'Uncategorized') AS category,
+                COALESCE(SUM(s.revenue), 0), COALESCE(SUM(s.cost_at_sale), 0), COUNT(*),
+                COALESCE(SUM(CASE WHEN s.cost_at_sale > 0 THEN 1 ELSE 0 END), 0)
+         FROM {sales_table} s
+         LEFT JOIN {inventory_table} i
+           ON i.business_id = s.business_id AND i.name = s.item_name AND i.deleted_at IS NULL
+         WHERE s.business_id = ?1 AND s.deleted_at IS NULL
+         GROUP BY category
+         ORDER BY (COALESCE(SUM(s.revenue), 0) - COALESCE(SUM(s.cost_at_sale), 0)) DESC"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![business_id], |r| {
+        let revenue_cents: i64 = r.get(1)?;
+        let cost_cents: i64 = r.get(2)?;
+        let profit_cents = revenue_cents - cost_cents;
+        let margin_pct = if revenue_cents > 0 {
+            Some(profit_cents as f64 / revenue_cents as f64 * 100.0)
+        } else {
+            None
+        };
+        Ok(CategoryProfit {
+            category: r.get(0)?,
+            revenue_cents,
+            cost_cents,
+            profit_cents,
+            margin_pct,
+            sales_count: r.get(3)?,
+            cost_bearing_sales_count: r.get(4)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}

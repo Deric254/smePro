@@ -205,6 +205,26 @@ pub fn create(
     module_id: &str,
     body: &Map<String, Value>,
 ) -> Result<String> {
+    // A "sale" created here has no checkout behind it: no batch/legacy
+    // stock is ever consumed (Inventory.quantity never moves), no
+    // stock_movements row is ever written, and there is no real
+    // Inventory unit_cost to snapshot for cost_at_sale. That
+    // combination is exactly what was showing up as "sales with no
+    // real cost data" with no way to trace where they came from: this
+    // generic form was a second, quieter door into the Sales table,
+    // open to Owner/Manager/Staff alike, sitting right next to POS
+    // checkout and Service Sale but going through neither. Both of
+    // those already write a correct, fully-costed (and, for checkout,
+    // stock-deducted) sale via `insert_validated_record_by` directly —
+    // never through this function — so blocking `create()` here for
+    // `sales` closes the gap without touching either real sale path.
+    // excel_import.rs's own `module.id == "sales"` block closes the
+    // same door for a bulk re-upload.
+    if module_id == "sales" {
+        return Err(anyhow!(
+            "sales records can only be created through Checkout or Service Sale — direct creation is disabled so every sale keeps real cost and stock data"
+        ));
+    }
     rbac::require(conn, user_id, module_id, "create")?;
     let module = load_module(conn, business_id, module_id)?;
 
@@ -392,19 +412,6 @@ pub fn create(
         // rejects that case with its own clear "item_name is required"
         // message; duplicating that check here would just produce a
         // second, less specific error for the same problem.
-    }
-    // Same forced-baseline treatment as purchasing's `received` above,
-    // same reason: a hand-created (or raw-POSTed) sales record was
-    // never rung up through pos.rs::checkout(), so there is no real
-    // Inventory unit_cost to snapshot for it — forcing 0 here is
-    // honest about that (no cost data exists for this sale) rather
-    // than accepting whatever number a caller supplies, which would
-    // let anyone hand-fabricate a sale's margin with no connection to
-    // what was actually in stock. See crud::is_update_blocked_field
-    // for why this field can't be hand-edited afterward either, and
-    // profit.rs for what actually reads it.
-    if module_id == "sales" {
-        record.insert("cost_at_sale".to_string(), json!(0));
     }
     // Schema-driven cross-field floor (e.g. inventory's unit_price >=
     // unit_cost) — see FieldDef::min_field and

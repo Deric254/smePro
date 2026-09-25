@@ -998,6 +998,25 @@ pub fn import(
                 }
             }
             None => {
+                // Same door crud::create() now closes for the
+                // single-record form (see that function's own
+                // `if module_id == "sales"` block) — this insert path
+                // has no `Some(id)` branch to ever reach for `sales`
+                // anyway (the module declares no `unique: true` field,
+                // so `key_field_is_unique` is always false and every
+                // sales row lands here, in `None`), so every row of a
+                // sales-module spreadsheet is a brand-new, un-costed,
+                // stock-untouched row. Rejected outright, per-row, for
+                // the same reason direct creation now is: a sale only
+                // ever carries real cost and stock data when it goes
+                // through Checkout or Service Sale.
+                if module.id == "sales" {
+                    errors.push(json!({
+                        "row": row_num,
+                        "error": "sales records can only be created through Checkout or Service Sale — Excel import into Sales is disabled"
+                    }));
+                    continue;
+                }
                 // THE BUG THIS FIXES: this insert path calls
                 // insert_validated_record() directly, not
                 // crud::create() — so it never got create()'s own
@@ -1054,21 +1073,6 @@ pub fn import(
                 // through Excel instead.
                 if module.id == "purchasing" {
                     record.insert("received".to_string(), json!(false));
-                }
-                // Same fix, same reason, as crud.rs::create()'s new
-                // `if module_id == "sales"` block: this insert path
-                // skips create() entirely, so without this a
-                // spreadsheet adding new sales rows could carry
-                // whatever `cost_at_sale` was typed (or left over from
-                // a stale default-fill) straight into a "sale" that
-                // never actually went through checkout() against real
-                // Inventory stock — exactly the kind of fabricated
-                // margin `is_update_blocked_field` already refuses to
-                // let a re-import touch on an EXISTING sale. A brand-
-                // new one gets the same honest baseline: no real cost
-                // data exists for it, so it starts at 0.
-                if module.id == "sales" {
-                    record.insert("cost_at_sale".to_string(), json!(0));
                 }
                 // Same schema-driven cross-field floor crud::create()/
                 // update() enforce for the single-record form (see

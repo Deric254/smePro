@@ -105,15 +105,24 @@ fn test_gross_profit_summary_counts_cost_bearing_sales_separately_from_total() {
     checkout_one(&mut conn, &biz, &uid, &inv_id, 2);
     checkout_one(&mut conn, &biz, &uid, &inv_id, 1);
 
+    // Direct creation via crud::create is rejected for "sales" (every
+    // sale now has to come from checkout/service-sale), so a
+    // cost-blind row — the kind a restored pre-feature backup would
+    // still contain — is seeded here via insert_validated_record, the
+    // same system-insert path a restore would have used.
     let mut record = serde_json::Map::new();
     record.insert("item_name".into(), json!("Hand-entered sale"));
     record.insert("quantity".into(), json!(1));
     record.insert("revenue".into(), json!(2000));
-    crate::crud::create(&conn, &biz, &uid, "sales", &record).unwrap();
+    record.insert("cost_at_sale".into(), json!(0));
+    record.insert("discount_amount".into(), json!(0));
+    let module = crate::crud::load_module(&conn, &biz, "sales").unwrap();
+    let record_map: std::collections::HashMap<String, serde_json::Value> = record.into_iter().collect();
+    crate::crud::insert_validated_record(&conn, &biz, &module, &record_map).unwrap();
 
     let summary = crate::profit::summary(&conn, &biz, &uid).unwrap();
     assert_eq!(summary.sales_count, 3);
-    assert_eq!(summary.cost_bearing_sales_count, 2, "exactly the 2 real checkouts, not the 1 hand-created sale");
+    assert_eq!(summary.cost_bearing_sales_count, 2, "exactly the 2 real checkouts, not the 1 cost-blind row");
 }
 
 
@@ -212,10 +221,11 @@ fn test_profit_by_item_includes_per_item_shrinkage() {
 
 #[test]
 fn test_gross_profit_summary_flags_missing_historical_cost_data() {
-    // A sale hand-created directly (not through checkout()) has no
-    // real cost data behind it — cost_at_sale is forced to 0 (see
-    // crud.rs's own "if module_id == sales" block), and
-    // cost_bearing_sales_count must reflect that honestly (0, not 1)
+    // A sale with no real cost data behind it — the kind a restored
+    // pre-feature backup would still contain, seeded here via
+    // insert_validated_record since direct creation through
+    // crud::create is now rejected for "sales" entirely — must still
+    // have cost_bearing_sales_count reflect that honestly (0, not 1)
     // rather than implying a suspiciously perfect 100% margin is a
     // real result.
     let mut conn = test_db();
@@ -226,7 +236,11 @@ fn test_gross_profit_summary_flags_missing_historical_cost_data() {
     record.insert("item_name".into(), json!("Hand-entered sale"));
     record.insert("quantity".into(), json!(1));
     record.insert("revenue".into(), json!(5000));
-    crate::crud::create(&conn, &biz, &uid, "sales", &record).unwrap();
+    record.insert("cost_at_sale".into(), json!(0));
+    record.insert("discount_amount".into(), json!(0));
+    let module = crate::crud::load_module(&conn, &biz, "sales").unwrap();
+    let record_map: std::collections::HashMap<String, serde_json::Value> = record.into_iter().collect();
+    crate::crud::insert_validated_record(&conn, &biz, &module, &record_map).unwrap();
 
     let summary = crate::profit::summary(&conn, &biz, &uid).unwrap();
     assert_eq!(summary.revenue_cents, 5000);

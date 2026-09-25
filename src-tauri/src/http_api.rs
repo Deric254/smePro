@@ -1292,6 +1292,19 @@ fn route(
         };
     }
 
+    // ---- Category-level margin: /sales/profit-by-category — same
+    // computation as profit-summary above, grouped by Inventory's own
+    // `category` field instead of collapsed to one row or split by
+    // item. See profit::by_category. Reports-gated, same reasoning as
+    // profit-summary above.
+    if parts.as_slice() == ["sales", "profit-by-category"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        return match crate::profit::by_category(conn, &business_id, &user_id) {
+            Ok(categories) => ApiResponse::Json(200, json!({"categories": categories})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
     // ---- Refund rate by item: /sales/refund-rate?limit= — see
     // refund_analysis.rs. Requires read on both Sales and Refunds, AND
     // (see rbac::require_reports_access) Reports access — this is a

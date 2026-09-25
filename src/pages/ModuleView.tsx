@@ -556,6 +556,20 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // scoped to moduleId === 'invoice' only, so every other module's table
   // (and this module's own create/edit form, which still lists every
   // field via schema.fields directly) is untouched.
+  // Sales column collapse: customer_phone folds into the existing
+  // `customer` cell (same idea as invoice's customer_email/phone
+  // fold above), and discount_amount folds into the existing
+  // `unit_price` cell as "price (− discount)" — see
+  // renderSalesCustomerCell/renderSalesPriceCell below. order_id and
+  // source_batch_id are dropped from the table entirely, same
+  // reasoning as source_order_id just above: real UUIDs meaningful to
+  // the system's own cross-references (refund.rs, receipt.rs), not to
+  // an owner glancing down a list of sales — still exported in full
+  // via "Export to Excel" for anyone who does need them. No field is
+  // dropped from the data or from this module's own create/edit form,
+  // which still lists every field via schema.fields directly — this
+  // is a records-table display choice only, the same scope the
+  // invoice collapse above is limited to.
   const columns = useMemo(
     () =>
       schema?.fields
@@ -563,7 +577,8 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         .filter(
           (n) =>
             n !== 'source_order_id' &&
-            !(moduleId === 'invoice' && (n === 'items_json' || n === 'customer_email' || n === 'customer_phone' || n === 'tax_rate'))
+            !(moduleId === 'invoice' && (n === 'items_json' || n === 'customer_email' || n === 'customer_phone' || n === 'tax_rate')) &&
+            !(moduleId === 'sales' && (n === 'customer_phone' || n === 'discount_amount' || n === 'order_id' || n === 'source_batch_id'))
         ) ?? [],
     [schema, moduleId]
   );
@@ -619,14 +634,23 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
               {canExport && <button className="btn btn-outline" onClick={() => exportModule(moduleId)}>Export to Excel</button>}
-              {canCreate && moduleId !== 'invoice' && (
+              {/* Sales has no generic "+ New" or "Import from Excel" —
+                  every sale has to carry real cost and stock data, and
+                  the only two paths that produce that are Checkout and
+                  Service Sale (see the "Sell" tab), neither of which
+                  is this page. This isn't just hidden here: the server
+                  itself rejects a direct sales create or import (see
+                  crud::create's and excel_import's own `if module_id
+                  == "sales"` guards) — hiding the button is only the
+                  UI half of that, not the actual boundary. */}
+              {canCreate && moduleId !== 'invoice' && moduleId !== 'sales' && (
                 <button className="btn btn-outline" onClick={() => { setShowExcelImport(true); setExcelResult(null); setExcelError(null); setExcelFile(null); setTemplateStatus(null); }}>
                   Import from Excel
                 </button>
               )}
               {moduleId === 'invoice' ? (
                 canCreate && <button className="btn btn-stamp" onClick={() => setShowInvoiceForm((v) => !v)}>{showInvoiceForm ? 'Cancel' : '+ New invoice'}</button>
-              ) : (
+              ) : moduleId === 'sales' ? null : (
                 <>
                   {canCreate && (
                     <button className="btn btn-stamp" onClick={() => (showForm ? cancelForm() : setShowForm(true))}>
@@ -729,6 +753,10 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                           ? renderInvoiceCustomerCell(r)
                           : moduleId === 'invoice' && c === 'tax_amount'
                           ? renderInvoiceTaxCell(r, businessCurrency)
+                          : moduleId === 'sales' && c === 'customer'
+                          ? renderSalesCustomerCell(r)
+                          : moduleId === 'sales' && c === 'unit_price'
+                          ? renderSalesPriceCell(r, businessCurrency)
                           : formatCell(r[c], schema!.fields.find((f) => f.name === c)?.type, businessCurrency)}
                       </td>
                     ))}
@@ -1096,6 +1124,34 @@ function renderInvoiceCustomerCell(r: Record_) {
       <div>{name === null || name === undefined || name === '' ? <span style={{ color: 'var(--ink-faint)' }}>—</span> : String(name)}</div>
       {contact && <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>{contact}</div>}
     </div>
+  );
+}
+
+// Same fold as renderInvoiceCustomerCell above, for the Sales table:
+// customer_phone has no separate column of its own, it sits under the
+// customer's name instead.
+function renderSalesCustomerCell(r: Record_) {
+  const name = r.customer;
+  const phone = typeof r.customer_phone === 'string' ? r.customer_phone : '';
+  return (
+    <div>
+      <div>{name === null || name === undefined || name === '' ? <span style={{ color: 'var(--ink-faint)' }}>—</span> : String(name)}</div>
+      {phone && <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>{phone}</div>}
+    </div>
+  );
+}
+
+// Combines unit_price + discount_amount into one "price (− discount)"
+// cell — same idea as renderInvoiceTaxCell below, just for Sales.
+function renderSalesPriceCell(r: Record_, currency: string) {
+  const price = typeof r.unit_price === 'number' ? r.unit_price : null;
+  const discount = typeof r.discount_amount === 'number' ? r.discount_amount : 0;
+  if (price === null) return <span style={{ color: 'var(--ink-faint)' }}>—</span>;
+  return (
+    <span>
+      {formatMoney(price, currency)}
+      {discount > 0 && <span style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}> (− {formatMoney(discount, currency)})</span>}
+    </span>
   );
 }
 
