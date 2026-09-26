@@ -1,6 +1,17 @@
 import type { BusinessPulse } from '../api';
 import { formatMoney } from '../lib/money';
 
+/**
+ * The "how is my business doing" readout — see business_pulse.rs's own
+ * doc comment on why every number here is real, computed arithmetic
+ * from actual sales/inventory history, never something narrated from
+ * memory. Originally only rendered under an AI chat answer; now also
+ * used standalone on the Dashboard (via GET /ai/pulse) so the owner
+ * sees it without having to open the AI panel and ask a question
+ * first. Deliberately one component with one set of styles for both
+ * call sites — the numbers are identical, so the presentation should
+ * never accidentally diverge between them.
+ */
 export default function BusinessPulseCard({ pulse, compact = false }: { pulse: BusinessPulse; compact?: boolean }) {
   if (!pulse.has_data) {
     return (
@@ -45,6 +56,12 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: '0.35rem', padding: '0.55rem 0.7rem', background: 'var(--paper)',
     border: '1px solid var(--paper-line)', borderRadius: 6, fontSize: '0.78rem', maxWidth: '85%',
   },
+  // Same visual language as the chat-panel card, sized for sitting in
+  // its own full-width "card" wrapper on the Dashboard (see
+  // Dashboard.tsx) instead of a narrow chat bubble — no maxWidth
+  // clamp, and the outer .card class already supplies the border,
+  // background and padding there, so this stays unpadded/unbordered
+  // to avoid a double frame.
   cardCompact: {
     fontSize: '0.82rem',
   },

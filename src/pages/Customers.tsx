@@ -13,6 +13,11 @@ export default function Customers() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [currency, setCurrency] = useState('USD');
+  // Keyed by customer id — only repeat customers (2+ purchases) ever
+  // appear here, see customers::repeat_purchase_risk. Best-effort:
+  // if this fails to load, the Status column just falls back to
+  // New/Repeat with no Overdue flag, same as any other optional card
+  // elsewhere in this app degrading quietly on a failed fetch.
   const [risk, setRisk] = useState<Map<string, RepeatCustomerRisk>>(new Map());
 
   useEffect(() => {

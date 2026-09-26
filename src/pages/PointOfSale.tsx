@@ -5,6 +5,8 @@ import CustomerPicker from '../components/CustomerPicker';
 import type { Record_ } from '../types';
 import { formatMoney, parseMoneyInput, sumMoney, multiplyMoney } from '../lib/money';
 
+// unit_price, revenue, line_total, subtotal are integer minor units
+// (cents) — see lib/money.ts. Never do float math directly on them.
 interface CartLine {
   inventory_record_id: string;
   name: string;
@@ -39,6 +41,10 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   const [discountPct, setDiscountPct] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Integer cents everywhere below — see src/lib/money.ts. Fetched
+  // once so every formatMoney/parseMoneyInput call in this screen
+  // uses the business's actual currency (decimal places, not just the
+  // symbol) instead of assuming USD's 2dp.
   const [currency, setCurrency] = useState('USD');
   const [showBrandingNudge, setShowBrandingNudge] = useState(false);
   const [receipt, setReceipt] = useState<{
@@ -46,9 +52,16 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
     items: { name: string; sku: string; quantity: number; unit_price: number; line_total: number; discount_amount?: number; remaining_stock: number }[];
   } | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
+  // Cashier's own restocking awareness — see pos::low_stock_items.
+  // Fetched once, best-effort: if this role can't sell (shouldn't be
+  // possible for anyone reaching this screen) or Inventory isn't
+  // enabled, this just stays empty and the badge below never renders
+  // — same fail-quiet pattern as every other best-effort fetch in
+  // this app.
   const [lowStock, setLowStock] = useState<{ name: string; quantity: number; reorder_level: number }[]>([]);
   const [showLowStock, setShowLowStock] = useState(false);
 
+  // ---- Refund flow state ----
   const [orderIdInput, setOrderIdInput] = useState('');
   const [orderLookup, setOrderLookup] = useState<{ order_id: string; subtotal: number; items: OrderLookupItem[] } | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
@@ -59,6 +72,14 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   const [refundReason, setRefundReason] = useState('');
   const [refundRestock, setRefundRestock] = useState(true);
   const [refundError, setRefundError] = useState<string | null>(null);
+  // Client-side mirror of the server-enforced "sales:refund"
+  // permission (refund.rs::rbac::require(conn, user_id, "sales",
+  // "refund")) — the backend already rejects an unauthorized refund
+  // regardless of this, so this is purely UX: hide the option a Staff
+  // account already knows will 403, same pattern ModuleView.tsx uses
+  // for canDelete/canCreate/etc. Defaults to false (hidden) until the
+  // schema fetch below resolves, so there's no flash of a button that
+  // then has to disappear.
   const [canRefund, setCanRefund] = useState(false);
   const [refundSubmitting, setRefundSubmitting] = useState(false);
   const [refundSuccess, setRefundSuccess] = useState<string | null>(null);
@@ -82,6 +103,9 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   function startRefund(item: OrderLookupItem) {
     setRefundingSaleId(item.sale_id);
     setRefundQty(item.quantity);
+    // A sensible default -- the full line's original value -- but
+    // always editable, since a real refund isn't always full price
+    // back (a restocking fee, a partial goodwill adjustment).
     setRefundAmountText(formatMoney(item.revenue, currency));
     setRefundReason('');
     setRefundRestock(true);
@@ -108,6 +132,8 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       setRefundSuccess(`Refunded ${refundQty} unit(s), ${formatMoney(refundAmountCents, currency)} returned.`);
       setRefundingSaleId(null);
       if (refundRestock) refreshProducts(); // stock just changed — reflect it immediately, not on the next search keystroke
+      // Re-look-up the order so the screen reflects what's now
+      // actually left refundable, rather than showing stale numbers.
       const refreshed = await getOrder(orderIdInput.trim());
       setOrderLookup(refreshed as { order_id: string; subtotal: number; items: OrderLookupItem[] });
     } catch (err) {
@@ -121,6 +147,13 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
     getBusinessInfo()
       .then((b: any) => {
         if (b?.currency) setCurrency(b.currency);
+        // A one-time nudge, not a recurring nag: a business that never
+        // set a logo or slogan gets receipts that print with neither —
+        // technically correct (the receipt renders cleanly either
+        // way), but easy to mistake for a missing feature if nobody
+        // ever pointed a new business toward Admin > Business to set
+        // it up. Dismissible and remembered per-device so it never
+        // shows again once acted on or closed.
         const dismissed = localStorage.getItem('branding_nudge_dismissed') === '1';
         if (!dismissed && !b?.logo_path && !b?.slogan) setShowBrandingNudge(true);
       })
@@ -137,10 +170,24 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       .catch(() => {}); // canRefund stays false (hidden) if this fails — fail closed, not open
   }, []);
 
+  // Guards against a slow response for an OLDER product-list request
+  // overwriting the screen after a newer one has already resolved —
+  // e.g. checkout's fetch and a debounced search fetch landing back
+  // to back in the wrong order. Each call to refreshProducts stamps
+  // its own request; only the response matching the latest stamp is
+  // ever applied.
   const productsRequestRef = useRef(0);
 
+  // Holds the current checkout attempt's idempotency key (see
+  // handleCheckout and api.ts's CheckoutRequest.idempotency_key doc
+  // comment) — null means "no attempt in flight / last attempt is
+  // done," so the next call to handleCheckout generates a fresh one.
   const checkoutKeyRef = useRef<string | null>(null);
 
+  // Editing the cart after a failed or abandoned checkout attempt is a
+  // genuinely different checkout, not a retry of the old one — so the
+  // stale key is dropped here rather than reused for whatever gets
+  // rung up next.
   useEffect(() => {
     checkoutKeyRef.current = null;
   }, [cart]);
@@ -148,19 +195,49 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
   useEffect(() => {
     const timer = setTimeout(() => { refreshProducts(); }, search ? 250 : 0); // instant on initial load / cleared search, debounced while typing
     return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
+  // Stock can change from somewhere other than this screen — most
+  // commonly, a purchase getting marked "received" over on the
+  // Purchasing page — and this page has no live push/sync mechanism
+  // (no WebSocket, no polling) telling it that happened while it
+  // wasn't the active view. Ordinary in-app navigation away from POS
+  // and back already remounts this component fresh (different pages
+  // are different component types at the same spot in the tree, so
+  // React tears this one down and builds a new one — that alone
+  // re-runs the effect above from scratch). This listener is the
+  // belt to that suspenders: it also refetches whenever the window
+  // itself regains focus — switching back from another app or
+  // another window — so stock is never more than a window-switch
+  // stale, even in a scenario the remount alone wouldn't cover.
   useEffect(() => {
     function onFocus() { refreshProducts(); }
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
+  // Pulled out of the debounced useEffect above so a completed
+  // checkout (or refund) can call it directly, right after the
+  // change, instead of only ever re-running on the next keystroke in
+  // the search box. Before this, the product grid kept showing
+  // PRE-sale stock quantities until something else happened to touch
+  // `search` — ringing up the same item twice in a row could show it
+  // as still in stock when it had just sold out seconds earlier, only
+  // caught for real by the backend's own stock check at the next
+  // checkout, not reflected on screen until then.
   function refreshProducts() {
     const requestId = ++productsRequestRef.current;
     return lookupPosProducts(search || undefined)
       .then((r) => {
         if (requestId !== productsRequestRef.current) return; // a newer request already landed
+        // Highest stock first by default — the products a cashier is
+        // most likely to be selling right now, front and center,
+        // without having to search for them. A search term still
+        // takes over the ordering the backend itself returns for
+        // that search, this sort only applies to the "browse
+        // everything" no-search-term view.
         const sorted = search
           ? r.records
           : [...r.records].sort((a, b) => Number(b.quantity ?? 0) - Number(a.quantity ?? 0));
@@ -196,11 +273,18 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
 
   const subtotal = sumMoney(cart.map((c) => multiplyMoney(c.unit_price, c.quantity)));
 
+  // Enter finalizes the sale; Enter again (once the receipt is
+  // showing) starts the next one — the actual, honest version of "one
+  // key does the next thing," without pretending this can also fire a
+  // printer silently with no dialog, which isn't something a webview
+  // can do on any platform.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== 'Enter') return;
       if (mode !== 'sell') return;
       const target = e.target as HTMLElement;
+      // Typing in the product search box: Enter shouldn't hijack that
+      // into finalizing a sale mid-search.
       if (target?.tagName === 'INPUT' && target.getAttribute('placeholder') === 'Search products…') return;
 
       if (receipt) {
@@ -213,12 +297,20 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, cart, receipt, loading]);
 
   async function handleCheckout() {
     if (cart.length === 0) return;
     setError(null);
     setLoading(true);
+    // Generated once per checkout attempt and reused on every retry of
+    // THIS attempt (see api.ts's CheckoutRequest.idempotency_key doc
+    // comment) — a fresh key per call would defeat the whole point,
+    // which is why this is only created the first time and not
+    // regenerated below. Cleared by the cart-change effect whenever
+    // the cart itself changes, since editing the cart is a genuinely
+    // different checkout, not a retry of the old one.
     if (!checkoutKeyRef.current) {
       checkoutKeyRef.current = crypto.randomUUID();
     }
@@ -244,6 +336,10 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
       setDiscountPct('');
       refreshProducts(); // stock just changed — the grid should show it now, not after the next search keystroke
     } catch (err) {
+      // Deliberately NOT cleared here — a retry of this exact failed
+      // (or ambiguous, e.g. timed-out) attempt should reuse the same
+      // key, which is what makes the retry safe against having
+      // actually already succeeded server-side.
       setError(err instanceof ApiError ? err.message : 'Checkout failed');
     } finally {
       setLoading(false);
@@ -665,6 +761,25 @@ export default function PointOfSale({ onNavigateToBranding }: { onNavigateToBran
 const styles: Record<string, React.CSSProperties> = {
   productGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '0.7rem' },
   productTile: { textAlign: 'left', cursor: 'pointer' },
+  // Grid, not flexbox, for the "scrollable middle + pinned footer,
+  // capped to a max total height" job. `minmax(0, 1fr)` on the middle
+  // row is what lets it shrink below its own content's natural size
+  // instead of pushing the rows after it (the checkout button) off
+  // screen — but that only actually works when the GRID CONTAINER
+  // itself has a definite height from the start of layout. The
+  // previous version set `maxHeight` here instead of `height`, which
+  // does not give the browser a definite size to distribute — it only
+  // clamps the box's final size after content has already been
+  // measured, by which point the 1fr row has nothing bounded to shrink
+  // against. That's exactly why more cart items kept pushing the
+  // button below the screen on a real device even with this grid in
+  // place. `height` (not `maxHeight`) is the fix — same pattern
+  // already used correctly elsewhere in this app (see the AI chat
+  // panel's `height: 460` + `flex: 1` body in AiFloatingButton.tsx).
+  // On mobile this desktop-only sizing is overridden back to `auto`
+  // (see mobile.css's `.pos-cart-panel` rule) — the cart isn't a
+  // pinned side column there, it flows in the page with a
+  // sticky-bottom checkout button instead.
   cartPanel: {
     position: 'sticky', top: '1rem', display: 'grid',
     gridTemplateRows: 'minmax(0, 1fr) auto auto',

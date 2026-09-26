@@ -1,6 +1,8 @@
 import type { ItemProfit } from '../api';
 import { formatMoney } from '../lib/money';
 
+// Per-item margin stays visibly partial when cost data is incomplete,
+// rather than blending into one business-wide number.
 export default function ItemMarginCard({ items, currency }: { items: ItemProfit[]; currency: string }) {
   if (items.length === 0) {
     return (

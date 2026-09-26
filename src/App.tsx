@@ -24,14 +24,29 @@ export default function App() {
   const [needsSetup, setNeedsSetup] = useState(false);
   const [loggedIn, setLoggedIn] = useState(hasSession());
   const [modules, setModules] = useState<ModuleListItem[]>([]);
+  // What THIS signed-in user can actually see/do, not what the
+  // business has enabled overall — see Sidebar.tsx for what this
+  // gates. Starts `null` (not yet known) rather than a default of "no
+  // access to anything," so the sidebar doesn't flash every nav item
+  // away and back again on every login while this is still loading.
   const [capabilities, setCapabilities] = useState<MyCapabilities | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [businessName, setBusinessName] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
+  // Which Admin section is showing — now driven entirely by the
+  // sidebar's own collapsible "Admin" group (the same pattern as
+  // "Operations"), not an internal tab-strip inside AdminPanel
+  // itself. Defaults to 'roles', matching what AdminPanel used to
+  // default to on its own.
   const [adminTab, setAdminTab] = useState<AdminTab>('roles');
 
+  // On launch, ask the backend whether this install has ever had a
+  // business created — this is what decides between the first-run
+  // wizard and the normal login screen. Only relevant when nobody is
+  // already logged in; a returning, logged-in user skips straight past
+  // this check.
   useEffect(() => {
     if (loggedIn) { setCheckingSetup(false); return; }
     retryOnConnectionFailure(() => getSetupStatus())
@@ -44,9 +59,15 @@ export default function App() {
     try {
       const res = await retryOnConnectionFailure(() => listModules());
       setModules(res.modules);
+      // Deliberately NOT auto-selecting the first module anymore — a
+      // brand new user landing straight in an arbitrary module's raw
+      // data table, with no context on what it is or what to do, was
+      // the single biggest "directionless" complaint. `selected` stays
+      // null, which renders the Dashboard below instead.
     } catch {
       setLoadError('Could not load modules. Is the local server running?');
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -57,6 +78,10 @@ export default function App() {
         document.documentElement.dataset.theme = s.theme && s.theme !== 'ledger' ? s.theme : '';
       }).catch(() => {}); // purely cosmetic (custom theme vs the default) — not worth retrying against the startup race the other three calls above guard against
       retryOnConnectionFailure(() => getMyCapabilities()).then(setCapabilities).catch(() => {
+        // If this genuinely can't be loaded, Sidebar's own `capabilities
+        // === null` fallback (see its own comment) keeps every gated
+        // item hidden rather than guessing — a failed permission check
+        // must never fail open.
       });
     }
   }, [loggedIn, loadModules]);
@@ -65,6 +90,9 @@ export default function App() {
     try {
       await logout();
     } catch {
+      // Even if telling the server fails (e.g. it's already unreachable),
+      // still clear local state below — the user should never be stuck
+      // "logged in" on their own screen just because a network call failed.
     }
     clearSession();
     setLoggedIn(false);
@@ -148,6 +176,15 @@ export default function App() {
         {selected === '__admin__' ? (
           <AdminPanel tab={adminTab} onModulesChanged={loadModules} />
         ) : selected === '__pos__' ? (
+          // PointOfSale's checkout hard-requires every line to
+          // reference a real inventory record (see pos.rs) — it
+          // fundamentally cannot work for a business with no
+          // Inventory module enabled (services, consulting, anything
+          // without stock). ServiceSale writes to the exact same
+          // "sales" table through the plain generic create endpoint
+          // instead, with no inventory dependency, and still gets a
+          // real receipt out of it (receipt.rs only cares about the
+          // shared order_id, not how the rows were created).
           modules.some((m) => m.id === 'inventory' && m.enabled) ? (
             <PointOfSale
               onNavigateToBranding={() => {

@@ -1,6 +1,8 @@
 import type { SeasonalMonthPattern } from '../api';
 import { formatMoney } from '../lib/money';
 
+// years_seen is shown next to each bar so a single-year spike doesn't
+// read as a confident multi-year average.
 export default function SeasonalCard({ items, currency }: { items: SeasonalMonthPattern[]; currency: string }) {
   const withData = items.filter((m) => m.years_seen > 0);
   if (withData.length === 0) {

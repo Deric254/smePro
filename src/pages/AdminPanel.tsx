@@ -41,6 +41,8 @@ export const ADMIN_TABS: { id: Tab; label: string }[] = [
   { id: 'movements', label: 'Stock Movements' },
 ];
 
+// Navigation is controlled by the sidebar's Admin group (Sidebar.tsx),
+// not a tab-strip on this page.
 export default function AdminPanel({ tab, onModulesChanged }: { tab: Tab; onModulesChanged?: () => void }) {
   return (
     <div>
@@ -64,6 +66,8 @@ function ErrorBox({ error }: { error: string | null }) {
   if (!error) return null;
   return <div style={styles.error}>{error}</div>;
 }
+
+// ------------------------------------------------------------- Roles
 
 function RolesTab() {
   const [roles, setRoles] = useState<Role[]>([]);
@@ -246,6 +250,8 @@ function PermissionEditor({ role, onClose }: { role: Role; onClose: () => void }
   );
 }
 
+// ------------------------------------------------------------- Users
+
 function UsersTab() {
   const [users, setUsers] = useState<UserAccount[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
@@ -371,6 +377,8 @@ function UsersTab() {
   );
 }
 
+// ------------------------------------------------------------- Units
+
 function UnitsTab() {
   const [units, setUnits] = useState<Unit[]>([]);
   const [name, setName] = useState('');
@@ -435,6 +443,8 @@ function UnitsTab() {
   );
 }
 
+// -------------------------------------------------------- Currencies
+
 function CurrenciesTab() {
   const [currencies, setCurrencies] = useState<Currency[]>([]);
   const [code, setCode] = useState('');
@@ -442,6 +452,8 @@ function CurrenciesTab() {
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
 
+  // Exchange rates + converter — see currency.rs. Rates are cached
+  // server-side and only refreshed on request, not on every load.
   const [ratesBase, setRatesBase] = useState('USD');
   const [rates, setRates] = useState<CurrencyRate[]>([]);
   const [ratesStale, setRatesStale] = useState(false);
@@ -476,6 +488,10 @@ function CurrenciesTab() {
       await refreshCurrencyRates(ratesBase);
       loadRates(ratesBase);
     } catch (err) {
+      // require_owner on the backend means a non-owner sees a clear
+      // 403 here rather than a hidden/disabled button — simpler than
+      // duplicating the ownership check client-side for a rarely-hit
+      // permission edge case in an already admin-only tab.
       setRatesError(err instanceof ApiError ? err.message : 'Could not refresh rates');
     } finally {
       setRefreshing(false);
@@ -630,6 +646,8 @@ function CurrenciesTab() {
   );
 }
 
+// --------------------------------------------------------- Settings
+
 const THEMES = [
   { id: 'ledger', label: 'Classic (default)' },
   { id: 'dark_ledger', label: 'Dark Classic' },
@@ -657,6 +675,16 @@ function BusinessTab({ onModulesChanged }: { onModulesChanged?: () => void }) {
     try {
       await enableModule(moduleId);
       refresh();
+      // This screen's own `modules` list (above) is local to
+      // BusinessTab and refreshing it here only updates what THIS
+      // screen shows. The sidebar's "Operations" section (and the
+      // gate on whether POS itself is even reachable — see App.tsx's
+      // `modules.some(id === 'inventory' && enabled)` check) is driven
+      // by a completely separate `modules` state living in App.tsx,
+      // fetched exactly once at login and never again — so without
+      // this, enabling a module here updates the database correctly
+      // but the sidebar has no way of finding out, and looks like
+      // "add module" silently did nothing until a full reload.
       onModulesChanged?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Could not enable ${moduleId}`);
@@ -770,6 +798,10 @@ function SettingsTab() {
     try {
       const { isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) {
+        // Not a real failure — the updater plugin only exists inside
+        // the packaged desktop app. Browser and dev-preview sessions
+        // never have it, every single time, so this isn't "couldn't
+        // reach the server right now" and shouldn't share that message.
         setUpdateStatus('preview');
         return;
       }
@@ -782,6 +814,9 @@ function SettingsTab() {
         setUpdateStatus('none');
       }
     } catch (err) {
+      // Logged and kept for display so the real failure cause (network,
+      // no release published yet, signature mismatch, etc.) isn't lost
+      // behind a generic message.
       const detail = err instanceof Error ? err.message : String(err);
       console.error('Update check failed:', err);
       setUpdateErrorDetail(detail);
@@ -840,6 +875,11 @@ function SettingsTab() {
         return;
       }
       const { invoke } = await import('@tauri-apps/api/core');
+      // Sends only the token and tag, never a manifest URL: the
+      // backend command re-derives and re-verifies everything itself
+      // (Owner check + schema compatibility + manifest URL) from
+      // these two, so this call can't be replayed or spoofed with a
+      // stale or attacker-chosen URL.
       await invoke('rollback_to_manifest', { token: getToken(), tag: selectedTag });
       const { relaunch } = await import('@tauri-apps/plugin-process');
       await relaunch();
@@ -978,6 +1018,8 @@ function SettingsTab() {
   );
 }
 
+// --------------------------------------------------------------- Backup
+
 function BackupTab() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1058,6 +1100,8 @@ function BackupTab() {
       const { relaunch } = await import('@tauri-apps/plugin-process');
       await relaunch();
     } catch {
+      // Not running inside the desktop app (e.g. browser dev mode) —
+      // nothing more this can do; the message below already covers it.
     }
   }
 
@@ -1141,6 +1185,9 @@ function BackupTab() {
     </div>
   );
 }
+
+
+// ------------------------------------------------------------ Audit Log
 
 function AuditLogTab() {
   const [entries, setEntries] = useState<AuditLogEntry[]>([]);
@@ -1248,6 +1295,8 @@ function AuditLogTab() {
 }
 
 type UserAccountLike = { id: string; username: string };
+
+// --------------------------------------------------------- AI Settings
 
 const PROVIDERS = [
   { id: 'nvidia', label: 'NVIDIA NIM', free: true, url: 'https://build.nvidia.com', keyField: 'nvidia_key_set' as const },
@@ -1367,6 +1416,7 @@ function AiSettingsTab() {
   );
 }
 
+// ------------------------------------------------ Stock Movement Trace
 function StockMovementsTab() {
   const [data, setData] = useState<StockMovementResult | null>(null);
   const [users, setUsers] = useState<Record<string, string>>({});
@@ -1401,6 +1451,7 @@ function StockMovementsTab() {
       .then(setData)
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load stock movements'))
       .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [typeFilter, userFilter, from, to]);
 
   async function handleExport() {

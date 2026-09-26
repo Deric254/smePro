@@ -9,10 +9,16 @@ export interface DateRange {
 function pad(n: number) { return n.toString().padStart(2, '0'); }
 function dateStr(d: Date) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 
+// Backend timestamps (created_at) are always UTC. These convert a
+// LOCAL calendar date/time to the correct UTC timestamp string so
+// "today" means this calendar day in the business's own timezone,
+// not UTC+0 — reading Date's UTC fields, not local ones.
 function toBackendTimestamp(d: Date): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
 
+// Pins a Date's intended local calendar day to that day's real local
+// midnight / 23:59:59 before converting to the backend's UTC string.
 function endOfDay(d: Date) { return toBackendTimestamp(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59)); }
 function startOfDay(d: Date) { return toBackendTimestamp(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0)); }
 
@@ -61,6 +67,15 @@ export default function TimeSlicer({ value, onChange }: { value: DateRange; onCh
 
   function applyCustom() {
     if (!customStart || !customEnd) return;
+    // customStart/customEnd are bare "YYYY-MM-DD" strings straight off
+    // an <input type="date">. `new Date("2026-08-23")` parses that as
+    // UTC midnight, NOT local midnight — a second, independent place
+    // the same local-vs-UTC mixup could creep back in even after
+    // fixing startOfDay/endOfDay above. Parsing the digits by hand and
+    // building the Date with the local-timezone constructor instead
+    // means "2026-08-23" unambiguously means local calendar day Aug
+    // 23rd, matching what someone picking that date on a calendar
+    // actually means, regardless of the browser's own timezone offset.
     const [sy, sm, sd] = customStart.split('-').map(Number);
     const [ey, em, ed] = customEnd.split('-').map(Number);
     const start = new Date(sy, sm - 1, sd);

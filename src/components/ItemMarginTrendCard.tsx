@@ -1,6 +1,10 @@
 import type { ItemMarginTrend } from '../api';
 import { formatMoney } from '../lib/money';
 
+// "Which SKUs are secretly losers" — current 30-day window vs the 30
+// days before it, per item. See profit::by_item_trend on the backend
+// for exactly what counts as each window and why is_losing_money is
+// held to a stricter bar than margin_pct.
 export default function ItemMarginTrendCard({ items, currency }: { items: ItemMarginTrend[]; currency: string }) {
   return (
     <div className="card" style={{ marginTop: '0.9rem' }}>

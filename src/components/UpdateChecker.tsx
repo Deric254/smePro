@@ -1,10 +1,18 @@
 import { useEffect, useState } from 'react';
 import DraggableBanner from './DraggableBanner';
 
+// Only resolves inside the Tauri app — a no-op in a plain browser.
 export default function UpdateChecker() {
   const [available, setAvailable] = useState<{ version: string; body?: string } | null>(null);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Dismiss is scoped to the specific version, not "hide forever" —
+  // dismissing v1.2.3 shouldn't also silently hide a genuinely newer
+  // v1.2.4 that shows up on a later check. Session-only (a plain
+  // useState, not localStorage): re-opening the app re-runs the check
+  // effect below from scratch, which is the natural point to remind
+  // someone again if they dismissed and then forgot, without needing
+  // a separate "snooze" mechanism.
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -16,6 +24,9 @@ export default function UpdateChecker() {
           setAvailable({ version: update.version, body: update.body });
         }
       } catch {
+        // Not running inside Tauri (e.g. plain browser dev mode), or no
+        // update available / update server unreachable — none of these
+        // should interrupt normal use of the app.
       }
     })();
   }, []);
@@ -55,6 +66,12 @@ export default function UpdateChecker() {
 
 const styles: Record<string, React.CSSProperties> = {
   banner: {
+    // Base (desktop / no in-app tab bar) position. On phone widths,
+    // .update-banner in mobile.css overrides `bottom` to also clear
+    // the app's own bottom tab bar — same split as .pos-checkout-btn
+    // uses for the same reason (unconditionally adding the tab bar's
+    // height here would wrongly push this banner up on desktop, where
+    // that bar is `display: none` and takes up no space at all).
     position: 'fixed', bottom: 'calc(1.6rem + var(--safe-bottom))', left: 'calc(1.6rem + env(safe-area-inset-left))', maxWidth: 360,
     display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
     zIndex: 30, borderColor: 'var(--stamp)',

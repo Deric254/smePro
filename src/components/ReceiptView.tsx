@@ -4,6 +4,8 @@ import { formatMoney } from '../lib/money';
 import { formatBackendDateTime } from '../lib/date';
 import '../styles/receipt-print.css';
 
+// unit_price, line_total, subtotal, tax_amount, total, refunded_amount,
+// net_total are integer minor units (cents) — see lib/money.ts.
 interface ReceiptLine {
   item_name: string;
   quantity: number;
@@ -85,6 +87,11 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
 
   function shareWhatsApp() {
     const text = encodeURIComponent(receiptText());
+    // wa.me works identically whether WhatsApp is installed (opens the
+    // app directly) or not (falls back to WhatsApp Web) — no phone
+    // number needed here since the person sharing picks the recipient
+    // themselves in WhatsApp's own share sheet, same as sharing any
+    // link or text from a phone normally works.
     window.open(`https://wa.me/?text=${text}`, '_blank');
   }
 
@@ -212,6 +219,7 @@ export default function ReceiptView({ orderId, onClose }: { orderId: string; onC
   );
 }
 
+// ── Styles ──
 const overlay: React.CSSProperties = {
   position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
   display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,

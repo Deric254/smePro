@@ -1,6 +1,7 @@
 import type { PeriodTrendPoint } from '../api';
 import { formatMoney } from '../lib/money';
 
+// Renders the monthly trend section on Reports (sales_patterns::PeriodTrendPoint).
 export default function PeriodTrendCard({
   title,
   items,

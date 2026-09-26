@@ -4,12 +4,26 @@ import ReceiptView from '../components/ReceiptView';
 import CustomerPicker from '../components/CustomerPicker';
 import { formatMoney, parseMoneyInput, sumMoney } from '../lib/money';
 
+// Integer cents throughout — see src/lib/money.ts.
 interface ServiceLine {
   description: string;
   priceText: string;
   quantity: number;
 }
 
+/**
+ * "Log a sale" for businesses that don't carry stock — services,
+ * consulting, anything without an Inventory module enabled. The main
+ * Point of Sale screen fundamentally can't work here: its checkout
+ * requires every line to reference a real inventory record, and a
+ * service business has none. This goes through `pos::create_service_sale`
+ * instead of pos.rs's goods checkout — same atomicity and customer/
+ * lifetime-value tracking guarantees, minus the inventory dependency —
+ * so a service business's repeat customers show up in the Customers
+ * list exactly like a goods business's do, and a receipt works the
+ * same way (receipt.rs just queries sales by order_id, doesn't care
+ * how those rows were created).
+ */
 export default function ServiceSale() {
   const [lines, setLines] = useState<ServiceLine[]>([{ description: '', priceText: '0.00', quantity: 1 }]);
   const [customer, setCustomer] = useState('');
@@ -57,6 +71,12 @@ export default function ServiceSale() {
 
     setSubmitting(true);
     try {
+      // One atomic call — every line commits together or none do, and
+      // a customer phone here now actually creates/updates a real
+      // customer record with correct lifetime value, exactly like the
+      // goods-based checkout already did. order_id comes back from the
+      // server now (see pos::create_service_sale) instead of being
+      // generated client-side and hoped to match.
       const result = await createServiceSale({
         lines: parsed.map((item) => ({ description: item.description, unit_price: item.cents, quantity: item.quantity })),
         payment_method: paymentMethod,

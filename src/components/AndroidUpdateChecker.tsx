@@ -1,6 +1,15 @@
 import { useEffect, useState } from 'react';
 import DraggableBanner from './DraggableBanner';
 
+// Android-only auto-update path (desktop uses UpdateChecker.tsx +
+// tauri-plugin-updater, which has no Android support). Built on
+// http + fs + a custom install_apk command (see installer.rs).
+//
+// Untested on a real device (no Android SDK/emulator in this sandbox
+// — see MOBILE.md/RELEASE.md). If install_apk fails, check:
+// InstallerPlugin.kt's FileProvider authority matches applicationId,
+// and whether appCacheDir() resolves to the right cache dir on-device.
+
 type ReleaseAsset = { name: string; browser_download_url: string };
 type ReleaseInfo = { tag_name: string; assets: ReleaseAsset[]; body?: string };
 
@@ -21,6 +30,8 @@ export default function AndroidUpdateChecker() {
   const [status, setStatus] = useState<'idle' | 'downloading' | 'installing' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
+  // Same version-scoped, session-only dismiss as UpdateChecker.tsx —
+  // see that file's comment for why.
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -44,6 +55,9 @@ export default function AndroidUpdateChecker() {
           setRelease(info);
         }
       } catch {
+        // Not running inside Tauri (plain browser dev mode), offline,
+        // or the GitHub API is unreachable — none of these should
+        // interrupt normal use of the app.
       }
     })();
   }, []);
@@ -66,6 +80,10 @@ export default function AndroidUpdateChecker() {
       const res = await tauriFetch(apkAsset.browser_download_url);
       if (!res.ok || !res.body) throw new Error(`Download failed (HTTP ${res.status})`);
 
+      // Stream + report progress rather than one big buffered await —
+      // an APK is tens of MB on mobile data, a silent multi-minute
+      // freeze with no feedback is a bad experience even if it would
+      // eventually finish.
       const total = Number(res.headers.get('content-length') || 0);
       const reader = res.body.getReader();
       const chunks: Uint8Array[] = [];
@@ -87,6 +105,19 @@ export default function AndroidUpdateChecker() {
       await writeFile(apkPath, bytes);
 
       setStatus('installing');
+      // THE FIX: openPath() used to be called here, but on Android it
+      // hands the package installer a raw file:// path — Android has
+      // refused to let one app pass that to another since API 24, so
+      // this silently failed after a full, successful download (see
+      // installer.rs's doc comment for the full story, including the
+      // still-open upstream issue confirming openPath() itself can't
+      // do this). install_apk is a regular command (see lib.rs) that
+      // hands off to InstallerPlugin.kt, which does the FileProvider
+      // handoff that actually works. This is still the same point
+      // where Android takes over with its own "Update this app?"
+      // confirmation screen; that confirmation tap is a real OS
+      // security requirement for any app not installed through the
+      // Play Store, not something that can be skipped from here.
       await invoke('install_apk', { path: apkPath });
       setStatus('idle');
       setRelease(null);
@@ -123,6 +154,12 @@ export default function AndroidUpdateChecker() {
 
 const styles: Record<string, React.CSSProperties> = {
   banner: {
+    // Base (desktop / no in-app tab bar) position — see the matching
+    // comment in UpdateChecker.tsx. On phone widths, .update-banner in
+    // mobile.css overrides `bottom` to also clear the app's own bottom
+    // tab bar. This banner is Android-only (see the component name),
+    // so that phone-width override is not a hypothetical edge case —
+    // it's THE case, every time this actually renders.
     position: 'fixed', bottom: 'calc(1.6rem + var(--safe-bottom))',
     left: 'calc(1.6rem + env(safe-area-inset-left))', right: 'calc(1.6rem + env(safe-area-inset-right))', maxWidth: 420,
     display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',

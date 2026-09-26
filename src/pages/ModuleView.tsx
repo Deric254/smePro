@@ -12,6 +12,12 @@ import InvoiceView from '../components/InvoiceView';
 import ReceiptView from '../components/ReceiptView';
 import DebtSummaryWidget from '../components/DebtSummary';
 
+// Fields that are only ever set by a dedicated backend action, not the
+// generic form: purchasing's `received`/`po_number` (receiving.rs),
+// debt_credit's `settled`/`payment_method`/`source_order_id`/`entry_number`
+// (debt_settlement.rs), and inventory's `quantity` (stock only moves via
+// sell/receive/refund/repack). Enforced server-side too — this just
+// keeps the form from showing a field the user can't actually edit.
 function isActionManagedField(moduleId: string, fieldName: string): boolean {
   return (moduleId === 'purchasing' && (fieldName === 'received' || fieldName === 'po_number'))
     || (moduleId === 'debt_credit' && fieldName === 'settled')
@@ -20,6 +26,7 @@ function isActionManagedField(moduleId: string, fieldName: string): boolean {
     || (moduleId === 'inventory' && fieldName === 'quantity');
 }
 
+// Reads a File into a bare base64 string (no data URL prefix).
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -37,6 +44,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [records, setRecords] = useState<Record_[]>([]);
   const [search, setSearch] = useState('');
   const [showForm, setShowForm] = useState(false);
+  // null = creating a new record; a string = editing that record's id.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showExcelImport, setShowExcelImport] = useState(false);
   const [excelKeyField, setExcelKeyField] = useState('');
@@ -78,6 +86,8 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
   const [formValues, setFormValues] = useState<Record<string, string>>({});
+  // Values startEdit seeded the form with, so submit sends only what
+  // actually changed (a real PATCH, not a full resubmission).
   const [originalFormValues, setOriginalFormValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'records' | 'report'>('records');
@@ -85,6 +95,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [units, setUnits] = useState<Unit[]>([]);
   const [currencies, setCurrencies] = useState<Currency[]>([]);
   const [inventoryItems, setInventoryItems] = useState<Record_[]>([]);
+  // Needed for correct money-field decimal places (e.g. JPY 0dp, KWD 3dp).
   const [businessCurrency, setBusinessCurrency] = useState('USD');
 
   useEffect(() => {
@@ -101,7 +112,9 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       .then(([s, r]) => {
         setSchema(s);
         setRecords(r.records);
+        // Inventory's own schema already lists "repack" permissions.
         setInventoryCanRepack(moduleId === 'inventory' && s.my_permissions.includes('repack'));
+        // Only fetch the reference-data lists this module actually needs.
         const needsUnits = s.fields.some((f: FieldDef) => f.type === 'unit');
         const needsCurrencies = s.fields.some((f: FieldDef) => f.type === 'currency');
         if (needsUnits) listUnits().then((res) => setUnits(res.units)).catch(() => {});
@@ -111,10 +124,18 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       .finally(() => setLoading(false));
   }, [moduleId]);
 
+  // Same reasoning as PointOfSale.tsx's own focus listener: this page
+  // has no live push/sync mechanism telling it when something changed
+  // elsewhere — another module's action, or another window. Ordinary
+  // in-app navigation away and back already remounts this component
+  // fresh with a brand new `moduleId` effect run above; this covers
+  // the gap that alone doesn't: returning focus to the window while
+  // still sitting on the same module screen the whole time.
   useEffect(() => {
     function onFocus() { refreshRecords(search || undefined); }
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [moduleId, search]);
 
   useEffect(() => {
@@ -129,16 +150,37 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
   const [searching, setSearching] = useState(false);
   const [viewingInvoiceId, setViewingInvoiceId] = useState<string | null>(null);
+  // Invoices auto-generated from a POS/service sale carry the sale's
+  // own order_id in source_sale_id (see invoice::create_invoice_for_order)
+  // — this lets the Invoices tab open the exact same original receipt
+  // the till printed, so the two views can never show inconsistent
+  // figures for the same sale.
   const [viewingReceiptOrderId, setViewingReceiptOrderId] = useState<string | null>(null);
   const [showInvoiceForm, setShowInvoiceForm] = useState(false);
   const skipNextSearch = useRef(true);
 
+  // Receiving (purchasing -> inventory) and repacking (bulk -> retail
+  // units) are each their own dedicated backend action — see
+  // receiving.rs and repack.rs — not something the generic create/edit
+  // form can do, since both atomically touch a SECOND record besides
+  // the one being acted on. This page only shows the trigger buttons
+  // when the signed-in user actually holds the specific RBAC action
+  // each one requires (receiving.rs: "receive" on inventory; repack.rs:
+  // "repack" on inventory) — both live on the Inventory module's
+  // permission set regardless of which module's table you're currently
+  // viewing, which is why receiving needs its own small fetch below
+  // when you're on the Purchasing page rather than Inventory itself.
   const [inventoryCanRepack, setInventoryCanRepack] = useState(false);
 
   const [actionResult, setActionResult] = useState<string | null>(null);
 
   const [repackSourceId, setRepackSourceId] = useState<string | null>(null);
   const [repackTargetId, setRepackTargetId] = useState('');
+  // Lets the modal create the target item in the same step instead of
+  // requiring a separate trip to Inventory's own create form first —
+  // see repack.rs's module doc comment for why. 'existing' is the
+  // original behavior (repackTargetId); 'new' switches the target
+  // picker for a name + selling-price pair instead.
   const [repackTargetMode, setRepackTargetMode] = useState<'existing' | 'new'>('existing');
   const [repackNewTargetName, setRepackNewTargetName] = useState('');
   const [repackNewTargetPriceText, setRepackNewTargetPriceText] = useState('');
@@ -148,11 +190,21 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [repackError, setRepackError] = useState<string | null>(null);
   const [repackSubmitting, setRepackSubmitting] = useState(false);
 
+  // Settling a debt/credit record — same shape as receiving/repacking
+  // above. See debt_settlement.rs.
   const [settlingId, setSettlingId] = useState<string | null>(null);
   const [settleError, setSettleError] = useState<string | null>(null);
   const [settleSubmitting, setSettleSubmitting] = useState(false);
+  // Defaults to 'cash', same as PointOfSale.tsx's own payment-method
+  // selector — matching the one other place in the app that already
+  // asks this question, rather than defaulting to a blank choice that
+  // would need an extra click before Confirm even does anything.
   const [settlePaymentMethod, setSettlePaymentMethod] = useState('cash');
 
+  // Viewing/editing an item's batches. See batches.rs. Loaded fresh
+  // every time the modal opens rather than kept in sync with the main
+  // records list, since a batch's own quantity/cost/price live in a
+  // separate table this page never otherwise fetches.
   const [viewingBatchesId, setViewingBatchesId] = useState<string | null>(null);
   const [batchSummary, setBatchSummary] = useState<BatchSummary | null>(null);
   const [batchesLoading, setBatchesLoading] = useState(false);
@@ -179,6 +231,13 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
 
   function startEditBatch(b: { id: string; unit_price: number; unit_cost: number }) {
     setEditingBatchId(b.id);
+    // Was hardcoded (/100).toFixed(2) — wrong for any currency that
+    // isn't 2-decimal (100x too small for JPY/UGX/RWF, 10x too large
+    // for BHD/KWD/OMR/JOD). formatMoney is already what the read-only
+    // view two lines away uses, and it's the same seed-an-editable-
+    // text-input pattern already established in PointOfSale.tsx's
+    // refund flow (setRefundAmountText(formatMoney(...))) — parseMoneyInput
+    // below already round-trips whatever formatMoney produces.
     setBatchPriceText(formatMoney(b.unit_price, businessCurrency));
     setBatchCostText(formatMoney(b.unit_cost, businessCurrency));
     setBatchSaveError(null);
@@ -191,6 +250,11 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       setBatchSaveError('Selling price must be a valid amount.');
       return;
     }
+    // Only sent when it's actually being changed from what the batch
+    // already carries — same "omit unless changing" reasoning as
+    // api.ts's updateBatchPrice itself: a Manager who never touches
+    // cost should never trip the Owner-only check just because a cost
+    // value was present in the form.
     const originalCost = batchSummary?.batches.find((b) => b.id === editingBatchId)?.unit_cost;
     const parsedCost = batchCostText.trim() === '' ? null : parseMoneyInput(batchCostText, businessCurrency);
     if (batchCostText.trim() !== '' && parsedCost === null) {
@@ -224,6 +288,10 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       setRepackError('Quantity produced must be a positive whole number.');
       return;
     }
+    // Exactly one of the two ways to say what this repack produces —
+    // mirrors the same either/or repack.rs itself enforces, checked
+    // here too so the person sees the problem immediately rather than
+    // waiting on a round trip to the backend for it.
     let newTargetPriceCents: number | undefined;
     if (repackTargetMode === 'new') {
       if (!repackNewTargetName.trim()) {
@@ -251,9 +319,19 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         target_quantity_produced: targetQty,
         notes: repackNotes || undefined,
       });
+      // The profit case for repacking, at today's prices — this is the
+      // actual reason a business breaks bulk, so it's surfaced right
+      // in the confirmation, not left for someone to work out by hand
+      // from the two unit prices. Only shown when it's computable
+      // (bulk_equivalent_value > 0, i.e. the source item actually has
+      // a selling price set).
       const profitLine = typeof summary.repack_profit_uplift === 'number' && summary.repack_margin_uplift_pct != null
         ? ` ${summary.repack_profit_uplift >= 0 ? 'Profit uplift' : 'Profit reduction'}: ${formatMoney(Math.abs(summary.repack_profit_uplift), businessCurrency)} (${summary.repack_margin_uplift_pct >= 0 ? '+' : ''}${summary.repack_margin_uplift_pct.toFixed(1)}% vs. selling in bulk).`
         : '';
+      // Rounding is never silently absorbed — if the weighted-average
+      // cost calculation couldn't land on the exact cent, that's
+      // spelled out here too, matching the labeled Bookkeeping entry
+      // repack.rs posts for it.
       const roundingLine = summary.rounding_adjustment_cents
         ? ` (A ${formatMoney(Math.abs(summary.rounding_adjustment_cents), businessCurrency)} rounding ${summary.rounding_adjustment_cents > 0 ? 'loss' : 'gain'} was posted to Bookkeeping under Stock Revaluation.)`
         : '';
@@ -297,6 +375,12 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
 
+  // Bumped every time refreshRecords() runs for the Debt & Credit
+  // module, so DebtSummaryWidget above re-fetches its totals in
+  // lockstep with the records list — settle a debt, edit one, delete
+  // one, or import a batch via Excel, and the summary tiles (and the
+  // overdue alarm) update immediately alongside the table, not on the
+  // next unrelated re-render.
   const [debtSummaryRefreshKey, setDebtSummaryRefreshKey] = useState(0);
 
   async function refreshRecords(searchTerm?: string) {
@@ -305,8 +389,21 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     if (moduleId === 'debt_credit') setDebtSummaryRefreshKey((k) => k + 1);
   }
 
+  // The initial module load (above) already fetches records once for
+  // the empty-search state — without this, opening a module would
+  // trigger a second, redundant fetch of the exact same data 300ms
+  // later. Reset whenever the module changes, since that's a genuinely
+  // new "initial load" this same logic applies to again.
   useEffect(() => { skipNextSearch.current = true; }, [moduleId]);
 
+  // Live search: fires automatically ~300ms after typing stops, not on
+  // Enter/submit. Debounced rather than firing on every keystroke —
+  // typing "milk" shouldn't be four separate requests for "m", "mi",
+  // "mil", "milk". Cancels a still-pending timer if the user keeps
+  // typing before it fires, and ignores a stale in-flight response
+  // that resolves after a newer search has already started (the
+  // classic "typed fast, an old slow response overwrites new results"
+  // race a naive debounce misses).
   useEffect(() => {
     if (!schema) return; // don't search before the module has even loaded
     if (skipNextSearch.current) { skipNextSearch.current = false; return; }
@@ -317,17 +414,39 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         const r = await listRecords(moduleId, search || undefined);
         if (!cancelled) setRecords(r.records);
       } catch {
+        // A failed live search shouldn't blank the list or show an
+        // error banner for what's often just a mid-typing hiccup —
+        // the existing records just stay as they were.
       } finally {
         if (!cancelled) setSearching(false);
       }
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, moduleId, schema]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     try {
+      // An empty box means "not set yet, use the default" and is
+      // never sent, on either create or edit — this deliberately means
+      // editing can't blank out an optional field back to empty
+      // through this form (only change it to something else). The
+      // alternative, treating an empty box as "clear this", breaks per
+      // field type (an empty numeric input becomes NaN, which JSON
+      // serializes as null, which then fails backend validation with a
+      // confusing error) rather than doing anything useful, so it's
+      // not supported rather than half-supported.
+      //
+      // Create sends every non-empty field, same as before. Editing
+      // additionally skips any field whose value is IDENTICAL to what
+      // startEdit originally seeded it with — see originalFormValues'
+      // own comment for why this is the fix, not just a nicety. Money
+      // fields are compared as their parsed cents, not their raw typed
+      // string, so "19.99" and "19.990" (or a locale that displays a
+      // trailing zero differently) don't look like a change when they
+      // aren't one.
       const payload: Record<string, unknown> = {};
       for (const f of schema!.fields) {
         const raw = formValues[f.name];
@@ -353,6 +472,13 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
           : f.type === 'boolean' ? raw === 'true'
           : raw;
       }
+      // expiry_date: same reason as PurchaseItemSelector's
+      // inventory_record_id/item_name aren't set via the loop above —
+      // it isn't in schema.fields (see the input's own comment above)
+      // so the loop never picks it up. Create-only, matching the
+      // input being hidden on edit: create_and_receive (receiving.rs)
+      // is the only path that ever reads this key, and it only runs
+      // on create.
       if (moduleId === 'purchasing' && editingId === null && formValues.expiry_date) {
         payload.expiry_date = formValues.expiry_date;
       }
@@ -370,6 +496,11 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
 
+  // Money fields need their existing integer-cents value converted
+  // back to a display decimal string ("1999" -> "19.99") before they
+  // can sit in the same text-buffer input the create form uses — see
+  // src/lib/money.ts. Every other field type is already the right
+  // shape (or close enough) as a plain string.
   function startEdit(record: Record_) {
     const seeded: Record<string, string> = {};
     for (const f of schema!.fields) {
@@ -399,6 +530,46 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
 
+  // source_order_id is an internal traceability pointer (see pos.rs /
+  // debt_settlement.rs) — a raw UUID meaningful to the system, not to
+  // a person reading this table. Every other field on every module is
+  // shown; this is the one deliberate exception, for the same
+  // "not ambiguous, not clutter" reason payment_method IS shown: one
+  // is a real fact someone wants to see at a glance, the other is
+  // plumbing.
+  //
+  // `invoice.items_json` joins this exception for a different but
+  // related reason: it's not plumbing, it's real content (the line
+  // items), but showing the raw JSON string itself in a plain table
+  // cell is pure clutter — a person already sees those same line
+  // items rendered properly (description/qty/price/amount) the moment
+  // they open the invoice via InvoiceView, one click away in the same
+  // row. Showing the raw JSON a second time here adds nothing but a
+  // wall of `{"description":...}` text, and — being far longer than
+  // every other column — is also what was forcing this table into
+  // horizontal scroll on an otherwise perfectly ordinary-width screen.
+  // Invoice-only column collapse: customer_email/customer_phone fold into
+  // the existing `customer` cell, and tax_rate folds into the existing
+  // `tax_amount` cell (rendered as "rate% · amount"). No field is dropped
+  // or renamed in the schema/data — see the `customer`/`tax_amount` cases
+  // in the table body below, which render the combined content. This is
+  // scoped to moduleId === 'invoice' only, so every other module's table
+  // (and this module's own create/edit form, which still lists every
+  // field via schema.fields directly) is untouched.
+  // Sales column collapse: customer_phone folds into the existing
+  // `customer` cell (same idea as invoice's customer_email/phone
+  // fold above), and discount_amount folds into the existing
+  // `unit_price` cell as "price (− discount)" — see
+  // renderSalesCustomerCell/renderSalesPriceCell below. order_id and
+  // source_batch_id are dropped from the table entirely, same
+  // reasoning as source_order_id just above: real UUIDs meaningful to
+  // the system's own cross-references (refund.rs, receipt.rs), not to
+  // an owner glancing down a list of sales — still exported in full
+  // via "Export to Excel" for anyone who does need them. No field is
+  // dropped from the data or from this module's own create/edit form,
+  // which still lists every field via schema.fields directly — this
+  // is a records-table display choice only, the same scope the
+  // invoice collapse above is limited to.
   const columns = useMemo(
     () =>
       schema?.fields
@@ -415,7 +586,21 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const canExport = schema?.my_permissions.includes('export');
   const canCreate = schema?.my_permissions.includes('create');
   const canUpdate = schema?.my_permissions.includes('update');
+  // "settle" lives on debt_credit's own actions list (see
+  // debt_credit.json / debt_settlement.rs) and is only ever checked
+  // from this page being the Debt & Credit module itself — same
+  // situation the inventoryCanRepack comment above already describes
+  // for "repack", so no separate schema fetch is needed here either.
   const canSettle = moduleId === 'debt_credit' && !!schema?.my_permissions.includes('settle');
+  // "update_batch_price" lives on inventory's own actions list — same
+  // situation as "settle" above, checked directly off this page's own
+  // schema since it's only ever relevant when moduleId is inventory
+  // itself. Granted to both Owner and Manager; a Manager attempting to
+  // ALSO edit a batch's cost (not just its price) is still caught
+  // server-side by batches::update_batch_price's own Owner-only check
+  // — the cost input isn't hidden from Manager here, since this page
+  // has no cheap way to tell Owner and Manager apart yet, so the
+  // server's rejection message is what actually enforces it.
   const canEditBatchPrice = moduleId === 'inventory' && !!schema?.my_permissions.includes('update_batch_price');
 
   if (loading) return <div style={{ padding: '1rem', color: 'var(--ink-soft)' }}>Loading…</div>;
@@ -519,6 +704,19 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                 )}
                 {schema.fields.filter((f) => !isActionManagedField(moduleId, f.name)
                   && !(moduleId === 'purchasing' && (f.name === 'item_name' || f.name === 'inventory_record_id'))
+                  // unit_cost/unit_price: hidden on CREATE only. A
+                  // brand-new item is always forced to zero regardless
+                  // of what's typed (crud::create's own rule — real
+                  // price only ever enters through a purchase), so
+                  // showing an editable input here would let someone
+                  // type a price that's then silently discarded. Once
+                  // the item EXISTS, these fields are the sanctioned way
+                  // to correct a legacy item's price for as long as it
+                  // has no real batch yet (see crud::update's
+                  // inventory_has_batches check) — the backend itself
+                  // enforces the cutoff the moment a batch exists, with
+                  // a clear error, so the edit form doesn't need to know
+                  // which state a given item is in.
                   && !(moduleId === 'inventory' && editingId === null && (f.name === 'unit_cost' || f.name === 'unit_price'))
                 ).map((f) => (
                   <FieldInput key={f.name} field={f} value={formValues[f.name] ?? ''} units={units} currencies={currencies} businessCurrency={businessCurrency} onChange={(v) => setFormValues((p) => ({ ...p, [f.name]: v }))} />
@@ -841,6 +1039,17 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             />
 
             {(() => {
+              // Matching a re-uploaded row against an existing record
+              // is only ever safe on a field the module actually
+              // marked `unique` (see excel_import.rs's
+              // `key_field_is_unique` comment for the full reasoning
+              // and the exact bug this closes) — never just "whichever
+              // field happens to be listed first." Purchasing (and any
+              // similar append-only module with no unique field) has
+              // nothing safe to match on at all, so there's no picker
+              // to show; every row on that kind of module always
+              // creates a new record, which is what re-importing a
+              // transaction log should do anyway.
               const uniqueFields = schema.fields.filter((f) => f.unique);
               if (uniqueFields.length === 0) {
                 return (
@@ -904,6 +1113,7 @@ function formatCell(v: unknown, fieldType?: string, currency?: string) {
   return String(v);
 }
 
+// Combines customer/email/phone into one cell for the invoice table.
 function renderInvoiceCustomerCell(r: Record_) {
   const name = r.customer;
   const email = typeof r.customer_email === 'string' ? r.customer_email : '';
@@ -917,6 +1127,9 @@ function renderInvoiceCustomerCell(r: Record_) {
   );
 }
 
+// Same fold as renderInvoiceCustomerCell above, for the Sales table:
+// customer_phone has no separate column of its own, it sits under the
+// customer's name instead.
 function renderSalesCustomerCell(r: Record_) {
   const name = r.customer;
   const phone = typeof r.customer_phone === 'string' ? r.customer_phone : '';
@@ -928,6 +1141,8 @@ function renderSalesCustomerCell(r: Record_) {
   );
 }
 
+// Combines unit_price + discount_amount into one "price (− discount)"
+// cell — same idea as renderInvoiceTaxCell below, just for Sales.
 function renderSalesPriceCell(r: Record_, currency: string) {
   const price = typeof r.unit_price === 'number' ? r.unit_price : null;
   const discount = typeof r.discount_amount === 'number' ? r.discount_amount : 0;
@@ -940,6 +1155,7 @@ function renderSalesPriceCell(r: Record_, currency: string) {
   );
 }
 
+// Combines tax_rate + tax_amount into one "rate% · amount" cell.
 function renderInvoiceTaxCell(r: Record_, currency: string) {
   const rate = typeof r.tax_rate === 'number' ? r.tax_rate : null;
   const amount = typeof r.tax_amount === 'number' ? r.tax_amount : null;
@@ -1009,6 +1225,12 @@ function FieldInput({ field, value, units, currencies, businessCurrency, onChang
     );
   }
   if (field.type === 'money') {
+    // Plain text buffer, not a reformatted controlled value — typing
+    // over a value that snaps back to "12.50" on every keystroke
+    // fights the cursor (the same bug fixed in PointOfSale.tsx's
+    // refund field and the invoice form above). Normalizes to a clean
+    // decimal only on blur, and the actual integer-cents conversion
+    // happens once, at submit time, via parseMoneyInput.
     return (
       <div>
         <label>{field.name.replace(/_/g, ' ')}{field.required ? ' *' : ''}</label>
@@ -1070,6 +1292,9 @@ export function ReportPanel({ moduleId, schema, canExport, businessCurrency }: {
   useEffect(() => { run(); /* eslint-disable-next-line */ }, []);
 
   const max = Math.max(1, ...points.map((p) => p.value));
+  // Only meaningful when agg !== 'count' — a count is always a plain
+  // number regardless of what field was picked as "measure" (which is
+  // ignored for count anyway).
   const measureIsMoney = agg !== 'count' && numericFields.find((f) => f.name === measure)?.type === 'money';
 
   return (
@@ -1159,6 +1384,8 @@ export function ReportPanel({ moduleId, schema, canExport, businessCurrency }: {
   );
 }
 
+// unit_price_text is raw typed text, converted to integer cents at
+// submit time — keeps the input from reformatting mid-keystroke.
 interface EditableInvoiceItem {
   description: string;
   quantity: number;

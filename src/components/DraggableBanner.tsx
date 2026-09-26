@@ -1,5 +1,10 @@
 import { useRef, useState } from 'react';
 
+// Shared draggable/dismissible notification banner (used by
+// UpdateChecker.tsx and AndroidUpdateChecker.tsx). Drag uses Pointer
+// Events for unified mouse/touch support, applied as a CSS transform
+// on top of the caller's own fixed position. Drag position and
+// dismissal don't persist across remounts — session-only.
 export default function DraggableBanner({
   className,
   style,
@@ -16,6 +21,11 @@ export default function DraggableBanner({
   const [dragging, setDragging] = useState(false);
 
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    // Ignore drags started on an interactive control inside the
+    // banner (the dismiss button, the Install/Update button) — only
+    // the banner's own body/background should initiate a drag, or
+    // clicking those buttons would also nudge the banner a pixel or
+    // two on every tap.
     const target = e.target as HTMLElement;
     if (target.closest('button')) return;
 
@@ -45,6 +55,9 @@ export default function DraggableBanner({
         ...style,
         transform: `translate(${offset.x}px, ${offset.y}px)`,
         cursor: dragging ? 'grabbing' : 'grab',
+        // No CSS transition on transform while actively dragging —
+        // it would lag a frame behind the pointer. Fine (and nicer)
+        // once released, so a stray small drag doesn't look jerky.
         transition: dragging ? 'none' : 'transform 0.15s ease-out',
         touchAction: 'none', // otherwise a touch-drag also scrolls the page underneath it
       }}

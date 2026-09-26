@@ -39,6 +39,11 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
   const [businessId, setBusinessId] = useState('');
   const [savedCodeConfirmed, setSavedCodeConfirmed] = useState(false);
 
+  // Terms & Conditions — same first-login blocking gate as Login.tsx
+  // (see terms.rs on the backend). The owner account created by this
+  // wizard is still a brand-new user with no acceptance on record, so
+  // it goes through the identical gate before `onComplete` is allowed
+  // to fire — there's no separate "setup implies acceptance" path.
   const [termsText, setTermsText] = useState('');
   const [termsLoading, setTermsLoading] = useState(false);
   const [termsAccepting, setTermsAccepting] = useState(false);
@@ -91,6 +96,8 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
       const { relaunch } = await import('@tauri-apps/plugin-process');
       await relaunch();
     } catch {
+      // Browser dev mode, or process plugin unavailable — nothing more
+      // to do; the on-screen instruction already covers this case.
     }
   }
 
@@ -168,6 +175,10 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
     }
   }
 
+  // Mirrors Login.tsx's decline path: abandon this session rather than
+  // block forever with no way out. The account and business already
+  // exist, so declining just returns to the normal sign-in screen —
+  // logging back in will present this same terms gate again.
   function handleDeclineTerms() {
     logout().catch(() => {});
     clearSession();

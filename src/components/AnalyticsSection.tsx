@@ -10,10 +10,16 @@ import {
   PieChart, Pie, Cell,
 } from 'recharts';
 
+// Fixed palette (not derived from data) so a given payment method or
+// item reads the same color across every chart.
 const PALETTE = ['var(--stamp)', '#7c9885', '#c98a4b', '#5b7b9a', '#a15c5c', '#8a7ca8'];
 
 type Bucket = 'day' | 'week' | 'month';
 
+// Turns the backend's raw bucket key ("2026-08-11" or "2026-08") into
+// a readable chart-axis label ("Aug 11", "Aug 2026", "Aug 11–17").
+// Parsed/formatted in UTC since these are calendar dates with no time
+// component.
 function formatBucketLabel(bucket: Bucket, label: string): string {
   if (bucket === 'month') {
     const [year, month] = label.split('-').map(Number);
@@ -24,6 +30,7 @@ function formatBucketLabel(bucket: Bucket, label: string): string {
     const start = new Date(`${label}T00:00:00Z`);
     const end = new Date(start.getTime() + 6 * 86_400_000);
     const startStr = start.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    // Repeat the month name only if the week crosses into a new one.
     const endStr = start.getUTCMonth() === end.getUTCMonth()
       ? String(end.getUTCDate())
       : end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -33,6 +40,8 @@ function formatBucketLabel(bucket: Bucket, label: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
+// The only file that imports recharts — lazy-loaded from Dashboard.tsx
+// so other screens don't pay for the bundle size.
 export default function AnalyticsSection() {
   const [range, setRange] = useState<DateRange>(defaultRange());
   const [revenue, setRevenue] = useState<number | null>(null);
@@ -44,6 +53,14 @@ export default function AnalyticsSection() {
   const [bucket, setBucket] = useState<Bucket>('day');
   const [loading, setLoading] = useState(true);
   const [currency, setCurrency] = useState('USD');
+  // Scoped to `range`, same as everything else in this section — see
+  // profit::by_category's own doc comment on why it filters on
+  // created_at, the same range field the sibling category breakdowns
+  // just below (revenue by item_name, by payment_method) already use.
+  // Reset to null on every range change first, same null-until-real
+  // discipline as the rest of this component, so the card shows its
+  // own "Loading…" state rather than the previous period's numbers
+  // while the new ones are in flight.
   const [categoryProfit, setCategoryProfit] = useState<CategoryProfit[] | null>(null);
 
   useEffect(() => {
@@ -68,6 +85,9 @@ export default function AnalyticsSection() {
       runReport('sales', { agg: 'count', dimension: 'none', start: range.start, end: range.end }),
       runReport('sales', { agg: 'avg', measure: 'revenue', dimension: 'none', start: range.start, end: range.end }),
       runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'time', field: 'created_at', bucket, start: range.start, end: range.end }),
+      // Already sorted DESC by the aggregate on the backend (see
+      // report.rs's Category dimension) — top sellers first, no
+      // client-side sort needed, just slice to a chart-sized top N.
       runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'category', field: 'item_name', start: range.start, end: range.end }),
       runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'category', field: 'payment_method', start: range.start, end: range.end }),
     ])
@@ -77,7 +97,19 @@ export default function AnalyticsSection() {
         setOrderCount(count.report?.[0]?.value ?? 0);
         setAvgSale(avg.report?.[0]?.value ?? 0);
         setSeries((trend.report ?? []).map((p: { label: string; value: number }) => ({ label: p.label, value: p.value })));
+        // Raised from a hard cap of 6 to 20: with the chart below now
+        // scrolling internally as this list grows (see that card's
+        // own comment), there's no longer a layout reason to hide
+        // items past the 6th-best seller — a business with a dozen
+        // real sellers should be able to see all of them, not just
+        // whichever 6 happened to be on top. 20 is still a cap, just
+        // a much less arbitrary one — plenty for even a large catalog
+        // without turning this into an unbounded, ever-taller list.
         setTopItems((items.report ?? []).slice(0, 20));
+        // "(not set)" is report.rs's own label for a group with no
+        // value for the field being grouped on (e.g. a sale with no
+        // payment_method recorded) — already a real, non-empty string
+        // from the backend, nothing to substitute here.
         setPaymentMix((payments.report ?? []).map((p: { label: string; value: number }) => ({ label: p.label, value: p.value })));
       })
       .catch(() => { if (!cancelled) { setRevenue(0); setOrderCount(0); setAvgSale(0); setSeries([]); setTopItems([]); setPaymentMix([]); } })
@@ -111,6 +143,23 @@ export default function AnalyticsSection() {
         ) : series.length === 0 ? (
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No sales in this period yet.</div>
         ) : (
+          // A short "Custom" range bucketed by day can still mean
+          // dozens of bars (up to ~62 before the bucket auto-switches
+          // to week/month — see the bucket calculation above). Squeezed
+          // into a fixed-width chart, that many bars' value labels
+          // start overlapping into unreadable noise — exactly the
+          // "mess" this is meant to prevent as real usage accumulates
+          // more days of data. `max(100%, ...)` (a native CSS
+          // function, not a JS Math.max — needed here specifically
+          // because it can compare a percentage against a pixel value,
+          // which JS can't) means: fill the full card width when there
+          // are few enough bars to look right doing that, but once
+          // there isn't room for every bar's minimum legible width
+          // (50px), grow the chart itself past the card's width instead
+          // of shrinking the bars — and let this wrapper's own
+          // horizontal scrollbar handle the rest, smoothly, the same
+          // way "Top sellers" now scrolls vertically for the same
+          // reason.
           <div style={{ overflowX: 'auto', width: '100%', height: '100%' }}>
             <div style={{ height: '100%', width: `max(100%, ${series.length * 50}px)` }}>
               <ResponsiveContainer width="100%" height="100%">
@@ -178,6 +227,18 @@ export default function AnalyticsSection() {
           ) : topItems.length === 0 ? (
             <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No sales in this period yet.</div>
           ) : (
+            // Same reasoning as the revenue trend chart above, just
+            // vertical instead of horizontal: with the cap on this
+            // list raised from 6 to 20 (see where topItems is set),
+            // a real catalog's full list of sellers can be taller
+            // than this card has room for. Rather than compressing
+            // every bar to fit — illegible once there are more than
+            // 5 or 6 — each bar gets a fixed, always-readable 26px
+            // row, the chart's own height grows past the visible
+            // window once there are enough items, and this wrapper's
+            // scrollbar handles the rest smoothly. Math.max keeps it
+            // filling the full available height (no scroll) when
+            // there are only a couple of items.
             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
               <div style={{ width: '100%', height: Math.max(topItems.length * 26, 150) }}>
                 <ResponsiveContainer width="100%" height="100%">
@@ -275,6 +336,10 @@ export default function AnalyticsSection() {
         ) : categoryProfit.length === 0 ? (
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No categorized sales in this period yet.</div>
         ) : (
+          // Same scroll-once-it-doesn't-fit approach as "Top sellers"
+          // above, same reason: a real catalog can have more
+          // categories than a fixed-height card can show at a legible
+          // row height.
           <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             <div style={{ width: '100%', height: Math.max(categoryProfit.length * 26, 150) }}>
               <ResponsiveContainer width="100%" height="100%">
