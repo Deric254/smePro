@@ -26,8 +26,6 @@ import HourOfDayCard from '../components/HourOfDayCard';
 import PeriodTrendCard from '../components/PeriodTrendCard';
 import SeasonalCard from '../components/SeasonalCard';
 
-// Collapsed by default. onExpand fires once, on first open, so its
-// data loads lazily rather than on page load.
 function CollapsibleSection({ title, onExpand, loading, children }: {
   title: string;
   onExpand?: () => void;
@@ -74,10 +72,6 @@ export default function Reports() {
   const [currency, setCurrency] = useState('USD');
   const [loading, setLoading] = useState(true);
 
-  // Each section: its own data slot, its own "is this section's fetch
-  // in flight" flag. null data = not fetched yet, or the fetch found
-  // nothing to show (both render the same "nothing here" state inside
-  // each card component — see each card's own empty-state handling).
   const [debtSummary, setDebtSummary] = useState<DebtSummary | null>(null);
   const [grossProfit, setGrossProfit] = useState<GrossProfitSummary | null>(null);
   const [itemMargins, setItemMargins] = useState<ItemProfit[] | null>(null);
@@ -140,10 +134,6 @@ export default function Reports() {
     setCustomersLoading(true);
     Promise.allSettled([
       getBasketAffinity({ limit: 10 }).then((r) => setBasketPairs(r.pairs)),
-      // No dedicated endpoint — same generic report engine
-      // AnalyticsSection.tsx already uses for top-selling items,
-      // grouped by customer instead of item_name. Already sorted DESC
-      // server-side; sliced to top 10 here purely for display.
       runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'category', field: 'customer' })
         .then((r) => setTopCustomers((r.report ?? []).slice(0, 10))),
     ]).finally(() => setCustomersLoading(false));

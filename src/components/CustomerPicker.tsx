@@ -2,12 +2,6 @@ import { useEffect, useState } from 'react';
 import { searchCustomers, ApiError } from '../api';
 import type { CustomerMatch } from '../api';
 
-/**
- * Two plain inputs (name, phone) with a debounced dropdown of matching
- * existing customers — click one to fill both fields, helping avoid
- * accidental duplicate customers. Selecting a suggestion doesn't lock
- * the fields; edits still go through normal find-or-create on submit.
- */
 export default function CustomerPicker({
   name,
   phone,
@@ -24,10 +18,6 @@ export default function CustomerPicker({
 
   const query = name.trim() || phone.trim();
 
-  // Same debounce + stale-response guard as ModuleView.tsx's live
-  // search — typing shouldn't fire a request per keystroke, and a
-  // slow response from an earlier, shorter query shouldn't overwrite
-  // the results of what's been typed since.
   useEffect(() => {
     if (!query || query.length < 2) {
       setMatches([]);
@@ -42,9 +32,6 @@ export default function CustomerPicker({
           setShowDropdown(r.customers.length > 0);
         }
       } catch (err) {
-        // A failed lookup shouldn't block typing or show an error
-        // banner for what's often just a mid-typing hiccup — the
-        // cashier can still just finish typing and submit normally.
         if (!cancelled && !(err instanceof ApiError)) setMatches([]);
       }
     }, 300);
@@ -109,10 +96,6 @@ export default function CustomerPicker({
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  // 2 lines at this label's line-height, so "Customer name (optional)"
-  // wrapping to 2 lines and "Phone (optional)" fitting on 1 both
-  // reserve identical space — see the comment above where this is
-  // used for why that's what actually keeps the two inputs level.
   labelBox: { minHeight: '2.4em', lineHeight: '1.2em' },
   dropdown: {
     position: 'absolute', top: '100%', left: 0, right: 0, marginTop: '0.2rem', zIndex: 20,

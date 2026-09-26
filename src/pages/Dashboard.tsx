@@ -5,8 +5,6 @@ import type { DebtSummary, GrossProfitSummary, BusinessPulse, ReportHighlights }
 import { formatMoney } from '../lib/money';
 import BusinessPulseCard from '../components/BusinessPulseCard';
 
-// Lazy-loaded: it's the only place recharts is used, and that roughly
-// doubles the bundle size — only downloaded when Dashboard is viewed.
 const AnalyticsSection = lazy(() => import('../components/AnalyticsSection'));
 
 function initials(name: string) {
@@ -15,9 +13,6 @@ function initials(name: string) {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
-// Money fields are always integer cents (see lib/money.ts) regardless
-// of whether the value looks whole — only the field's declared type
-// (isMoney) can be used to decide, never the number's own shape.
 function formatMetricValue(value: number, isMoney: boolean, currency: string): string {
   if (isMoney) return formatMoney(value, currency);
   return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -42,22 +37,9 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
   const [userCount, setUserCount] = useState<number | null>(null);
   const [checklistDismissed, setChecklistDismissed] = useState<boolean | null>(null);
   const [currency, setCurrency] = useState('USD');
-  // null = not fetched yet / module not enabled / no permission — the
-  // KPI card below only renders once this is a real object, so an
-  // in-progress or failed fetch never shows a wrong or half-formed
-  // number.
   const [debtSummary, setDebtSummary] = useState<DebtSummary | null>(null);
-  // Same null-until-real-data discipline as debtSummary above.
   const [grossProfit, setGrossProfit] = useState<GrossProfitSummary | null>(null);
-  // Same again — the previously AI-chat-only "business pulse" readout
-  // (trend, forecast, low-stock/overdue flags), now surfaced directly
-  // here so it doesn't require opening the AI panel and asking a
-  // question first. See getBusinessPulse in api.ts.
   const [pulse, setPulse] = useState<BusinessPulse | null>(null);
-  // One-line teasers pointing into the fuller Stock health / Sales
-  // patterns sections on the Reports page — see report_highlights.rs.
-  // Each field independently null when there's nothing worth
-  // highlighting yet, same discipline as everything else here.
   const [highlights, setHighlights] = useState<ReportHighlights | null>(null);
 
   useEffect(() => {
@@ -78,15 +60,6 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
           try {
             const schema = await getModuleSchema(module.id);
             const metric = schema.dashboard_metric;
-            // THE BUG THIS FIXES: this metric (e.g. Sales' own
-            // "revenue this period") came from the exact same generic
-            // report engine Reports.tsx and AnalyticsSection use, but
-            // this call had no reports-access gate at all — any role
-            // with plain `read` on a module got its business metric
-            // shown on the Dashboard regardless of can_view_reports,
-            // which defeats the entire point of that flag existing.
-            // Skip the fetch outright rather than fetch-then-hide, so
-            // a role without reports access never even asks for it.
             if (metric && canViewReports) {
               const report = await runReport(module.id, {
                 agg: metric.aggregation,
@@ -106,29 +79,11 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
 
     getBusinessInfo().then((b: any) => { if (!cancelled && b?.currency) setCurrency(b.currency); }).catch(() => {});
 
-    // Best-effort — Staff/some roles won't have permission for these,
-    // and that's fine, the dashboard just quietly shows less.
     listUsers().then((r) => { if (!cancelled) setUserCount(r.users.filter((u: { active: boolean }) => u.active).length); }).catch(() => {});
     getSettings().then((s) => { if (!cancelled) setChecklistDismissed(s.onboarding_dismissed === 'true'); }).catch(() => { if (!cancelled) setChecklistDismissed(false); });
-    // Same reasoning as the per-module metric fetch above: these are
-    // report/analytics-only widgets. Skipping the fetch entirely (not
-    // fetch-then-hide) when the role can't view reports, consistent
-    // with the dashboard_metric skip above — one rule, applied
-    // everywhere business-performance data could otherwise leak onto
-    // this screen regardless of what the backend itself enforces.
     if (canViewReports) {
-      // Also best-effort: fails silently (module not enabled, or this
-      // role lacks "read" on it) and the KPI card below just doesn't
-      // render — same as every module tile already does when its own
-      // metric fetch fails.
       getDebtSummary().then((d) => { if (!cancelled) setDebtSummary(d); }).catch(() => {});
-      // Same best-effort fetch, same reason — Sales not enabled, or no
-      // "read" permission on it, and the card below just doesn't render.
       getGrossProfitSummary().then((p) => { if (!cancelled) setGrossProfit(p); }).catch(() => {});
-      // Same best-effort fetch, same reason. A `has_data: false` pulse
-      // still renders (its own honest "not enough history yet" state,
-      // set inside BusinessPulseCard) — only a hard fetch failure (e.g.
-      // no permission at all) leaves this null and skips the card.
       getBusinessPulse().then((r) => { if (!cancelled) setPulse(r.business_pulse); }).catch(() => {});
       getReportHighlights().then((r) => { if (!cancelled) setHighlights(r); }).catch(() => {});
     }
@@ -249,9 +204,6 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
   );
 }
 
-// Gross profit KPI card. Shows the real cost-data coverage fraction
-// whenever it's incomplete (not just a boolean "some missing" flag),
-// so e.g. an 87.5% margin on 4 of 50 real-cost sales reads honestly.
 function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; currency: string; onOpen: () => void }) {
   const isProfit = data.profit_cents >= 0;
   const missingCostCount = data.sales_count - data.cost_bearing_sales_count;
@@ -294,8 +246,6 @@ function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; 
   );
 }
 
-// Net debt position (owed to business minus owed by business) plus an
-// overdue alarm, sourced from debt_settlement::summary.
 function DebtStandingKpi({ data, currency, onOpen }: { data: DebtSummary; currency: string; onOpen: () => void }) {
   const netPosition = data.owed_to_business_unpaid - data.owed_by_business_unpaid;
   const hasOverdue = data.overdue_count > 0;
@@ -358,12 +308,6 @@ function ChecklistItem({ done, label, detail, onClick }: { done: boolean; label:
 const styles: Record<string, React.CSSProperties> = {
   header: { marginBottom: '0.9rem' },
   eyebrow: { fontSize: '0.72rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-soft)' },
-  // Lets the gross-profit and debt-standing KPI cards sit side by
-  // side on wider windows instead of always stacking full-width, the
-  // same auto-fit-grid approach AnalyticsSection's own KPI row already
-  // uses — minmax(300px, 1fr) is wide enough that neither card's
-  // content (value + sub-line + right-side overdue/coverage note)
-  // wraps awkwardly, and it still collapses to one column below that.
   kpiRow: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '0.9rem', marginBottom: '0.9rem' },
   checklistCard: { marginBottom: '0.9rem', padding: '0.9rem 1.1rem' },
   dismissBtn: { padding: '0.25em 0.6em', fontSize: '0.76rem' },

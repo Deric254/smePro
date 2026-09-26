@@ -37,8 +37,6 @@ export default function Sidebar({
   onSelectAdminTab: (tab: AdminTab) => void;
   onOpenAi: () => void;
 }) {
-  // Remembers whether "Operations" is expanded across visits — a
-  // once-off collapse shouldn't reset itself every time the app opens.
   const [operationsOpen, setOperationsOpen] = useState(() => {
     try { return localStorage.getItem('sidebar_operations_open') !== 'false'; } catch { return true; }
   });
@@ -51,11 +49,6 @@ export default function Sidebar({
     });
   }
 
-  // Same collapsible pattern as "Operations" above, for Admin — this
-  // is what "part of the sidebar" actually means: Admin's own
-  // sections navigate from here now, not from a tab-strip that used
-  // to eat the whole top of the screen on a phone before any content
-  // was even visible.
   const [adminOpen, setAdminOpen] = useState(() => {
     try { return localStorage.getItem('sidebar_admin_open') === 'true'; } catch { return false; }
   });
@@ -73,18 +66,11 @@ export default function Sidebar({
     select('__admin__');
   }
 
-  // Tapping any nav item closes the drawer on mobile — on desktop
-  // onCloseMobile is either absent or a harmless no-op, since the
-  // sidebar isn't a drawer there in the first place.
   function select(id: string) {
     onSelect(id);
     onCloseMobile?.();
   }
 
-  // Narrowed to modules this specific user can actually read
-  // (capabilities.readable_modules), not just modules the business has
-  // enabled. capabilities === null (not loaded / fetch failed) treats
-  // every gated item as not permitted — never fail open.
   const readableModuleIds = new Set(capabilities?.readable_modules ?? []);
   const enabledModules = modules.filter((m) => m.enabled && readableModuleIds.has(m.id));
   const inventoryEnabled = modules.some((m) => m.id === 'inventory' && m.enabled);
@@ -92,10 +78,6 @@ export default function Sidebar({
   const canStocktake = inventoryEnabled && (capabilities?.can_stocktake ?? false);
   const canSeeReports = enabledModules.length > 0 && (capabilities?.can_view_reports ?? false);
   const canSeeAdmin = capabilities?.is_admin_tier ?? false;
-  // Collapsing a group no longer forces its active child to stay
-  // visible (see Sidebar changelog) — so the header itself carries
-  // the "something in here is active" signal instead, via bold/color,
-  // whether the group is open or collapsed.
   const operationsHasActive = enabledModules.some((m) => m.id === selected);
   const adminHasActive = selected === '__admin__';
 

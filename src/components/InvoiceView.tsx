@@ -3,8 +3,6 @@ import { getToken, getLogoUrl, markInvoiceSent, markInvoicePaid, cancelInvoice, 
 import { formatMoney, multiplyMoney } from '../lib/money';
 import '../styles/invoice-print.css';
 
-// unit_price, subtotal, tax_amount, total below are all integer minor
-// units (cents) — see src/lib/money.ts.
 interface InvoiceItem {
   description: string;
   quantity: number;
@@ -26,22 +24,12 @@ interface InvoiceRecord {
   tax_amount: number;
   total: number;
   notes?: string;
-  // Present only on an invoice auto-generated from a POS/service sale
-  // (see invoice::create_invoice_for_order) — absent on one created
-  // by hand through the "+ New invoice" form.
   source_sale_id?: string;
 }
-
-
 
 export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { invoiceId: string; onClose: () => void; onStatusChanged?: () => void }) {
   const [invoice, setInvoice] = useState<InvoiceRecord | null>(null);
   const [business, setBusiness] = useState<{name:string; slogan?:string; logo_path?:string; currency:string} | null>(null);
-  // Kept separate from `invoice` itself — the invoice document stays
-  // frozen exactly as issued (see invoice.rs's own doc comment); this
-  // is purely additional, always-current disclosure fetched
-  // alongside it, same split ReceiptView already uses between the
-  // as-sold total and the refund figures.
   const [refundedAmount, setRefundedAmount] = useState(0);
   const [isRefunded, setIsRefunded] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -129,11 +117,6 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
 
   function shareWhatsApp() {
     const text = encodeURIComponent(invoiceText());
-    // wa.me works identically whether WhatsApp is installed (opens the
-    // app directly) or not (falls back to WhatsApp Web) — no phone
-    // number needed here since the person sharing picks the recipient
-    // themselves in WhatsApp's own share sheet, same approach
-    // ReceiptView already uses.
     window.open(`https://wa.me/?text=${text}`, '_blank');
   }
 

@@ -15,15 +15,8 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
   const [loading, setLoading] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
 
-  // The active conversation. Null means "no session yet" — the panel
-  // creates one lazily on the first question asked, rather than
-  // writing an empty session row every time someone just opens the
-  // panel to look, then closes it without asking anything.
   const [sessionId, setSessionId] = useState<string | null>(null);
 
-  // History sidebar — past sessions, shown on demand rather than
-  // always visible, since most opens are "ask one thing," not
-  // "browse my chat history."
   const [showHistory, setShowHistory] = useState(false);
   const [sessions, setSessions] = useState<AiChatSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -56,8 +49,6 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
       const r = await listAiSessions();
       setSessions(r.sessions);
     } catch {
-      // A failed history fetch shouldn't block the chat itself —
-      // the sidebar just stays empty/stale until reopened.
     } finally {
       setSessionsLoading(false);
     }
@@ -77,9 +68,6 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
       const r = await getAiSessionMessages(id);
       setMessages(r.messages);
     } catch {
-      // Session may have been deleted from another tab/device between
-      // the list fetch and this open — fall back to a fresh, empty
-      // conversation rather than showing a broken panel.
       setSessionId(null);
     }
   }
@@ -96,9 +84,6 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
     try {
       await clearAiSession(sessionId);
     } catch {
-      // The visible chat is already cleared either way; a failed
-      // server-side clear just means it'll reappear next time this
-      // session is reopened from history, not a broken state now.
     }
   }
 
@@ -109,8 +94,6 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
       setSessions((s) => s.filter((sess) => sess.id !== id));
       if (sessionId === id) startNewChat();
     } catch {
-      // Leave the row in the list — the person can retry the delete
-      // rather than silently losing track of whether it worked.
     }
   }
 
@@ -135,9 +118,6 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
     setQuestion('');
     setLoading(true);
     try {
-      // A session is created lazily on the very first real question —
-      // this is the one place a new row gets written, so opening the
-      // panel to just look never creates an empty conversation.
       let activeSession = sessionId;
       if (!activeSession) {
         const created = await createAiSession();
@@ -260,13 +240,6 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
 
 const styles: Record<string, React.CSSProperties> = {
   panel: {
-    // Anchored bottom-right on desktop — a small card near where it
-    // was opened from (the sidebar), not an unrelated floating
-    // widget. On phones (see .ai-panel in mobile.css) this becomes a
-    // full-height right-side drawer instead, using the exact same
-    // slide-in pattern as .app-sidebar itself (see index.css), so
-    // opening the assistant reads as "part of this app's navigation"
-    // rather than a chat-widget bolted on from outside.
     position: 'fixed', bottom: 'calc(1.6rem + var(--safe-bottom))', right: 'calc(1.6rem + env(safe-area-inset-right))', width: 340, maxWidth: 'calc(100vw - 2.5rem)',
     height: 460, display: 'flex', flexDirection: 'column', padding: 0, zIndex: 40,
     boxShadow: '0 10px 30px rgba(32,20,15,0.2)',
@@ -284,9 +257,5 @@ const styles: Record<string, React.CSSProperties> = {
   bubbleAi: { alignSelf: 'flex-start', background: 'var(--paper)', border: '1px solid var(--paper-line)', padding: '0.5em 0.75em', borderRadius: '10px 10px 10px 2px', fontSize: '0.85rem', maxWidth: '85%', lineHeight: 1.5 },
   actionRow: { display: 'flex', justifyContent: 'flex-end', padding: '0.3rem 0.9rem 0' },
   clearBtn: { background: 'none', border: 'none', fontSize: '0.72rem', color: 'var(--ink-soft)', cursor: 'pointer', textDecoration: 'underline', padding: '0.1rem 0' },
-  // Extra bottom clearance beyond the panel's own padding-bottom (see
-  // .ai-panel in mobile.css) — belt-and-suspenders specifically here,
-  // since this row (the actual input + Send button) is the element
-  // that was visibly sitting under the system nav bar on Android.
   inputRow: { display: 'flex', gap: '0.5rem', padding: '0.7rem 0.9rem', paddingBottom: 'calc(0.7rem + var(--safe-bottom))', borderTop: '1px solid var(--paper-line)' },
 };

@@ -2,8 +2,6 @@ import { useState } from 'react';
 import type { HourOfDayPattern } from '../api';
 import { formatMoney } from '../lib/money';
 
-// Fixed display order matching a business day's actual flow, not
-// alphabetical or backend row order.
 const PERIOD_ORDER = ['Morning', 'Afternoon', 'Evening', 'Night'];
 
 export default function HourOfDayCard({ items, currency }: { items: HourOfDayPattern[]; currency: string }) {
@@ -27,8 +25,6 @@ export default function HourOfDayCard({ items, currency }: { items: HourOfDayPat
   });
   const maxPeriodRevenue = Math.max(...byPeriod.map((p) => p.revenue_cents), 1);
   const maxHourRevenue = Math.max(...items.map((h) => h.avg_revenue_cents), 1);
-  // Share of the day's average revenue across the four periods, same
-  // reasoning as DayOfWeekCard — the bar gets a number attached.
   const totalDayRevenue = byPeriod.reduce((sum, p) => sum + p.revenue_cents, 0);
 
   return (

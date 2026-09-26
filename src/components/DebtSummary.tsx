@@ -3,9 +3,6 @@ import { getDebtSummary, getBusinessInfo, ApiError } from '../api';
 import type { DebtSummary as DebtSummaryData } from '../api';
 import { formatMoney } from '../lib/money';
 
-// Own fetch against debt_settlement::summary (a real server-side
-// aggregate over every row), not a client-side reduce over ModuleView's
-// capped record list.
 export default function DebtSummaryWidget({ refreshKey }: { refreshKey: number }) {
   const [data, setData] = useState<DebtSummaryData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -18,10 +15,6 @@ export default function DebtSummaryWidget({ refreshKey }: { refreshKey: number }
   }, [refreshKey]);
 
   useEffect(() => {
-    // Business currency isn't part of the summary response — fetch it
-    // the same way PointOfSale.tsx does, rather than assuming a
-    // default that would be quietly wrong for any business not on
-    // USD (this app runs in Kenya — KES — among other places).
     getBusinessInfo()
       .then((b: any) => { if (b?.currency) setCurrency(b.currency); })
       .catch(() => {}); // default 'USD' stands if this fails — matches every other screen's fallback

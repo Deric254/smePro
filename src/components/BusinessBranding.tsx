@@ -6,7 +6,6 @@ export default function BusinessBranding() {
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
-  // Flat tax rate applied to every sale/invoice — see pos.rs / invoice.rs.
   const [taxRateText, setTaxRateText] = useState('0');
   const [taxSaving, setTaxSaving] = useState(false);
   const [taxMessage, setTaxMessage] = useState('');

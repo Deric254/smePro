@@ -1,24 +1,7 @@
-// A small, safe markdown-ish renderer for AI chat replies.
-//
-// The AI providers are now instructed (see ai_assistant.rs's system
-// prompt) not to use markdown at all — but a provider can still ignore
-// that instruction, and any message already saved to history before
-// this existed was written under the old, unrestricted prompt. This is
-// defense in depth for both cases: it recognizes just enough markdown
-// (bold, headers, bullet/numbered lists, inline code, line breaks) to
-// render something clean either way, instead of a customer ever seeing
-// a literal "**Total: $450**" in a chat bubble again.
-//
-// Deliberately NOT using a markdown library or dangerouslySetInnerHTML
-// — this returns real React nodes built from plain string parsing, so
-// there's no HTML-injection surface from AI-provided text, ever.
 
 import type { ReactNode } from 'react';
 
-/** Renders one line's inline formatting: **bold** and `code`. */
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
-  // Splits on **bold** and `code` spans, keeping the delimiters so the
-  // matched groups survive the split and can be re-wrapped below.
   const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter((p) => p !== '');
   return parts.map((part, i) => {
     const key = `${keyPrefix}-${i}`;
@@ -36,7 +19,6 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
   });
 }
 
-/** Renders a full AI (or user) message: headers, lists, paragraphs. */
 export function MarkdownLite({ text }: { text: string }) {
   const lines = text.split('\n');
   const blocks: ReactNode[] = [];
@@ -85,7 +67,6 @@ export function MarkdownLite({ text }: { text: string }) {
       return;
     }
     if (line.trim() === '') {
-      // Blank line — a paragraph break, not its own empty element.
       return;
     }
     blocks.push(<div key={`p-${i}`}>{renderInline(line, `p-${i}`)}</div>);

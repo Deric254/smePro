@@ -1,10 +1,5 @@
-// The backend only ever binds to loopback (see lib.rs's setup()) — a
-// plain constant, not a live binding, since there's no longer a "point
-// this app at a different device" mode to switch it at runtime.
 export const API_BASE = 'http://127.0.0.1:8080';
 
-// Branding paths come from the backend's filesystem and are Windows paths
-// in the desktop build. Only the filename belongs in the public uploads URL.
 export function getLogoUrl(storedPath?: string | null): string | null {
   if (!storedPath) return null;
   const filename = storedPath.replace(/\\/g, '/').split('/').pop();
@@ -49,30 +44,6 @@ async function request(path: string, options: RequestInit = {}, needsBusinessId 
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
   if (needsBusinessId && businessId) headers['X-Business-Id'] = businessId;
 
-  // cache: 'no-store' is deliberate, not a default worth leaving
-  // implicit — every response here is live business data (sales,
-  // stock, customers) that must reflect the instant it's requested.
-  // The backend already sends Cache-Control: no-store on every
-  // response (see security.rs's security_headers) — this is the
-  // second, independent layer of the same guarantee, on the request
-  // side rather than relying solely on the server's header being
-  // honored by whichever WebView engine happens to be running.
-  //
-  // A THIRD layer, for GET requests specifically: append a
-  // cache-busting query param, making every GET URL unique. This
-  // exists because "no-store" is a policy the CACHE has to choose to
-  // honor — most do, but Tauri's embedded WebView (WebView2 on
-  // Windows, WebKit elsewhere) is a different HTTP stack per platform
-  // than a regular desktop browser, with its own historically
-  // inconsistent record on respecting cache-control for the local
-  // fetch() calls this app makes against its own 127.0.0.1 server. A
-  // unique URL per request can't be served from a stale cache entry
-  // no matter whether that header was honored — it doesn't rely on
-  // anyone's policy being followed correctly. Harmless on the
-  // backend: its own router matches routes by splitting the URL on
-  // '?' before looking
-  // at the path (see http_api.rs's query_params/route dispatch), so
-  // an extra query param it never looks for is silently ignored.
   const method = (options.method ?? 'GET').toUpperCase();
   const url = method === 'GET'
     ? `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_t=${Date.now()}`
@@ -84,7 +55,6 @@ async function request(path: string, options: RequestInit = {}, needsBusinessId 
       const body = await res.json();
       message = body.error || message;
     } catch {
-      /* non-JSON error body, keep default message */
     }
     throw new ApiError(res.status, message);
   }
@@ -95,7 +65,6 @@ async function request(path: string, options: RequestInit = {}, needsBusinessId 
 
 export { ApiError };
 
-// ---- First-run setup ----
 export const getSetupStatus = () =>
   fetch(`${API_BASE}/setup/status`).then((res) => res.json());
 
@@ -116,7 +85,6 @@ export const createBusiness = (payload: Record<string, string>) =>
     return body;
   });
 
-// ---- Auth ----
 export const logout = () => request('/auth/logout', { method: 'POST' });
 
 export interface CurrentUser {
@@ -125,10 +93,6 @@ export interface CurrentUser {
   role_id: string;
   business_name: string;
 }
-// Who's actually signed in right now — powers the account menu. Every
-// authenticated user can call this regardless of RBAC permissions,
-// since a user always has the right to know their own username and
-// role (see the matching comment on the backend route).
 export const getCurrentUser = (): Promise<CurrentUser> => request('/auth/me');
 
 export interface MyCapabilities {
@@ -138,10 +102,6 @@ export interface MyCapabilities {
   can_view_reports: boolean;
   readable_modules: string[];
 }
-// Powers the sidebar's own visibility decisions (see Sidebar.tsx) —
-// separate from a module's own `my_permissions` (which governs
-// buttons WITHIN a module you've already opened), this is "should this
-// destination be offered as a place to go at all."
 export const getMyCapabilities = (): Promise<MyCapabilities> => request('/auth/me/capabilities');
 
 export const login = (username: string, password: string, biz: string) =>
@@ -157,20 +117,12 @@ export const login = (username: string, password: string, biz: string) =>
     return res.json();
   });
 
-// ---- Terms & Conditions — see terms.rs. `getTerms` is public (a user
-// must be able to read the terms before logging in), `acceptTerms`
-// requires the session `login` just issued. ----
 export const getTerms = (): Promise<{ version: string; text: string }> => request('/terms');
 export const acceptTerms = (): Promise<{ version: string; accepted: boolean }> =>
   request('/terms/accept', { method: 'POST' });
 
 export interface SecurityQuestions { question1: string | null; question2: string | null }
 export const getSecurityQuestions = (biz: string, username: string): Promise<SecurityQuestions> =>
-  // GET, not POST — and cache: 'no-store' explicitly, same reasoning
-  // as request()'s own default (see api.ts's top): this is live
-  // account data, and a GET request is exactly the kind the WebView's
-  // own HTTP cache could otherwise silently answer from memory
-  // instead of asking the server again.
   fetch(`${API_BASE}/auth/recover/security-questions?username=${encodeURIComponent(username)}`, {
     headers: { 'X-Business-Id': biz },
     cache: 'no-store',
@@ -202,21 +154,13 @@ export const recoverViaAdminCode = (biz: string, payload: Record<string, string>
     return body;
   });
 
-// ---- Modules ----
 export const getBusinessInfo = () => request('/business');
 export const listModules = () => request('/modules');
 export const enableModule = (moduleId: string) => request(`/modules/${moduleId}/enable`, { method: 'POST' });
 export const disableModule = (moduleId: string) => request(`/modules/${moduleId}/disable`, { method: 'POST' });
-// Every module TYPE that exists (reads the real modules/*.json files
-// on disk), each flagged with whether THIS business currently has it
-// enabled — unlike listModules() above, which only ever returns
-// modules the business has touched at least once, so it can't be used
-// to discover something like "Purchasing" as available-but-not-yet-on.
 export interface AvailableModule { id: string; display_name: string; enabled: boolean }
 export const listAvailableModules = (): Promise<{ modules: AvailableModule[] }> => request('/modules/available');
 
-// ---- Point of sale — atomically links Sales and Inventory (and,
-// optionally, Debt & Credit for a sale on credit). See pos.rs. ----
 export interface CartItem { inventory_record_id: string; quantity: number }
 export interface CheckoutRequest {
   items: CartItem[];
@@ -226,23 +170,13 @@ export interface CheckoutRequest {
   allow_oversell?: boolean;
   on_credit?: boolean;
   due_date?: string;
-  // Whole-cart percentage discount, 0–100 — see pos::checkout's own
-  // comment for the exact math and why this is percentage-only for now.
   discount_pct?: number;
-  // Makes a retry safe — see pos::checkout's own doc comment. The
-  // SAME key must be sent on every retry of one logical checkout
-  // attempt (see PointOfSale.tsx's handleCheckout, which generates it
-  // once per attempt, not once per HTTP call) — a fresh key per retry
-  // would defeat the whole point.
   idempotency_key?: string;
 }
 export const checkout = (req: CheckoutRequest) =>
   request('/pos/checkout', { method: 'POST', body: JSON.stringify(req) });
 export const getOrder = (orderId: string) => request(`/pos/orders/${orderId}`);
 
-// ---- Service sale — the same atomicity + customer-tracking
-// guarantee as checkout above, for businesses with no Inventory
-// module. See pos::create_service_sale. ----
 export interface ServiceLineRequest { description: string; unit_price: number; quantity: number }
 export interface ServiceSaleRequest {
   lines: ServiceLineRequest[];
@@ -266,11 +200,6 @@ export interface CustomerMatch { id: string; name: string | null; phone: string 
 export const searchCustomers = (query: string): Promise<{ customers: CustomerMatch[] }> =>
   request(`/customers/search?q=${encodeURIComponent(query)}`);
 
-// "Gone quiet" signal — repeat customers (2+ purchases) whose gap
-// since their last purchase has grown past their own historical
-// rhythm. See customers::repeat_purchase_risk. A customer with only
-// one purchase has no rhythm to compare against and won't appear
-// here at all — that's not a bug, there's nothing to flag yet.
 export interface RepeatCustomerRisk {
   id: string; name: string | null; phone: string | null;
   order_count: number; avg_days_between_purchases: number;
@@ -279,7 +208,6 @@ export interface RepeatCustomerRisk {
 export const getRepeatPurchaseRisk = (): Promise<{ customers: RepeatCustomerRisk[] }> =>
   request('/customers/at-risk');
 
-// ---- Refunds — the counterpart to checkout. See refund.rs. ----
 export interface RefundRequest {
   sale_id: string;
   quantity: number;
@@ -290,20 +218,14 @@ export interface RefundRequest {
 export const processRefund = (req: RefundRequest) =>
   request('/sales/refund', { method: 'POST', body: JSON.stringify(req) });
 
-// ---- Repacking / breaking bulk. See repack.rs. ----
 export const repackStock = (req: {
   source_record_id: string; source_quantity: number;
-  // Exactly one of target_record_id / new_target_name must be set —
-  // see repack.rs's module doc comment. new_target_unit_price is
-  // required alongside new_target_name; its unit_cost is never sent,
-  // since repack computes that itself from what was actually consumed.
   target_record_id?: string;
   new_target_name?: string;
   new_target_unit_price?: number;
   target_quantity_produced: number; notes?: string;
 }) => request('/inventory/repack', { method: 'POST', body: JSON.stringify(req) });
 
-// ---- Stock Take: initiate -> count -> close. See stock_take.rs. ----
 export interface StockTakeItem {
   id: string;
   inventory_record_id: string;
@@ -325,9 +247,6 @@ export interface StockTakeSummary {
   closed_at: string | null;
   item_count: number;
   counted_count: number;
-  // null when nothing countable contributes yet (nothing counted, or
-  // every counted item had a zero expected_qty baseline) — see
-  // stock_take.rs's own "n/a" handling for a single item's percentage.
   max_variance_pct: number | null;
   avg_variance_pct: number | null;
 }
@@ -337,11 +256,7 @@ export interface StockTakeAdjustment {
   expected_qty: number;
   counted_qty: number;
   variance: number;
-  // A number, or the literal string "n/a" when expected_qty was 0.
   variance_pct: number | 'n/a';
-  // Nonzero only for a negative variance (shrinkage) — the real cost,
-  // in cents, of what was written off via FEFO. Always 0 for a
-  // surplus or a confirmed-correct count.
   write_off_cost: number;
 }
 export interface StockTakeCloseResult {
@@ -368,20 +283,13 @@ export const recordStockTakeCount = (stockTakeId: string, itemId: string, counte
   });
 export const closeStockTake = (stockTakeId: string): Promise<StockTakeCloseResult> =>
   request(`/inventory/stocktake/${stockTakeId}/close`, { method: 'POST' });
-// Discards a forgotten/abandoned count with zero effect on inventory
-// and frees the business-wide lock — see stock_take.rs::cancel.
 export const cancelStockTake = (stockTakeId: string): Promise<StockTake> =>
   request(`/inventory/stocktake/${stockTakeId}/cancel`, { method: 'POST' });
 
-// ---- Settling a debt/credit record. See debt_settlement.rs. ----
 export interface SettleDebtSummary {
   debt_record_id: string; party_name: string; direction: string; amount: number;
   settled: true; payment_method: string; posted_to_bookkeeping_as: 'income' | 'expense' | null;
 }
-// payment_method is required — the backend rejects a blank one (see
-// debt_settlement::settle). A settlement is a real cash event; how it
-// was paid is a known fact by the time anyone is settling it, not
-// something that should ever land in the ledger as "(not set)".
 export const settleDebt = (debtRecordId: string, paymentMethod: string): Promise<SettleDebtSummary> =>
   request('/debt_credit/settle', { method: 'POST', body: JSON.stringify({ debt_record_id: debtRecordId, payment_method: paymentMethod }) });
 export interface DebtSummary {
@@ -394,10 +302,6 @@ export interface DebtSummary {
   due_soon_amount: number;
   due_soon_count: number;
 }
-// Real totals over the WHOLE Debt & Credit table (see
-// debt_settlement::summary on the backend) — deliberately not derived
-// from listRecords('debt_credit'), which caps at 1000 rows and would
-// silently undercount for a business with more open debt than that.
 export const getDebtSummary = (): Promise<DebtSummary> => request('/debt_credit/summary');
 
 export interface GrossProfitSummary {
@@ -407,18 +311,12 @@ export interface GrossProfitSummary {
   margin_pct: number | null;
   sales_count: number;
   cost_bearing_sales_count: number;
-  // All-time confirmed shrinkage from closed stock takes — see
-  // profit::shrinkage_cents. Deliberately separate from profit_cents
-  // above (what selling things made) vs. profit_cents_after_shrinkage
-  // (what the business actually kept, after write-offs).
   shrinkage_cents: number;
   profit_cents_after_shrinkage: number;
   margin_pct_after_shrinkage: number | null;
 }
 export const getGrossProfitSummary = (): Promise<GrossProfitSummary> => request('/sales/profit-summary');
 
-// Item-level margin — same fields/semantics as GrossProfitSummary,
-// just one row per item_name. See profit::by_item.
 export interface ItemProfit {
   item_name: string;
   revenue_cents: number;
@@ -433,10 +331,6 @@ export interface ItemProfit {
 export const getProfitByItem = (limit = 20): Promise<{ items: ItemProfit[] }> =>
   request(`/sales/profit-by-item?limit=${limit}`);
 
-// Category-level margin — same fields/semantics as GrossProfitSummary,
-// just one row per Inventory category ("Uncategorized" for a sale
-// whose item_name matches no current Inventory item). See
-// profit::by_category. Requires both Sales and Inventory enabled.
 export interface CategoryProfit {
   category: string;
   revenue_cents: number;
@@ -449,8 +343,6 @@ export interface CategoryProfit {
 export const getProfitByCategory = (range?: { start: string; end: string }): Promise<{ categories: CategoryProfit[] }> =>
   request(`/sales/profit-by-category${range ? `?${new URLSearchParams(range)}` : ''}`);
 
-// "Which SKUs are secretly losers" — current period vs the period
-// before it, per item. See profit::by_item_trend.
 export interface ItemMarginTrend {
   item_name: string;
   current_revenue_cents: number; current_cost_cents: number; current_profit_cents: number;
@@ -463,7 +355,6 @@ export interface ItemMarginTrend {
 export const getProfitTrend = (periodDays = 30, limit = 20): Promise<{ items: ItemMarginTrend[] }> =>
   request(`/sales/profit-trend?period_days=${periodDays}&limit=${limit}`);
 
-// Debtor aging (30/60/90) — see debt_settlement::aging_buckets.
 export interface DebtAgingSummary {
   bucket_1_30_amount: number;
   bucket_1_30_count: number;
@@ -478,7 +369,6 @@ export interface DebtAgingSummary {
 }
 export const getDebtAging = (): Promise<DebtAgingSummary> => request('/debt_credit/aging');
 
-// Refund rate by item — see refund_analysis::by_item.
 export interface RefundRate {
   item_name: string;
   sold_quantity: number;
@@ -490,7 +380,6 @@ export interface RefundRate {
 export const getRefundRateByItem = (limit = 20): Promise<{ items: RefundRate[] }> =>
   request(`/sales/refund-rate?limit=${limit}`);
 
-// Slow-moving stock — see stock_health::slow_movers.
 export interface SlowMover {
   item_name: string;
   quantity: number;
@@ -501,8 +390,6 @@ export interface SlowMover {
 export const getSlowMovers = (days = 30, limit = 20): Promise<{ items: SlowMover[] }> =>
   request(`/inventory/slow-movers?days=${days}&limit=${limit}`);
 
-// Stock runway — days of stock left at recent selling pace. See
-// stock_health::stock_runway.
 export interface StockRunway {
   item_name: string;
   quantity: number;
@@ -512,8 +399,6 @@ export interface StockRunway {
 export const getStockRunway = (days = 30, limit = 15): Promise<{ items: StockRunway[] }> =>
   request(`/inventory/stock-runway?days=${days}&limit=${limit}`);
 
-// Unpriced items — zero unit_cost, zero unit_price, or both. See
-// stock_health::unpriced_items.
 export interface UnpricedItem {
   item_name: string;
   quantity: number;
@@ -524,8 +409,6 @@ export interface UnpricedItem {
 export const getUnpricedItems = (limit = 50): Promise<{ items: UnpricedItem[] }> =>
   request(`/inventory/unpriced-items?limit=${limit}`);
 
-// Zero-cost purchase orders — unit_cost = 0 on Purchasing. See
-// stock_health::zero_cost_purchases.
 export interface ZeroCostPurchase {
   po_number: string;
   supplier: string;
@@ -536,7 +419,6 @@ export interface ZeroCostPurchase {
 export const getZeroCostPurchases = (limit = 50): Promise<{ items: ZeroCostPurchase[] }> =>
   request(`/purchasing/zero-cost?limit=${limit}`);
 
-// ---- Batch-costed inventory / FEFO. See batches.rs. ----
 export interface InventoryBatch {
   id: string;
   inventory_record_id: string;
@@ -563,10 +445,6 @@ export interface BatchSummary {
 export const getBatches = (inventoryRecordId: string): Promise<BatchSummary> =>
   request(`/inventory/${inventoryRecordId}/batches`);
 
-// unit_cost is omitted entirely (not sent as undefined) unless the
-// caller is actually changing it — see batches.rs's own
-// update_batch_price: cost edits are Owner-only, gated separately from
-// the price-only edit every Manager can already make.
 export const updateBatchPrice = (inventoryRecordId: string, batchId: string, unitPrice: number, unitCost?: number) =>
   request(`/inventory/${inventoryRecordId}/batches/${batchId}/price`, {
     method: 'POST',
@@ -586,10 +464,6 @@ export interface ExpiringBatch {
 export const getExpiringBatches = (withinDays = 30, limit = 50): Promise<{ items: ExpiringBatch[] }> =>
   request(`/inventory/expiring-batches?within_days=${withinDays}&limit=${limit}`);
 
-// Rollback — list real GitHub releases and check one tag's manifest
-// URL and database-schema compatibility. See rollback::list_releases /
-// check_rollback_target; both Owner-gated
-// server-side.
 export interface ReleaseOption {
   tag: string;
   name: string;
@@ -605,7 +479,6 @@ export interface RollbackCheck {
 export const checkRollbackTarget = (tag: string): Promise<RollbackCheck> =>
   request(`/system/releases/check?tag=${encodeURIComponent(tag)}`);
 
-// Day-of-week sales pattern — see sales_patterns::day_of_week_pattern.
 export interface DayOfWeekPattern {
   day_name: string;
   avg_revenue_cents: number;
@@ -613,20 +486,10 @@ export interface DayOfWeekPattern {
   occurrences: number;
 }
 export const getDayOfWeekPattern = (days = 90): Promise<{ items: DayOfWeekPattern[] }> => {
-  // Same offset_minutes convention as getHourOfDayPattern just below
-  // — a weekday boundary is exactly as UTC-sensitive as an hour one.
   const offsetMinutes = -new Date().getTimezoneOffset();
   return request(`/sales/day-of-week?days=${days}&offset_minutes=${offsetMinutes}`);
 };
 
-// Hour-of-day sales pattern — see sales_patterns::hour_of_day_pattern.
-// `offset_minutes` is derived here, not left to the caller: the
-// backend needs the real local UTC offset (minutes to ADD to UTC to
-// get local time) to bucket each sale into the right hour, since
-// every created_at it stores is UTC-only — see that function's own
-// doc comment for why. `Date.getTimezoneOffset()` returns the
-// opposite sign of what we want (positive west of UTC), hence the
-// negation.
 export interface HourOfDayPattern {
   hour: number;
   hour_label: string;
@@ -640,8 +503,6 @@ export const getHourOfDayPattern = (days = 30): Promise<{ items: HourOfDayPatter
   return request(`/sales/hour-of-day?days=${days}&offset_minutes=${offsetMinutes}`);
 };
 
-// Monthly sales trend and seasonal (month-of-year) pattern — see
-// sales_patterns::monthly_trend / seasonal_month_pattern.
 export interface PeriodTrendPoint {
   label: string;
   revenue_cents: number;
@@ -663,7 +524,6 @@ export const getSeasonalPattern = (): Promise<{ items: SeasonalMonthPattern[] }>
   return request(`/sales/seasonal?offset_minutes=${offsetMinutes}`);
 };
 
-// Dashboard highlights — see report_highlights.rs.
 export interface ReportHighlights {
   most_urgent_item: { item_name: string; days_of_stock_left: number } | null;
   busiest_day: { day_name: string; avg_revenue_cents: number } | null;
@@ -673,10 +533,6 @@ export const getReportHighlights = (): Promise<ReportHighlights> => {
   return request(`/reports/highlights?offset_minutes=${offsetMinutes}`);
 };
 
-// "Frequently bought together" — see basket_analysis.rs. Read-only
-// aggregation over data pos.rs already records (one order_id shared
-// across a checkout's line items); start/end are plain YYYY-MM-DD
-// date strings, same convention runReport already uses.
 export interface BasketPair {
   item_a: string;
   item_b: string;
@@ -695,15 +551,8 @@ export const getBasketAffinity = (params: { start?: string; end?: string; limit?
 export const getModuleSchema = (moduleId: string) => request(`/modules/${moduleId}/schema`);
 export const listRecords = (moduleId: string, search?: string) =>
   request(`/modules/${moduleId}/records${search ? `?search=${encodeURIComponent(search)}` : ''}`);
-// POS product lookup — needs only "sell" on Inventory, not "read".
-// Deliberately not listRecords('inventory', ...): that requires "read",
-// which also opens the door to the full Inventory module, its Reports
-// tab, and Dashboard/Analytics built from the same data. This returns
-// only the 5 fields the POS screen actually uses (see pos::lookup_products).
 export const lookupPosProducts = (search?: string) =>
   request(`/pos/products${search ? `?search=${encodeURIComponent(search)}` : ''}`);
-// Same "sell"-gated, cashier-facing narrowness as lookupPosProducts —
-// a restocking checklist, not a business report.
 export const getPosLowStock = (): Promise<{ items: { name: string; quantity: number; reorder_level: number }[] }> =>
   request('/pos/low-stock');
 export const createRecord = (moduleId: string, data: Record<string, unknown>) =>
@@ -718,10 +567,6 @@ export const exportModule = async (moduleId: string) => {
   downloadBlob(blob, `${moduleId}_export.xlsx`);
 };
 
-// ---- Excel import: download a blank template with real field names
-// as headers, fill it in (or export existing records and edit them —
-// this is also how a stock take works: export, correct the counted
-// quantities, reimport), then upload it back. See excel_import.rs.
 export const downloadImportTemplate = async (moduleId: string) => {
   const blob = await request(`/modules/${moduleId}/import-template`);
   downloadBlob(blob, `${moduleId}_import_template.xlsx`);
@@ -737,7 +582,6 @@ export const importExcel = (moduleId: string, fileBase64: string, keyField?: str
     body: JSON.stringify({ file_base64: fileBase64, key_field: keyField }),
   });
 
-// ---- Reports ----
 export const runReport = (moduleId: string, params: Record<string, string>) =>
   request(`/modules/${moduleId}/report?${new URLSearchParams(params)}`);
 export const exportReport = async (moduleId: string, params: Record<string, string>) => {
@@ -756,7 +600,6 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-// ---- AI ----
 export interface BusinessPulse {
   has_data: boolean;
   revenue_this_period_cents: number;
@@ -767,15 +610,9 @@ export interface BusinessPulse {
   recommendations: string[];
   currency: string;
 }
-// Same computed readout askAiInSession attaches to a chat answer,
-// fetched on its own so the Dashboard can show it without requiring a
-// chat question first. See business_pulse.rs — identical numbers,
-// identical RBAC, identical has_data:false degrade path.
 export const getBusinessPulse = (): Promise<{ business_pulse: BusinessPulse }> => request('/ai/pulse');
 export const getAiContext = () => request('/ai/context');
 
-// ---- AI chat history — see ai_chat.rs. Real, persisted sessions
-// instead of state that vanished when the panel closed. ----
 export interface AiChatSession {
   id: string;
   title: string;
@@ -788,14 +625,6 @@ export interface AiChatMessage {
   role: 'user' | 'ai';
   content: string;
   created_at: string;
-  // Only ever present on a freshly-returned 'ai' message from
-  // askAiInSession below — NOT persisted with the message (see
-  // http_api.rs's own comment on why: folding this into the stored
-  // answer text would pollute future prompts sent back to the AI
-  // provider). Reopening a past session's history will show that
-  // message without a pulse attached, which is correct, not a bug —
-  // the pulse is "how things stand right now," not a historical fact
-  // about that exact past moment.
   business_pulse?: BusinessPulse;
 }
 export const listAiSessions = (): Promise<{ sessions: AiChatSession[] }> => request('/ai/sessions');
@@ -814,7 +643,6 @@ export const exportAiChatHistory = async () => {
   downloadBlob(blob, 'ai-chat-history.xlsx');
 };
 
-// ---- Roles & permissions ----
 export const listRoles = () => request('/roles');
 export const createRole = (name: string) =>
   request('/roles', { method: 'POST', body: JSON.stringify({ name }) });
@@ -822,16 +650,12 @@ export const deleteRole = (roleId: string) =>
   request(`/roles/${roleId}`, { method: 'DELETE' });
 export const setRoleAdminFlag = (roleId: string, canAdminister: boolean) =>
   request(`/roles/${roleId}/admin-flag`, { method: 'PUT', body: JSON.stringify({ can_administer: canAdminister }) });
-// Independent of admin-flag and of per-module `read` — see
-// rbac::require_reports_access for why this is its own toggle rather
-// than folded into either of those.
 export const setRoleReportsFlag = (roleId: string, canViewReports: boolean) =>
   request(`/roles/${roleId}/reports-flag`, { method: 'PUT', body: JSON.stringify({ can_view_reports: canViewReports }) });
 export const getRolePermissions = (roleId: string) => request(`/roles/${roleId}/permissions`);
 export const setRolePermissions = (roleId: string, moduleId: string, actions: string[]) =>
   request(`/roles/${roleId}/permissions`, { method: 'PUT', body: JSON.stringify({ module_id: moduleId, actions }) });
 
-// ---- Users ----
 export const listUsers = () => request('/users');
 export const createUser = (payload: {
   username: string; password: string; role_id: string;
@@ -842,7 +666,6 @@ export const setUserRole = (userId: string, roleId: string) =>
 export const deactivateUser = (userId: string) =>
   request(`/users/${userId}`, { method: 'DELETE' });
 
-// ---- Units & currencies ----
 export const listUnits = () => request('/units');
 export const createUnit = (name: string, abbreviation?: string) =>
   request('/units', { method: 'POST', body: JSON.stringify({ name, abbreviation }) });
@@ -853,11 +676,6 @@ export const createCurrency = (code: string, symbol?: string, name?: string) =>
   request('/currencies', { method: 'POST', body: JSON.stringify({ code, symbol, name }) });
 export const deleteCurrency = (currencyId: string) => request(`/currencies/${currencyId}`, { method: 'DELETE' });
 
-// ---- Currency conversion — see currency.rs. Rates are cached and
-// only refreshed on request (rates_stale tells the UI when it's worth
-// nudging the owner to refresh, rather than hitting the external
-// exchange-rate API on every page load). Amounts are integer minor
-// units (cents) — see money.rs.
 export interface CurrencyRate { from_currency: string; to_currency: string; rate: number; fetched_at: number }
 export const getCurrencyRates = (base: string): Promise<{ rates: CurrencyRate[]; stale: boolean }> =>
   request(`/currency/rates?base=${encodeURIComponent(base)}`);
@@ -866,7 +684,6 @@ export const convertCurrency = (from: string, to: string, amountCents: number): 
 export const refreshCurrencyRates = (base: string) =>
   request(`/currency/refresh?base=${encodeURIComponent(base)}`, { method: 'POST' });
 
-// ---- Settings (theme, locale, etc.) ----
 export const getSettings = () => request('/settings');
 export const setSetting = (key: string, value: string) =>
   request('/settings', { method: 'PUT', body: JSON.stringify({ key, value }) });
@@ -890,33 +707,17 @@ export const createInvoice = (payload: {
   notes?: string;
 }) => request('/invoices', { method: 'POST', body: JSON.stringify(payload) });
 
-// ---- Invoice lifecycle — see invoice.rs::transition_status for the
-// exact allowed transitions (draft -> sent/cancelled, sent ->
-// paid/overdue/cancelled, overdue -> paid). The backend enforces
-// these; the UI only needs to know which buttons make sense to show
-// for the invoice's current status, not re-implement the rules.
 export const markInvoiceSent = (invoiceId: string) => request(`/invoices/${invoiceId}/send`, { method: 'POST' });
 export const markInvoicePaid = (invoiceId: string) => request(`/invoices/${invoiceId}/pay`, { method: 'POST' });
 export const cancelInvoice = (invoiceId: string) => request(`/invoices/${invoiceId}/cancel`, { method: 'POST' });
 
-// The invoice document itself is frozen at issue time (see
-// invoice.rs's own doc comment on why) — this is a separate,
-// always-fresh lookup of whatever's been refunded against the sale
-// an invoice was auto-generated from, so InvoiceView can disclose it
-// without ever rewriting the invoice's own original figures.
 export interface InvoiceRefundStatus { refunded_amount: number; is_refunded: boolean }
 export const getInvoiceRefundStatus = (invoiceId: string): Promise<InvoiceRefundStatus> =>
   request(`/invoices/${invoiceId}/refund-status`);
 
-// ---- Change business type after setup — re-applies that type's
-// sensible default module set. ----
 export const changeBusinessType = (businessType: string): Promise<{ enabled_modules: string[] }> =>
   request('/onboarding/setup', { method: 'POST', body: JSON.stringify({ business_type: businessType }) });
 
-// ---- Audit log — Owner-only, the record of who did what and when.
-// This is the actual "nothing gets lost, everything is accountable"
-// guarantee made concrete: every write anywhere in the app is logged
-// here automatically, not opt-in. ----
 export interface AuditLogEntry {
   id: string;
   user_id: string | null;
@@ -956,10 +757,6 @@ export const exportAuditLog = async (f: AuditLogFilters = {}) => {
   downloadBlob(blob, 'audit_log.xlsx');
 };
 
-// ---- Stock movement trace — the signed, per-item quantity ledger.
-// Every row is one real quantity change written in the same
-// transaction as the change itself, so the trace can never drift from
-// the stock it explains. See stock_movement.rs. Owner-only.
 export interface StockMovement {
   id: string;
   inventory_record_id: string;
@@ -1017,10 +814,6 @@ export const MOVEMENT_TYPES: { value: string; label: string }[] = [
   { value: 'stock_take_surplus', label: 'Stock take surplus' },
 ];
 
-// ---- Backup & restore — real disaster recovery, not a suggestion to
-// copy files manually. The raw database key is never shipped in the
-// backup itself; a passphrase the owner chooses wraps it instead, so
-// possessing the backup file alone is never enough to open it. ----
 export interface BackupData {
   database_base64: string;
   wrapped_key_base64: string;

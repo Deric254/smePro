@@ -19,15 +19,7 @@ export interface ModuleSchema {
   display_name: string;
   fields: FieldDef[];
   actions: string[];
-  /** What the CURRENTLY LOGGED IN user can actually do on this module —
-   * a subset of `actions`, computed server-side from their role. Use
-   * this to decide which buttons to show, not `actions` — that field
-   * is the module's theoretical capability list, the same for every
-   * user regardless of role. */
   my_permissions: string[];
-  /** The module's own declaration of its headline dashboard number, if
-   * it has one — null for a module that doesn't (falls back to a plain
-   * record count on the Dashboard instead). */
   dashboard_metric?: DashboardMetric | null;
 }
 

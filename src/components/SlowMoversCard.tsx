@@ -11,9 +11,6 @@ export default function SlowMoversCard({ items, currency }: { items: SlowMover[]
     );
   }
 
-  // Total across this slow-movers list only (there's no whole-business
-  // inventory value passed in here) — so the % reads as "share of the
-  // at-risk stock shown", the same "of shown" honesty as TopCustomersCard.
   const totalAtRisk = items.reduce((sum, it) => sum + it.value_at_risk_cents, 0);
 
   return (

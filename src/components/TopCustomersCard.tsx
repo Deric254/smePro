@@ -1,6 +1,5 @@
 import { formatMoney } from '../lib/money';
 
-// Uses report.rs's Category dimension grouped by customer, sorted DESC.
 export default function TopCustomersCard({ customers, currency }: { customers: { label: string; value: number }[]; currency: string }) {
   if (customers.length === 0) {
     return (
@@ -11,11 +10,6 @@ export default function TopCustomersCard({ customers, currency }: { customers: {
     );
   }
 
-  // Share of revenue across this displayed list, not of the whole
-  // business — there's no total-revenue figure passed in here, and
-  // implying "% of all sales" from a top-10 slice would be a false
-  // precision. Labeled "of shown" below so that distinction stays
-  // visible instead of silently assumed.
   const totalShown = customers.reduce((sum, c) => sum + c.value, 0);
 
   return (

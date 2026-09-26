@@ -14,8 +14,6 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<Mode>('login');
 
-  // Recovery form state — shared field names across both methods where
-  // they overlap (username, new password) to keep this simple.
   const [recoverUsername, setRecoverUsername] = useState('');
   const [answer1, setAnswer1] = useState('');
   const [answer2, setAnswer2] = useState('');
@@ -23,23 +21,11 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
 
-  // The actual security question TEXT, fetched by username before
-  // showing the answer fields at all — without this, the form could
-  // only ever say "Answer to question 1," a generic label the person
-  // has to somehow recall the real question behind, blind. null means
-  // "not fetched yet" (still on the username step); once fetched, the
-  // real question text renders as each field's own label.
   const [fetchedQuestions, setFetchedQuestions] = useState<{ question1: string | null; question2: string | null } | null>(null);
   const [questionsLoading, setQuestionsLoading] = useState(false);
 
   const [branding, setBranding] = useState<{ name: string | null; logo_url: string | null; slogan: string | null }>({ name: null, logo_url: null, slogan: null });
 
-  // Terms & Conditions — first-login blocking gate. See terms.rs on
-  // the backend for why this is per-user and versioned: `mode ===
-  // 'terms'` is reached only when the login response says the CURRENT
-  // user hasn't accepted the CURRENT version yet (see completeLogin
-  // below), and there is no path out of it except accepting or
-  // logging back out — no "skip" button on purpose.
   const [termsText, setTermsText] = useState('');
   const [termsLoading, setTermsLoading] = useState(false);
   const [termsAccepting, setTermsAccepting] = useState(false);
@@ -58,10 +44,6 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
       .finally(() => setTermsLoading(false));
   }, [mode]);
 
-  // `token` is stored via setSession immediately (acceptTerms below
-  // needs an authenticated session to call), but onLoggedIn() — the
-  // actual entry into the rest of the app — only fires once
-  // terms_accepted is true.
   function completeLogin(token: string, termsAccepted: boolean) {
     setSession(token, businessId);
     if (termsAccepted) {
@@ -84,10 +66,6 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     }
   }
 
-  // The only way out of the terms screen besides accepting: abandon
-  // this session and go back to the sign-in form. Best-effort logout
-  // (the session may already be about to expire on its own) — the
-  // client-side session clear is what actually matters here.
   function handleDeclineTerms() {
     logout().catch(() => {});
     clearSession();
@@ -95,12 +73,6 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   }
 
   useEffect(() => {
-    // The overwhelmingly common case: one installed copy of this app,
-    // one business, forever. Nobody running a shop should have to know
-    // or paste a UUID just to sign in — that's an implementation
-    // detail, not something to memorize. Only falls back to asking for
-    // it explicitly in the rare case where this install genuinely has
-    // more than one business and the app can't safely guess which one.
     getResolvedBusinessId()
       .then((r) => {
         if (r.business_id) {
@@ -184,14 +156,6 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
             <img
               src={`${API_BASE}${branding.logo_url}`}
               alt={branding.name || 'Business logo'}
-              // No forced background/border/corners here — a logo
-              // with real transparency (a circular badge design, for
-              // instance) was getting boxed into a stark white square
-              // with visible corners around it, exactly the opposite
-              // of what a transparent PNG is for. object-fit: contain
-              // keeps it from distorting; everything else about how
-              // it looks comes from the logo image itself, the same
-              // way receipts and invoices already render it.
               style={{ width: '3.2rem', height: '3.2rem', objectFit: 'contain' }}
             />
           ) : (

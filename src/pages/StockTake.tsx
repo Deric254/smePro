@@ -17,8 +17,6 @@ export default function StockTakePage() {
   const [cancelling, setCancelling] = useState(false);
   const [closeResult, setCloseResult] = useState<StockTakeCloseResult | null>(null);
   const [currency, setCurrency] = useState('USD');
-  // Local text per item, so someone can clear a field and retype
-  // without an in-flight save fighting the input mid-keystroke.
   const [countText, setCountText] = useState<Record<string, string>>({});
   const [savingItemId, setSavingItemId] = useState<string | null>(null);
 

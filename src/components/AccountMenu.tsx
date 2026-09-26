@@ -10,13 +10,6 @@ function initials(name: string) {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
-/**
- * The account/profile menu — a name/role badge that opens a small
- * popup with sign-out inside it. This replaces what used to be a
- * bare "Sign out" button floating at the top of every page with no
- * indication of who was even signed in — a real account menu needed
- * to exist before sign-out had anywhere sensible to live.
- */
 export default function AccountMenu({ onSignOut }: { onSignOut: () => void }) {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [open, setOpen] = useState(false);

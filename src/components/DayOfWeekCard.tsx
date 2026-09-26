@@ -14,8 +14,6 @@ export default function DayOfWeekCard({ items, currency }: { items: DayOfWeekPat
 
   const maxRevenue = Math.max(...items.map((d) => d.avg_revenue_cents), 1);
   const minOccurrences = Math.min(...withData.map((d) => d.occurrences));
-  // Share of the week's average daily revenue, so the bar's length has
-  // a number attached rather than only a relative visual comparison.
   const totalRevenue = items.reduce((sum, d) => sum + d.avg_revenue_cents, 0);
 
   return (
