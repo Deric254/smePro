@@ -1,7 +1,7 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary, getBusinessPulse, getReportHighlights, getProfitByCategory } from '../api';
+import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary, getBusinessPulse, getReportHighlights } from '../api';
 import type { ModuleListItem } from '../types';
-import type { DebtSummary, GrossProfitSummary, BusinessPulse, ReportHighlights, CategoryProfit } from '../api';
+import type { DebtSummary, GrossProfitSummary, BusinessPulse, ReportHighlights } from '../api';
 import { formatMoney } from '../lib/money';
 import BusinessPulseCard from '../components/BusinessPulseCard';
 
@@ -59,11 +59,6 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
   // Each field independently null when there's nothing worth
   // highlighting yet, same discipline as everything else here.
   const [highlights, setHighlights] = useState<ReportHighlights | null>(null);
-  // Same null-until-real-data discipline as grossProfit above. Empty
-  // array (module enabled, zero categorized sales yet) is real data
-  // and does render; null (not fetched, no permission, or Inventory
-  // not enabled — see profit::by_category) does not.
-  const [categoryProfit, setCategoryProfit] = useState<CategoryProfit[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -130,10 +125,6 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
       // Same best-effort fetch, same reason — Sales not enabled, or no
       // "read" permission on it, and the card below just doesn't render.
       getGrossProfitSummary().then((p) => { if (!cancelled) setGrossProfit(p); }).catch(() => {});
-      // Same best-effort fetch, same reason — Inventory not enabled
-      // (no `category` to group by) or no "read" on Sales, and the
-      // card below just doesn't render.
-      getProfitByCategory().then((r) => { if (!cancelled) setCategoryProfit(r.categories); }).catch(() => {});
       // Same best-effort fetch, same reason. A `has_data: false` pulse
       // still renders (its own honest "not enough history yet" state,
       // set inside BusinessPulseCard) — only a hard fetch failure (e.g.
@@ -161,10 +152,6 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
       </div>
 
       {grossProfit && <GrossProfitKpi data={grossProfit} currency={currency} onOpen={() => onSelectModule('sales')} />}
-
-      {categoryProfit && categoryProfit.length > 0 && (
-        <CategoryProfitCard data={categoryProfit} currency={currency} onOpen={() => onSelectModule('sales')} />
-      )}
 
       {debtSummary && <DebtStandingKpi data={debtSummary} currency={currency} onOpen={() => onSelectModule('debt_credit')} />}
 
@@ -300,49 +287,6 @@ function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; 
           Only {data.cost_bearing_sales_count} of {data.sales_count} sales have real cost data — margin is based on those only
         </div>
       ) : null}
-    </button>
-  );
-}
-
-// "Which line of the business is actually making money" — one row per
-// Inventory category (see profit::by_category), sorted by profit,
-// highest first. Same partial-cost-data honesty as GrossProfitKpi and
-// ItemMarginCard above: a category's own missing-cost count is shown
-// right where its number is, not buried in a footnote.
-function CategoryProfitCard({ data, currency, onOpen }: { data: CategoryProfit[]; currency: string; onOpen: () => void }) {
-  return (
-    <button
-      className="card"
-      onClick={onOpen}
-      style={{ display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer', marginBottom: '0.9rem', padding: '0.8rem 1.1rem' }}
-    >
-      <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '0.4rem' }}>
-        Profit by category
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-        {data.map((c) => {
-          const isProfit = c.profit_cents >= 0;
-          const missing = c.sales_count - c.cost_bearing_sales_count;
-          return (
-            <div key={c.category} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '0.6rem', fontSize: '0.86rem' }}>
-              <div style={{ minWidth: 0 }}>
-                <span>{c.category}</span>
-                <span style={{ fontSize: '0.76rem', color: 'var(--ink-soft)', marginLeft: '0.4rem' }}>
-                  {c.sales_count} sale{c.sales_count === 1 ? '' : 's'}{missing > 0 ? ` · ${missing} no cost data` : ''}
-                </span>
-              </div>
-              <div style={{ textAlign: 'right', flexShrink: 0, fontWeight: 600, color: isProfit ? 'var(--ink)' : 'var(--stamp)' }}>
-                {isProfit ? '+' : '−'}{formatMoney(Math.abs(c.profit_cents), currency)}
-                {c.margin_pct !== null && (
-                  <span style={{ fontWeight: 400, fontSize: '0.76rem', color: 'var(--ink-soft)', marginLeft: '0.35rem' }}>
-                    {c.margin_pct.toFixed(1)}%
-                  </span>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
     </button>
   );
 }

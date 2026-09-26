@@ -247,3 +247,88 @@ fn test_gross_profit_summary_flags_missing_historical_cost_data() {
     assert_eq!(summary.cost_cents, 0);
     assert_eq!(summary.cost_bearing_sales_count, 0, "cost_at_sale forced to 0 on a hand-created sale must not be counted as real cost data");
 }
+
+/// Seeds one sales row directly (bypassing checkout entirely, same as
+/// the legacy-data tests above) with an explicit `sale_date` — this
+/// is testing by_item_trend's own windowing arithmetic on the Sales
+/// table's shape, not checkout's, so controlling sale_date precisely
+/// matters far more here than reproducing a real checkout.
+fn seed_sale(conn: &rusqlite::Connection, biz: &str, item_name: &str, revenue: i64, cost_at_sale: i64, sale_date: &str) {
+    let mut record = serde_json::Map::new();
+    record.insert("item_name".into(), json!(item_name));
+    record.insert("quantity".into(), json!(1));
+    record.insert("revenue".into(), json!(revenue));
+    record.insert("cost_at_sale".into(), json!(cost_at_sale));
+    record.insert("discount_amount".into(), json!(0));
+    record.insert("sale_date".into(), json!(sale_date));
+    let module = crate::crud::load_module(conn, biz, "sales").unwrap();
+    let record_map: std::collections::HashMap<String, serde_json::Value> = record.into_iter().collect();
+    crate::crud::insert_validated_record(conn, biz, &module, &record_map).unwrap();
+}
+
+#[test]
+fn test_by_item_trend_flags_a_currently_losing_item_and_its_decline() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let today = "2024-06-30"; // current window: 2024-06-01..2024-06-30; previous: 2024-05-02..2024-05-31
+
+    // Widget used to be healthy (80% margin last period) and is now
+    // losing money outright this period — exactly the item this
+    // report exists to surface.
+    seed_sale(&conn, &biz, "Widget", 1000, 1200, "2024-06-05");
+    seed_sale(&conn, &biz, "Widget", 1000, 1300, "2024-06-15");
+    seed_sale(&conn, &biz, "Widget", 1000, 200, "2024-05-10");
+
+    // Gadget is healthy this period with no prior-period sales at
+    // all — must show a real current margin but no fabricated trend.
+    seed_sale(&conn, &biz, "Gadget", 1000, 200, "2024-06-20");
+
+    // Old Thing only sold well outside both windows — must not appear
+    // in this report at all, it has nothing current to trend.
+    seed_sale(&conn, &biz, "Old Thing", 1000, 100, "2024-01-01");
+
+    let results = crate::profit::by_item_trend(&conn, &biz, &uid, today, 30, 20).unwrap();
+
+    assert!(results.iter().all(|r| r.item_name != "Old Thing"));
+
+    let widget = results.iter().find(|r| r.item_name == "Widget").unwrap();
+    assert_eq!(widget.current_revenue_cents, 2000);
+    assert_eq!(widget.current_cost_cents, 2500);
+    assert_eq!(widget.current_profit_cents, -500);
+    assert_eq!(widget.current_sales_count, 2);
+    assert!(widget.is_losing_money, "cost exceeded revenue this period on real cost data");
+    assert_eq!(widget.previous_revenue_cents, 1000);
+    assert_eq!(widget.previous_profit_cents, 800);
+    let change = widget.margin_pct_change_pts.expect("both periods have revenue, a real change must be computed");
+    assert!(change < 0.0, "margin fell from 80% to -25%, the change must be negative");
+
+    let gadget = results.iter().find(|r| r.item_name == "Gadget").unwrap();
+    assert_eq!(gadget.current_profit_cents, 800);
+    assert!(!gadget.is_losing_money);
+    assert_eq!(gadget.previous_revenue_cents, 0);
+    assert_eq!(gadget.previous_margin_pct, None, "no prior-period sales means no real previous margin to report");
+    assert_eq!(gadget.margin_pct_change_pts, None, "can't compute a real change with no prior-period side");
+
+    // Biggest current loss ranks first.
+    assert_eq!(results[0].item_name, "Widget");
+}
+
+#[test]
+fn test_by_item_trend_period_days_is_clamped() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    // Same day as `today` so it falls inside even the smallest
+    // possible clamped window (1 day).
+    seed_sale(&conn, &biz, "Widget", 1000, 200, "2024-06-30");
+
+    // Out-of-range inputs must not panic or silently error — same
+    // clamp-not-reject rule as stock_health::slow_movers. 0 clamps up
+    // to 1, 100000 clamps down to 180; neither should blow up the
+    // date arithmetic or the query.
+    let results = crate::profit::by_item_trend(&conn, &biz, &uid, "2024-06-30", 0, 500).unwrap();
+    assert_eq!(results.len(), 1);
+    let results = crate::profit::by_item_trend(&conn, &biz, &uid, "2024-06-30", 100_000, 500).unwrap();
+    assert_eq!(results.len(), 1);
+}

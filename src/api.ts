@@ -266,6 +266,19 @@ export interface CustomerMatch { id: string; name: string | null; phone: string 
 export const searchCustomers = (query: string): Promise<{ customers: CustomerMatch[] }> =>
   request(`/customers/search?q=${encodeURIComponent(query)}`);
 
+// "Gone quiet" signal — repeat customers (2+ purchases) whose gap
+// since their last purchase has grown past their own historical
+// rhythm. See customers::repeat_purchase_risk. A customer with only
+// one purchase has no rhythm to compare against and won't appear
+// here at all — that's not a bug, there's nothing to flag yet.
+export interface RepeatCustomerRisk {
+  id: string; name: string | null; phone: string | null;
+  order_count: number; avg_days_between_purchases: number;
+  days_since_last_purchase: number; at_risk: boolean;
+}
+export const getRepeatPurchaseRisk = (): Promise<{ customers: RepeatCustomerRisk[] }> =>
+  request('/customers/at-risk');
+
 // ---- Refunds — the counterpart to checkout. See refund.rs. ----
 export interface RefundRequest {
   sale_id: string;
@@ -435,6 +448,20 @@ export interface CategoryProfit {
 }
 export const getProfitByCategory = (): Promise<{ categories: CategoryProfit[] }> =>
   request('/sales/profit-by-category');
+
+// "Which SKUs are secretly losers" — current period vs the period
+// before it, per item. See profit::by_item_trend.
+export interface ItemMarginTrend {
+  item_name: string;
+  current_revenue_cents: number; current_cost_cents: number; current_profit_cents: number;
+  current_margin_pct: number | null; current_sales_count: number; current_cost_bearing_sales_count: number;
+  previous_revenue_cents: number; previous_cost_cents: number; previous_profit_cents: number;
+  previous_margin_pct: number | null; previous_sales_count: number; previous_cost_bearing_sales_count: number;
+  margin_pct_change_pts: number | null;
+  is_losing_money: boolean;
+}
+export const getProfitTrend = (periodDays = 30, limit = 20): Promise<{ items: ItemMarginTrend[] }> =>
+  request(`/sales/profit-trend?period_days=${periodDays}&limit=${limit}`);
 
 // Debtor aging (30/60/90) — see debt_settlement::aging_buckets.
 export interface DebtAgingSummary {

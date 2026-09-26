@@ -3,6 +3,8 @@ mod common;
 #[cfg(test)]
 mod ai_chat_tests;
 #[cfg(test)]
+mod ai_context_tests;
+#[cfg(test)]
 mod auth_tests;
 #[cfg(test)]
 mod business_branding_tests;
@@ -50,6 +52,8 @@ mod receipt_branding_tests;
 mod report_tests;
 #[cfg(test)]
 mod stock_take_tests;
+#[cfg(test)]
+mod stock_health_tests;
 #[cfg(test)]
 mod unique_constraint_migration_tests;
 #[cfg(test)]

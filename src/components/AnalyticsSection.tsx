@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { runReport, getBusinessInfo } from '../api';
+import { runReport, getBusinessInfo, getProfitByCategory } from '../api';
+import type { CategoryProfit } from '../api';
 import TimeSlicer, { defaultRange } from './TimeSlicer';
 import type { DateRange } from './TimeSlicer';
 import { formatMoney } from '../lib/money';
@@ -52,6 +53,15 @@ export default function AnalyticsSection() {
   const [bucket, setBucket] = useState<Bucket>('day');
   const [loading, setLoading] = useState(true);
   const [currency, setCurrency] = useState('USD');
+  // All-time, not scoped to `range` — same as profit::by_category's
+  // own design (see the Dashboard's former plain-list version of this
+  // card, now replaced by the chart below). Fetched once, not
+  // re-fetched when the TimeSlicer range changes.
+  const [categoryProfit, setCategoryProfit] = useState<CategoryProfit[] | null>(null);
+
+  useEffect(() => {
+    getProfitByCategory().then((r) => setCategoryProfit(r.categories)).catch(() => setCategoryProfit([]));
+  }, []);
 
   useEffect(() => {
     getBusinessInfo().then((b: any) => { if (b?.currency) setCurrency(b.currency); }).catch(() => {});
@@ -307,6 +317,57 @@ export default function AnalyticsSection() {
             </ResponsiveContainer>
           )}
         </div>
+      </div>
+
+      {/* All-time, unlike everything above (which follows the
+          TimeSlicer) — same reasoning profit::by_category itself is
+          built on: "which line of the business is actually making
+          money" is a standing question, not a per-week one. Two-tone
+          bars (profit vs. loss) instead of the single-color palette
+          the pie chart above uses, since sign is the one thing this
+          chart needs to communicate before any of its magnitudes. */}
+      <div className="card" style={{ marginTop: '0.7rem', height: 240, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem', flexShrink: 0 }}>Profit by category (all time)</div>
+        {categoryProfit === null ? (
+          <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
+        ) : categoryProfit.length === 0 ? (
+          <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No categorized sales yet.</div>
+        ) : (
+          // Same scroll-once-it-doesn't-fit approach as "Top sellers"
+          // above, same reason: a real catalog can have more
+          // categories than a fixed-height card can show at a legible
+          // row height.
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            <div style={{ width: '100%', height: Math.max(categoryProfit.length * 26, 150) }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={categoryProfit.map((c) => ({ label: c.category, value: c.profit_cents }))}
+                  layout="vertical"
+                  margin={{ top: 8, left: 8, right: 56, bottom: 4 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v) => formatMoney(v, currency)} />
+                  <YAxis type="category" dataKey="label" width={110} tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} />
+                  <Tooltip
+                    contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
+                    formatter={(v) => [formatMoney(Number(v), currency), 'Profit']}
+                  />
+                  <Bar dataKey="value" radius={[0, 3, 3, 0]}>
+                    {categoryProfit.map((c) => (
+                      <Cell key={c.category} fill={c.profit_cents >= 0 ? 'var(--stamp)' : '#a15c5c'} />
+                    ))}
+                    <LabelList
+                      dataKey="value"
+                      position="right"
+                      formatter={(v: ReactNode) => formatMoney(Number(v), currency)}
+                      style={{ fontSize: 10, fill: 'var(--ink-soft)' }}
+                    />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

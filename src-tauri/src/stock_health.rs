@@ -82,7 +82,9 @@ pub fn slow_movers(
              SELECT i.id, i.name, i.quantity, i.unit_cost,
                     COALESCE(bt.batches_qty, 0) AS batches_qty,
                     COALESCE(bt.batches_value, 0) AS batches_value,
-                    MAX(s.created_at) AS last_sale_at
+                    MAX(s.created_at) AS last_sale_at,
+                    COALESCE(bt.batches_value, 0)
+                      + CAST(ROUND(MAX(i.quantity - COALESCE(bt.batches_qty, 0), 0) * COALESCE(i.unit_cost, 0)) AS INTEGER) AS value_at_risk_cents
              FROM {inv_table} i
              LEFT JOIN batch_totals bt ON bt.inventory_record_id = i.id
              LEFT JOIN {sales_table} s
@@ -95,7 +97,7 @@ pub fn slow_movers(
                      ELSE CAST(julianday(?2) - julianday(last_sale_at) AS INTEGER) END AS days_since
          FROM per_item
          WHERE last_sale_at IS NULL OR last_sale_at < date(?2, '-' || ?3 || ' days')
-         ORDER BY CASE WHEN last_sale_at IS NULL THEN 0 ELSE 1 END, last_sale_at ASC
+         ORDER BY value_at_risk_cents DESC, CASE WHEN last_sale_at IS NULL THEN 0 ELSE 1 END, last_sale_at ASC
          LIMIT ?4"
     );
 

@@ -196,3 +196,78 @@ fn test_search_empty_query_returns_nothing() {
     let results = crate::customers::search(&conn, &biz, "   ").unwrap();
     assert!(results.is_empty());
 }
+
+/// Checks out one item for the given customer and back-dates that
+/// sale's created_at to `date` (YYYY-MM-DD) — checkout() itself always
+/// stamps `datetime('now')`, so controlling the gap between purchases
+/// for a deterministic test means moving it after the fact, the same
+/// way a test would fake "3 batches received on 3 different days"
+/// elsewhere in this suite.
+fn checkout_for_customer_on(
+    conn: &mut rusqlite::Connection,
+    biz: &str,
+    uid: &str,
+    inv_id: &str,
+    customer: &str,
+    phone: &str,
+    date: &str,
+) {
+    let req = crate::pos::CheckoutRequest {
+        idempotency_key: None,
+        discount_pct: None,
+        items: vec![crate::pos::CartItem { inventory_record_id: inv_id.to_string(), quantity: 1 }],
+        payment_method: Some("Cash".into()),
+        customer: Some(customer.to_string()),
+        customer_phone: Some(phone.to_string()),
+        allow_oversell: false,
+        on_credit: false,
+        due_date: None,
+    };
+    let result = crate::pos::checkout(conn, biz, uid, req).unwrap();
+    let order_id = result["order_id"].as_str().unwrap();
+    conn.execute(
+        "UPDATE module_sales SET created_at = ?1 WHERE business_id = ?2 AND order_id = ?3",
+        rusqlite::params![format!("{date} 12:00:00"), biz, order_id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_repeat_purchase_risk_flags_customer_overdue_relative_to_own_rhythm() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = seed_inventory_item(&conn, &biz, "ITEM-001", "Widget", 100, 100, 500);
+
+    // Asha buys like clockwork every 20 days, then goes quiet — by
+    // "today" (2024-03-15) it has been 33 days since her last
+    // purchase, well past her own 20-day rhythm × the 1.5 default.
+    checkout_for_customer_on(&mut conn, &biz, &uid, &inv_id, "Asha", "0700000001", "2024-01-01");
+    checkout_for_customer_on(&mut conn, &biz, &uid, &inv_id, "Asha", "0700000001", "2024-01-21");
+    checkout_for_customer_on(&mut conn, &biz, &uid, &inv_id, "Asha", "0700000001", "2024-02-10");
+
+    // Brian buys on the same 20-day rhythm and is still well within
+    // it as of "today" — must NOT be flagged just for having a gap at
+    // all.
+    checkout_for_customer_on(&mut conn, &biz, &uid, &inv_id, "Brian", "0700000002", "2024-02-01");
+    checkout_for_customer_on(&mut conn, &biz, &uid, &inv_id, "Brian", "0700000002", "2024-02-21");
+    checkout_for_customer_on(&mut conn, &biz, &uid, &inv_id, "Brian", "0700000002", "2024-03-10");
+
+    // Cynthia has only ever bought once — no rhythm exists to compare
+    // against, so she must not appear in this report at all.
+    checkout_for_customer_on(&mut conn, &biz, &uid, &inv_id, "Cynthia", "0700000003", "2024-03-01");
+
+    let results = crate::customers::repeat_purchase_risk(&conn, &biz, &uid, "2024-03-15", 1.5).unwrap();
+
+    assert_eq!(results.len(), 2, "only the two repeat customers, never the one-time buyer");
+    let asha = results.iter().find(|r| r.name.as_deref() == Some("Asha")).unwrap();
+    assert_eq!(asha.order_count, 3);
+    assert!((asha.avg_days_between_purchases - 20.0).abs() < 0.01);
+    assert_eq!(asha.days_since_last_purchase, 33);
+    assert!(asha.at_risk, "33 days since last purchase is well past 20 × 1.5 = 30");
+
+    let brian = results.iter().find(|r| r.name.as_deref() == Some("Brian")).unwrap();
+    assert!(!brian.at_risk, "5 days since last purchase is nowhere near 20 × 1.5 = 30");
+
+    assert!(results.iter().all(|r| r.name.as_deref() != Some("Cynthia")));
+}

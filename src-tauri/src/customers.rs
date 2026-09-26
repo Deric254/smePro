@@ -25,6 +25,7 @@
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -288,4 +289,106 @@ pub fn search(conn: &Connection, business_id: &str, query: &str) -> Result<Vec<V
         .collect::<rusqlite::Result<Vec<_>>>()
     };
     rows.map_err(Into::into)
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepeatCustomerRisk {
+    pub id: String,
+    pub name: Option<String>,
+    pub phone: Option<String>,
+    pub order_count: i64,
+    pub avg_days_between_purchases: f64,
+    pub days_since_last_purchase: i64,
+    /// days_since_last_purchase > risk_multiplier × their own average
+    /// gap — see repeat_purchase_risk's own doc comment for why this
+    /// is relative to each customer's rhythm, not one fixed number.
+    pub at_risk: bool,
+}
+
+/// A repeat customer (2+ purchases) whose gap since their LAST
+/// purchase has grown well past THEIR OWN historical rhythm — the
+/// "gone quiet" signal `list` above can't surface, because a big
+/// spender who vanished 90 days ago still looks like a top customer
+/// there, sorted by lifetime value with no notion of recency built in.
+///
+/// "At risk" is relative to each customer's own average gap between
+/// past purchases, not one fixed number for everyone: a weekly
+/// regular going quiet for 3 weeks is a very different signal than a
+/// twice-a-year customer who last bought 3 weeks ago. `risk_multiplier`
+/// controls how far past that average counts as overdue (1.5 means
+/// "50% later than their usual gap").
+///
+/// A customer with only one purchase has no rhythm to compare against
+/// yet and is excluded entirely, same reasoning as GrossProfitSummary
+/// excluding sales with no real cost data rather than guessing one —
+/// this reports on customers going quiet, not on first-timers who
+/// haven't been given a chance to return.
+///
+/// Ordered by how far past their own expected return date they
+/// already are — the most overdue relative to their own rhythm first,
+/// same "rank by what's actually actionable" idea as
+/// stock_health::slow_movers ranking by capital at risk rather than
+/// raw staleness.
+pub fn repeat_purchase_risk(
+    conn: &Connection,
+    business_id: &str,
+    user_id: &str,
+    today: &str,
+    risk_multiplier: f64,
+) -> Result<Vec<RepeatCustomerRisk>> {
+    crate::rbac::require(conn, user_id, "sales", "read")?;
+    let sales_table = crate::crud::load_module(conn, business_id, "sales")
+        .map(|m| m.table_name())
+        .unwrap_or_else(|_| "sales_records".to_string());
+
+    // Same clamp-a-caller-supplied-multiplier-to-something-sane rule
+    // as slow_movers clamping stale_after_days — a non-finite or
+    // non-positive value would make every repeat customer either
+    // permanently "at risk" or never so.
+    let risk_multiplier = if risk_multiplier.is_finite() && risk_multiplier > 0.0 { risk_multiplier } else { 1.5 };
+
+    let sql = format!(
+        "WITH customer_sales AS (
+             SELECT c.id AS customer_id, c.name, c.phone, s.created_at
+             FROM customers c
+             JOIN {sales_table} s
+               ON s.business_id = c.business_id AND s.deleted_at IS NULL AND {SALE_MATCH_CONDITION}
+             WHERE c.business_id = ?1
+         ),
+         gaps AS (
+             SELECT customer_id,
+                    julianday(created_at) - julianday(LAG(created_at) OVER (PARTITION BY customer_id ORDER BY created_at)) AS gap_days
+             FROM customer_sales
+         ),
+         stats AS (
+             SELECT cs.customer_id, cs.name, cs.phone,
+                    COUNT(*) AS order_count,
+                    MAX(cs.created_at) AS last_purchase_at,
+                    (SELECT AVG(g.gap_days) FROM gaps g WHERE g.customer_id = cs.customer_id AND g.gap_days IS NOT NULL) AS avg_gap_days
+             FROM customer_sales cs
+             GROUP BY cs.customer_id
+             HAVING COUNT(*) >= 2
+         )
+         SELECT customer_id, name, phone, order_count, avg_gap_days,
+                CAST(julianday(?2) - julianday(last_purchase_at) AS INTEGER) AS days_since
+         FROM stats
+         ORDER BY (CAST(julianday(?2) - julianday(last_purchase_at) AS INTEGER)) - (avg_gap_days * ?3) DESC"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![business_id, today, risk_multiplier], |r| {
+        let avg_gap_days: f64 = r.get(4)?;
+        let days_since_last_purchase: i64 = r.get(5)?;
+        Ok(RepeatCustomerRisk {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            phone: r.get(2)?,
+            order_count: r.get(3)?,
+            avg_days_between_purchases: avg_gap_days,
+            days_since_last_purchase,
+            at_risk: (days_since_last_purchase as f64) > avg_gap_days * risk_multiplier,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }

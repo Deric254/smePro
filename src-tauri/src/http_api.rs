@@ -1305,6 +1305,23 @@ fn route(
         };
     }
 
+    // ---- Item margin trend: /sales/profit-trend?period_days=&limit=
+    // — "which SKUs are secretly losers." Compares the last
+    // period_days to the period_days before that, per item. See
+    // profit::by_item_trend. Reports-gated, same reasoning as
+    // profit-summary above.
+    if parts.as_slice() == ["sales", "profit-trend"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
+        let q = query_params(url);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let period_days = q.get("period_days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30);
+        let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(20);
+        return match crate::profit::by_item_trend(conn, &business_id, &user_id, &today, period_days, limit) {
+            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Err(e) => crud_error(&e),
+        };
+    }
+
     // ---- Refund rate by item: /sales/refund-rate?limit= — see
     // refund_analysis.rs. Requires read on both Sales and Refunds, AND
     // (see rbac::require_reports_access) Reports access — this is a
@@ -1947,6 +1964,19 @@ fn route(
         if let Err(e) = rbac::require(conn, &user_id, "sales", "read") { return json_err(403, &e.to_string()); }
         return match crate::customers::list(conn, &business_id) {
             Ok(v) => ApiResponse::Json(200, v),
+            Err(e) => json_err(500, &e.to_string()),
+        };
+    }
+    // Checked BEFORE the generic /customers/{id} route below, same
+    // reason "search" is: a fixed segment must never be parsed as a
+    // customer id.
+    if parts.as_slice() == ["customers", "at-risk"] && *method == Method::Get {
+        if let Err(e) = rbac::require(conn, &user_id, "sales", "read") { return json_err(403, &e.to_string()); }
+        let q = query_params(url);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let risk_multiplier = q.get("multiplier").and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.5);
+        return match crate::customers::repeat_purchase_risk(conn, &business_id, &user_id, &today, risk_multiplier) {
+            Ok(v) => ApiResponse::Json(200, json!({"customers": v})),
             Err(e) => json_err(500, &e.to_string()),
         };
     }

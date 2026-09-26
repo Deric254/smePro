@@ -311,3 +311,157 @@ pub fn by_category(conn: &Connection, business_id: &str, user_id: &str) -> Resul
 
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct ItemMarginTrend {
+    pub item_name: String,
+    pub current_revenue_cents: i64,
+    pub current_cost_cents: i64,
+    pub current_profit_cents: i64,
+    /// Same "undefined, not zero" rule as ItemProfit::margin_pct
+    /// above, same condition (revenue > 0) — deliberately NOT also
+    /// gated on cost_bearing_sales_count, for the same reason
+    /// GrossProfitSummary's own margin_pct isn't: that gap is
+    /// reported honestly through cost_bearing count instead of
+    /// silently hiding the number. `is_losing_money` below is the one
+    /// field that DOES require real cost data, for a different
+    /// reason — see its own doc comment.
+    pub current_margin_pct: Option<f64>,
+    pub current_sales_count: i64,
+    pub current_cost_bearing_sales_count: i64,
+    pub previous_revenue_cents: i64,
+    pub previous_cost_cents: i64,
+    pub previous_profit_cents: i64,
+    pub previous_margin_pct: Option<f64>,
+    pub previous_sales_count: i64,
+    pub previous_cost_bearing_sales_count: i64,
+    /// current_margin_pct minus previous_margin_pct, in percentage
+    /// points. None whenever either side is itself None — a computed
+    /// "improved" or "declined" reading built on a period with no
+    /// revenue at all would be worse than no reading.
+    pub margin_pct_change_pts: Option<f64>,
+    /// Unambiguous only: cost exceeded revenue THIS period, AND at
+    /// least one of this period's sales actually carried real cost
+    /// data to base that on. This is the literal "secretly losing
+    /// money" case an item can hit while still showing healthy
+    /// revenue — and unlike margin_pct above, this is deliberately
+    /// held back rather than computed from a 0-cost/0-revenue
+    /// placeholder, because "you are losing money on this" is a
+    /// strong, actionable claim that must not be made from missing
+    /// data dressed up as a real zero.
+    pub is_losing_money: bool,
+}
+
+/// "Which SKUs are secretly losers" — the same revenue-minus-cost
+/// arithmetic as `by_item` above, computed over two adjacent,
+/// equal-length windows (the last `period_days` days, and the
+/// `period_days` before that) instead of one all-time total, so an
+/// item whose margin just turned negative — or is quietly sliding —
+/// doesn't stay hidden inside a lifetime number that still looks
+/// fine.
+///
+/// Windowed on Sales' own `sale_date` (a plain business date, backfilled
+/// for older rows — see db_migrations.rs — and set directly by
+/// pos::checkout/create_service_sale on every sale since), not
+/// `created_at`, for the same reason `sale_date` exists at all: a
+/// business date an owner would actually recognize as "when this was
+/// sold," not an insert timestamp.
+///
+/// Only items with at least one sale in the CURRENT window are
+/// returned — an item nobody sold recently has nothing to trend.
+/// Ordered by current profit ascending: the biggest current losses
+/// first, since that's the most actionable ordering for a report
+/// titled "which SKUs are secretly losers."
+pub fn by_item_trend(
+    conn: &Connection,
+    business_id: &str,
+    user_id: &str,
+    today: &str,
+    period_days: i64,
+    limit: i64,
+) -> Result<Vec<ItemMarginTrend>> {
+    crate::rbac::require(conn, user_id, "sales", "read")?;
+    let sales_module = crate::crud::load_module(conn, business_id, "sales")
+        .map_err(|_| anyhow!("the Sales module isn't enabled for this business"))?;
+    let table = sales_module.table_name();
+
+    // Same clamp-not-reject rule as slow_movers' stale_after_days —
+    // 180 days is a generous outer bound for a period comparison
+    // report without letting a huge value make the query scan the
+    // entire sales history twice for no real benefit.
+    let period_days = period_days.clamp(1, 180);
+    let limit = limit.clamp(1, 100);
+
+    let sql = format!(
+        "WITH bounds AS (
+             SELECT date(?2) AS current_end,
+                    date(?2, '-' || ?3 || ' days') AS current_start,
+                    date(?2, '-' || (?3 * 2) || ' days') AS previous_start
+         )
+         SELECT item_name,
+                COALESCE(SUM(CASE WHEN sale_date > bounds.current_start AND sale_date <= bounds.current_end THEN revenue ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN sale_date > bounds.current_start AND sale_date <= bounds.current_end THEN cost_at_sale ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN sale_date > bounds.current_start AND sale_date <= bounds.current_end THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN sale_date > bounds.current_start AND sale_date <= bounds.current_end AND cost_at_sale > 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN sale_date > bounds.previous_start AND sale_date <= bounds.current_start THEN revenue ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN sale_date > bounds.previous_start AND sale_date <= bounds.current_start THEN cost_at_sale ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN sale_date > bounds.previous_start AND sale_date <= bounds.current_start THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN sale_date > bounds.previous_start AND sale_date <= bounds.current_start AND cost_at_sale > 0 THEN 1 ELSE 0 END), 0)
+         FROM {table}, bounds
+         WHERE business_id = ?1 AND deleted_at IS NULL
+         GROUP BY item_name
+         HAVING SUM(CASE WHEN sale_date > bounds.current_start AND sale_date <= bounds.current_end THEN 1 ELSE 0 END) > 0
+         ORDER BY (COALESCE(SUM(CASE WHEN sale_date > bounds.current_start AND sale_date <= bounds.current_end THEN revenue - cost_at_sale ELSE 0 END), 0)) ASC
+         LIMIT ?4"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![business_id, today, period_days, limit], |r| {
+        let item_name: String = r.get(0)?;
+        let current_revenue_cents: i64 = r.get(1)?;
+        let current_cost_cents: i64 = r.get(2)?;
+        let current_sales_count: i64 = r.get(3)?;
+        let current_cost_bearing_sales_count: i64 = r.get(4)?;
+        let previous_revenue_cents: i64 = r.get(5)?;
+        let previous_cost_cents: i64 = r.get(6)?;
+        let previous_sales_count: i64 = r.get(7)?;
+        let previous_cost_bearing_sales_count: i64 = r.get(8)?;
+
+        let current_profit_cents = current_revenue_cents - current_cost_cents;
+        let current_margin_pct = if current_revenue_cents > 0 {
+            Some(current_profit_cents as f64 / current_revenue_cents as f64 * 100.0)
+        } else {
+            None
+        };
+        let previous_profit_cents = previous_revenue_cents - previous_cost_cents;
+        let previous_margin_pct = if previous_revenue_cents > 0 {
+            Some(previous_profit_cents as f64 / previous_revenue_cents as f64 * 100.0)
+        } else {
+            None
+        };
+        let margin_pct_change_pts = match (current_margin_pct, previous_margin_pct) {
+            (Some(c), Some(p)) => Some(c - p),
+            _ => None,
+        };
+
+        Ok(ItemMarginTrend {
+            item_name,
+            current_revenue_cents,
+            current_cost_cents,
+            current_profit_cents,
+            current_margin_pct,
+            current_sales_count,
+            current_cost_bearing_sales_count,
+            previous_revenue_cents,
+            previous_cost_cents,
+            previous_profit_cents,
+            previous_margin_pct,
+            previous_sales_count,
+            previous_cost_bearing_sales_count,
+            margin_pct_change_pts,
+            is_losing_money: current_cost_bearing_sales_count > 0 && current_profit_cents < 0,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}

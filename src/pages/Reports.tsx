@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import {
   listModules, getModuleSchema, getBusinessInfo, getDebtSummary, getGrossProfitSummary,
-  getBasketAffinity, getProfitByItem, getDebtAging, getSlowMovers, getStockRunway, getUnpricedItems, getZeroCostPurchases, getExpiringBatches,
+  getBasketAffinity, getProfitByItem, getProfitTrend, getDebtAging, getSlowMovers, getStockRunway, getUnpricedItems, getZeroCostPurchases, getExpiringBatches,
   getRefundRateByItem, getDayOfWeekPattern, getHourOfDayPattern, getMonthlyTrend, getSeasonalPattern, runReport,
 } from '../api';
 import type {
-  DebtSummary, GrossProfitSummary, BasketPair, ItemProfit, DebtAgingSummary,
+  DebtSummary, GrossProfitSummary, BasketPair, ItemProfit, ItemMarginTrend, DebtAgingSummary,
   SlowMover, StockRunway, UnpricedItem, ZeroCostPurchase, ExpiringBatch, RefundRate, DayOfWeekPattern, HourOfDayPattern, PeriodTrendPoint, SeasonalMonthPattern,
 } from '../api';
 import type { ModuleListItem, ModuleSchema } from '../types';
@@ -13,6 +13,7 @@ import { formatMoney } from '../lib/money';
 import { ReportPanel } from './ModuleView';
 import BasketAffinityCard from '../components/BasketAffinityCard';
 import ItemMarginCard from '../components/ItemMarginCard';
+import ItemMarginTrendCard from '../components/ItemMarginTrendCard';
 import DebtAgingCard from '../components/DebtAgingCard';
 import SlowMoversCard from '../components/SlowMoversCard';
 import StockRunwayCard from '../components/StockRunwayCard';
@@ -80,6 +81,7 @@ export default function Reports() {
   const [debtSummary, setDebtSummary] = useState<DebtSummary | null>(null);
   const [grossProfit, setGrossProfit] = useState<GrossProfitSummary | null>(null);
   const [itemMargins, setItemMargins] = useState<ItemProfit[] | null>(null);
+  const [itemTrend, setItemTrend] = useState<ItemMarginTrend[] | null>(null);
   const [profitabilityLoading, setProfitabilityLoading] = useState(false);
 
   const [basketPairs, setBasketPairs] = useState<BasketPair[] | null>(null);
@@ -130,6 +132,7 @@ export default function Reports() {
     Promise.allSettled([
       getGrossProfitSummary().then(setGrossProfit),
       getProfitByItem(10).then((r) => setItemMargins(r.items)),
+      getProfitTrend(30, 10).then((r) => setItemTrend(r.items)),
     ]).finally(() => setProfitabilityLoading(false));
   }
 
@@ -214,6 +217,7 @@ export default function Reports() {
             </div>
           )}
           {itemMargins && <ItemMarginCard items={itemMargins} currency={currency} />}
+          {itemTrend && itemTrend.length > 0 && <ItemMarginTrendCard items={itemTrend} currency={currency} />}
         </div>
       </CollapsibleSection>
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { listCustomers, getCustomer, getBusinessInfo } from '../api';
-import type { CustomerSummary, CustomerDetail } from '../api';
+import { listCustomers, getCustomer, getBusinessInfo, getRepeatPurchaseRisk } from '../api';
+import type { CustomerSummary, CustomerDetail, RepeatCustomerRisk } from '../api';
 import { formatMoney } from '../lib/money';
 import { formatBackendDate, formatBackendDateTime } from '../lib/date';
 
@@ -13,6 +13,12 @@ export default function Customers() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [currency, setCurrency] = useState('USD');
+  // Keyed by customer id — only repeat customers (2+ purchases) ever
+  // appear here, see customers::repeat_purchase_risk. Best-effort:
+  // if this fails to load, the Status column just falls back to
+  // New/Repeat with no Overdue flag, same as any other optional card
+  // elsewhere in this app degrading quietly on a failed fetch.
+  const [risk, setRisk] = useState<Map<string, RepeatCustomerRisk>>(new Map());
 
   useEffect(() => {
     getBusinessInfo().then((b: any) => { if (b?.currency) setCurrency(b.currency); }).catch(() => {});
@@ -23,6 +29,9 @@ export default function Customers() {
       .then((r) => setCustomers(r.customers))
       .catch(() => setError('Could not load customers'))
       .finally(() => setLoading(false));
+    getRepeatPurchaseRisk()
+      .then((r) => setRisk(new Map(r.customers.map((c) => [c.id, c]))))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -139,10 +148,14 @@ export default function Customers() {
               <th style={{ textAlign: 'right', padding: '0.5rem' }}>Orders</th>
               <th style={{ textAlign: 'right', padding: '0.5rem' }}>Lifetime value</th>
               <th style={{ textAlign: 'right', padding: '0.5rem' }}>Last purchase</th>
+              <th style={{ textAlign: 'right', padding: '0.5rem' }}>Status</th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map((c) => (
+            {filtered.map((c) => {
+              const r = risk.get(c.id);
+              const status = c.order_count <= 1 ? 'New' : r?.at_risk ? 'Overdue' : 'Repeat';
+              return (
               <tr
                 key={c.id}
                 onClick={() => setSelectedId(c.id)}
@@ -157,8 +170,12 @@ export default function Customers() {
                 <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.82rem', color: 'var(--ink-soft)' }} data-label="Last purchase">
                   {c.last_purchase_at ? formatBackendDate(c.last_purchase_at) : '—'}
                 </td>
+                <td style={{ textAlign: 'right', padding: '0.5rem', fontSize: '0.78rem', fontWeight: status === 'Overdue' ? 600 : 400, color: status === 'Overdue' ? 'var(--stamp)' : 'var(--ink-soft)' }} data-label="Status">
+                  {status}
+                </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}

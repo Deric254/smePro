@@ -300,6 +300,29 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
     } else {
         Vec::new()
     };
+    // Same can_view_reports gate, same unwrap_or_default degrade, as
+    // stock_runway/day_of_week_pattern just above — these three are
+    // the same kind of insight-style computation (a category
+    // breakdown, a period-over-period comparison, a purchase-rhythm
+    // signal), not a raw operational fact, so they follow that rule
+    // rather than low_stock's.
+    let profit_by_category = if can_view_reports {
+        crate::profit::by_category(conn, business_id, user_id).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let item_margin_trend = if can_view_reports {
+        crate::profit::by_item_trend(conn, business_id, user_id, &today, 30, 20).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let customers_going_quiet = if can_view_reports {
+        crate::customers::repeat_purchase_risk(conn, business_id, user_id, &today, 1.5)
+            .map(|rows| rows.into_iter().filter(|r| r.at_risk).collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     Ok(json!({
         "business_name": business_name,
@@ -308,5 +331,8 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
         "modules": modules_summary,
         "stock_runway": stock_runway,
         "day_of_week_sales_pattern": day_of_week_pattern,
+        "profit_by_category": profit_by_category,
+        "item_margin_trend_last_30_days": item_margin_trend,
+        "customers_going_quiet": customers_going_quiet,
     }))
 }
