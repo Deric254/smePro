@@ -446,8 +446,8 @@ export interface CategoryProfit {
   sales_count: number;
   cost_bearing_sales_count: number;
 }
-export const getProfitByCategory = (): Promise<{ categories: CategoryProfit[] }> =>
-  request('/sales/profit-by-category');
+export const getProfitByCategory = (range?: { start: string; end: string }): Promise<{ categories: CategoryProfit[] }> =>
+  request(`/sales/profit-by-category${range ? `?${new URLSearchParams(range)}` : ''}`);
 
 // "Which SKUs are secretly losers" — current period vs the period
 // before it, per item. See profit::by_item_trend.

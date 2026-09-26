@@ -267,7 +267,24 @@ pub struct CategoryProfit {
 /// Requires both Sales and Inventory enabled, same as `slow_movers` in
 /// stock_health.rs requires both for the same reason: without
 /// Inventory there is no `category` to group by at all.
-pub fn by_category(conn: &Connection, business_id: &str, user_id: &str) -> Result<Vec<CategoryProfit>> {
+/// `range_start`/`range_end`, when given, filter to `s.created_at` —
+/// the same range field report.rs::run defaults to for a category
+/// dimension with no explicit time field, which is exactly the path
+/// AnalyticsSection's sibling category breakdowns (revenue by
+/// item_name, revenue by payment_method) already run through. Filtering
+/// on that same column keeps this chart's numbers on the same
+/// TimeSlicer-defined "this period" as everything else next to it,
+/// instead of quietly using a different date field. `None` for both
+/// keeps the previous all-time behavior — used by ai_context.rs, which
+/// wants the standing lifetime picture, not whatever period a Dashboard
+/// slicer happens to be on.
+pub fn by_category(
+    conn: &Connection,
+    business_id: &str,
+    user_id: &str,
+    range_start: Option<&str>,
+    range_end: Option<&str>,
+) -> Result<Vec<CategoryProfit>> {
     crate::rbac::require(conn, user_id, "sales", "read")?;
     let sales_module = crate::crud::load_module(conn, business_id, "sales")
         .map_err(|_| anyhow!("the Sales module isn't enabled for this business"))?;
@@ -276,6 +293,17 @@ pub fn by_category(conn: &Connection, business_id: &str, user_id: &str) -> Resul
     let sales_table = sales_module.table_name();
     let inventory_table = inventory_module.table_name();
 
+    let mut where_clauses = vec!["s.business_id = ?1".to_string(), "s.deleted_at IS NULL".to_string()];
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(business_id.to_string())];
+    if let Some(start) = range_start {
+        params.push(Box::new(start.to_string()));
+        where_clauses.push(format!("s.created_at >= ?{}", params.len()));
+    }
+    if let Some(end) = range_end {
+        params.push(Box::new(end.to_string()));
+        where_clauses.push(format!("s.created_at <= ?{}", params.len()));
+    }
+
     let sql = format!(
         "SELECT COALESCE(NULLIF(TRIM(i.category), ''), 'Uncategorized') AS category,
                 COALESCE(SUM(s.revenue), 0), COALESCE(SUM(s.cost_at_sale), 0), COUNT(*),
@@ -283,13 +311,15 @@ pub fn by_category(conn: &Connection, business_id: &str, user_id: &str) -> Resul
          FROM {sales_table} s
          LEFT JOIN {inventory_table} i
            ON i.business_id = s.business_id AND i.name = s.item_name AND i.deleted_at IS NULL
-         WHERE s.business_id = ?1 AND s.deleted_at IS NULL
+         WHERE {}
          GROUP BY category
-         ORDER BY (COALESCE(SUM(s.revenue), 0) - COALESCE(SUM(s.cost_at_sale), 0)) DESC"
+         ORDER BY (COALESCE(SUM(s.revenue), 0) - COALESCE(SUM(s.cost_at_sale), 0)) DESC",
+        where_clauses.join(" AND ")
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![business_id], |r| {
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |r| {
         let revenue_cents: i64 = r.get(1)?;
         let cost_cents: i64 = r.get(2)?;
         let profit_cents = revenue_cents - cost_cents;

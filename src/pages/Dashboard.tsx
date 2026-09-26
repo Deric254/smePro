@@ -151,9 +151,12 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
         <h1 style={{ margin: '0.15rem 0 0' }}>{businessName || 'Your business'}</h1>
       </div>
 
-      {grossProfit && <GrossProfitKpi data={grossProfit} currency={currency} onOpen={() => onSelectModule('sales')} />}
-
-      {debtSummary && <DebtStandingKpi data={debtSummary} currency={currency} onOpen={() => onSelectModule('debt_credit')} />}
+      {(grossProfit || debtSummary) && (
+        <div style={styles.kpiRow}>
+          {grossProfit && <GrossProfitKpi data={grossProfit} currency={currency} onOpen={() => onSelectModule('sales')} />}
+          {debtSummary && <DebtStandingKpi data={debtSummary} currency={currency} onOpen={() => onSelectModule('debt_credit')} />}
+        </div>
+      )}
 
       {pulse && (
         <div className="card" style={{ marginBottom: '0.9rem', padding: '0.8rem 1.1rem' }}>
@@ -258,7 +261,7 @@ function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; 
       onClick={onOpen}
       style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
-        width: '100%', textAlign: 'left', cursor: 'pointer', marginBottom: '0.9rem', padding: '0.8rem 1.1rem',
+        width: '100%', textAlign: 'left', cursor: 'pointer', padding: '0.8rem 1.1rem',
         ...(!isProfit ? { borderColor: 'var(--stamp)', background: 'var(--stamp-wash)' } : {}),
       }}
     >
@@ -304,7 +307,7 @@ function DebtStandingKpi({ data, currency, onOpen }: { data: DebtSummary; curren
       onClick={onOpen}
       style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
-        width: '100%', textAlign: 'left', cursor: 'pointer', marginBottom: '0.9rem', padding: '0.8rem 1.1rem',
+        width: '100%', textAlign: 'left', cursor: 'pointer', padding: '0.8rem 1.1rem',
         ...(hasOverdue ? { borderColor: 'var(--stamp)', background: 'var(--stamp-wash)' } : {}),
       }}
     >
@@ -355,6 +358,13 @@ function ChecklistItem({ done, label, detail, onClick }: { done: boolean; label:
 const styles: Record<string, React.CSSProperties> = {
   header: { marginBottom: '0.9rem' },
   eyebrow: { fontSize: '0.72rem', letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-soft)' },
+  // Lets the gross-profit and debt-standing KPI cards sit side by
+  // side on wider windows instead of always stacking full-width, the
+  // same auto-fit-grid approach AnalyticsSection's own KPI row already
+  // uses — minmax(300px, 1fr) is wide enough that neither card's
+  // content (value + sub-line + right-side overdue/coverage note)
+  // wraps awkwardly, and it still collapses to one column below that.
+  kpiRow: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '0.9rem', marginBottom: '0.9rem' },
   checklistCard: { marginBottom: '0.9rem', padding: '0.9rem 1.1rem' },
   dismissBtn: { padding: '0.25em 0.6em', fontSize: '0.76rem' },
   checklistItem: { display: 'flex', gap: '0.7rem', alignItems: 'flex-start', padding: '0.4rem 0' },

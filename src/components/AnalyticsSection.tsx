@@ -53,15 +53,20 @@ export default function AnalyticsSection() {
   const [bucket, setBucket] = useState<Bucket>('day');
   const [loading, setLoading] = useState(true);
   const [currency, setCurrency] = useState('USD');
-  // All-time, not scoped to `range` — same as profit::by_category's
-  // own design (see the Dashboard's former plain-list version of this
-  // card, now replaced by the chart below). Fetched once, not
-  // re-fetched when the TimeSlicer range changes.
+  // Scoped to `range`, same as everything else in this section — see
+  // profit::by_category's own doc comment on why it filters on
+  // created_at, the same range field the sibling category breakdowns
+  // just below (revenue by item_name, by payment_method) already use.
+  // Reset to null on every range change first, same null-until-real
+  // discipline as the rest of this component, so the card shows its
+  // own "Loading…" state rather than the previous period's numbers
+  // while the new ones are in flight.
   const [categoryProfit, setCategoryProfit] = useState<CategoryProfit[] | null>(null);
 
   useEffect(() => {
-    getProfitByCategory().then((r) => setCategoryProfit(r.categories)).catch(() => setCategoryProfit([]));
-  }, []);
+    setCategoryProfit(null);
+    getProfitByCategory({ start: range.start, end: range.end }).then((r) => setCategoryProfit(r.categories)).catch(() => setCategoryProfit([]));
+  }, [range]);
 
   useEffect(() => {
     getBusinessInfo().then((b: any) => { if (b?.currency) setCurrency(b.currency); }).catch(() => {});
@@ -319,19 +324,17 @@ export default function AnalyticsSection() {
         </div>
       </div>
 
-      {/* All-time, unlike everything above (which follows the
-          TimeSlicer) — same reasoning profit::by_category itself is
-          built on: "which line of the business is actually making
-          money" is a standing question, not a per-week one. Two-tone
-          bars (profit vs. loss) instead of the single-color palette
-          the pie chart above uses, since sign is the one thing this
-          chart needs to communicate before any of its magnitudes. */}
+      {/* Follows the TimeSlicer, same as everything else in this
+          section (see categoryProfit's own comment above on why).
+          Two-tone bars (profit vs. loss) instead of the single-color
+          palette the pie chart above uses, since sign is the one thing
+          this chart needs to communicate before any of its magnitudes. */}
       <div className="card" style={{ marginTop: '0.7rem', height: 240, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem', flexShrink: 0 }}>Profit by category (all time)</div>
+        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem', flexShrink: 0 }}>Profit by category — {range.label}</div>
         {categoryProfit === null ? (
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
         ) : categoryProfit.length === 0 ? (
-          <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No categorized sales yet.</div>
+          <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No categorized sales in this period yet.</div>
         ) : (
           // Same scroll-once-it-doesn't-fit approach as "Top sellers"
           // above, same reason: a real catalog can have more

@@ -307,7 +307,7 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
     // signal), not a raw operational fact, so they follow that rule
     // rather than low_stock's.
     let profit_by_category = if can_view_reports {
-        crate::profit::by_category(conn, business_id, user_id).unwrap_or_default()
+        crate::profit::by_category(conn, business_id, user_id, None, None).unwrap_or_default()
     } else {
         Vec::new()
     };

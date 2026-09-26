@@ -1292,14 +1292,24 @@ fn route(
         };
     }
 
-    // ---- Category-level margin: /sales/profit-by-category — same
-    // computation as profit-summary above, grouped by Inventory's own
-    // `category` field instead of collapsed to one row or split by
-    // item. See profit::by_category. Reports-gated, same reasoning as
-    // profit-summary above.
+    // ---- Category-level margin: /sales/profit-by-category?start=&end=
+    // — same computation as profit-summary above, grouped by
+    // Inventory's own `category` field instead of collapsed to one row
+    // or split by item. See profit::by_category. Reports-gated, same
+    // reasoning as profit-summary above. start/end are both optional
+    // and, same as build_report's own start/end above, filter on
+    // created_at — omit either (or both) for the previous all-time
+    // total.
     if parts.as_slice() == ["sales", "profit-by-category"] && *method == Method::Get {
         if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
-        return match crate::profit::by_category(conn, &business_id, &user_id) {
+        let q = query_params(url);
+        return match crate::profit::by_category(
+            conn,
+            &business_id,
+            &user_id,
+            q.get("start").map(|s| s.as_str()),
+            q.get("end").map(|s| s.as_str()),
+        ) {
             Ok(categories) => ApiResponse::Json(200, json!({"categories": categories})),
             Err(e) => crud_error(&e),
         };
