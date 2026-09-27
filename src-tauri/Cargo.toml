@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.105"
+version = "0.1.106"
 edition = "2021"
 
 [lib]
@@ -104,9 +104,6 @@ calamine = { version = "=0.26.1", features = ["dates"] }
 
 [dependencies.base64ct]
 version = "=1.6.0"
-
-[dependencies.indexmap]
-version = "=2.2.6"
 
 [dependencies.idna_adapter]
 version = "=1.0.0"
