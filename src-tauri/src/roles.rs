@@ -65,7 +65,7 @@ pub fn create_role(conn: &Connection, business_id: &str, name: &str) -> Result<S
 /// role that still has active users assigned to it (checked directly,
 /// not assumed) — deleting it out from under them would leave those
 /// users' sessions pointing at a role_id that no longer exists.
-pub fn delete_role(conn: &Connection, business_id: &str, role_id: &str) -> Result<()> {
+pub fn delete_role(conn: &mut Connection, business_id: &str, role_id: &str) -> Result<()> {
     let (name, is_system): (String, i64) = conn
         .query_row(
             "SELECT name, is_system FROM roles WHERE id = ?1 AND business_id = ?2",
@@ -86,14 +86,16 @@ pub fn delete_role(conn: &Connection, business_id: &str, role_id: &str) -> Resul
             "cannot delete role '{name}': {user_count} active user(s) are still assigned to it — reassign them first"
         ));
     }
-    conn.execute("DELETE FROM permissions WHERE role_id = ?1", params![role_id])?;
-    let deleted = conn.execute(
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM permissions WHERE role_id = ?1", params![role_id])?;
+    let deleted = tx.execute(
         "DELETE FROM roles WHERE id = ?1 AND business_id = ?2 AND is_system = 0",
         params![role_id, business_id],
     )?;
     if deleted == 0 {
         return Err(anyhow!("role not found"));
     }
+    tx.commit()?;
     Ok(())
 }
 

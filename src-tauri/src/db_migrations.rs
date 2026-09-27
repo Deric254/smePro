@@ -2573,6 +2573,11 @@ fn v38_remove_hr_tax_totp(conn: &mut Connection) -> Result<()> {
     }
     tx.execute("DELETE FROM modules WHERE id = 'hr'", [])?;
 
+    tx.execute("INSERT INTO _schema_version (version) VALUES (38)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// THE BUG THIS FIXES: `purchasing.unit_cost`'s floor was `min: 0` —
 /// so a PO could be entered (and later received into a real batch via
 /// `receiving.rs`) with a genuine, literal $0 cost. That $0 then
