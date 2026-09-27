@@ -62,13 +62,21 @@ export default function AnalyticsSection() {
   // own "Loading…" state rather than the previous period's numbers
   // while the new ones are in flight.
   const [categoryProfit, setCategoryProfit] = useState<CategoryProfit[] | null>(null);
-  // Not scoped to `range` like categoryProfit above — this is a
-  // longer-window behavioral pattern (which weekdays tend to be
-  // busiest), not a period total, so it uses the same fixed 90-day
-  // lookback as getDayOfWeekPattern's own default rather than
-  // whatever short slice the TimeSlicer happens to be on. Same
-  // null-until-real-data discipline as everything else here.
+  // Scoped to `range`, same as categoryProfit above — the TimeSlicer
+  // should move every chart on this page the same way, day-of-week
+  // included. The backend (sales_patterns::day_of_week_pattern) takes
+  // a lookback DAY COUNT, not a start/end pair, so `range` is
+  // converted to one below (dayPatternLookbackDays) rather than
+  // passed straight through — and clamped to the same [7, 365] floor
+  // the backend itself enforces, since a single day's or week's worth
+  // of history genuinely isn't enough to call a weekday "pattern" (a
+  // 1-day slice would just show one bar, everything else at zero).
+  // The label under the chart shows the real, possibly-clamped count
+  // actually sent, so a short slice is never captioned with a window
+  // wider than what it actually used. Same null-until-real-data
+  // discipline as everything else here.
   const [dayPattern, setDayPattern] = useState<DayOfWeekPattern[] | null>(null);
+  const [dayPatternLookbackDays, setDayPatternLookbackDays] = useState(90);
 
   useEffect(() => {
     setCategoryProfit(null);
@@ -76,8 +84,12 @@ export default function AnalyticsSection() {
   }, [range]);
 
   useEffect(() => {
-    getDayOfWeekPattern().then((r) => setDayPattern(r.items)).catch(() => setDayPattern([]));
-  }, []);
+    setDayPattern(null);
+    const spanDays = Math.round((new Date(range.end).getTime() - new Date(range.start).getTime()) / 86_400_000) + 1;
+    const days = Math.min(365, Math.max(7, spanDays));
+    setDayPatternLookbackDays(days);
+    getDayOfWeekPattern(days).then((r) => setDayPattern(r.items)).catch(() => setDayPattern([]));
+  }, [range]);
 
   useEffect(() => {
     getBusinessInfo().then((b: any) => { if (b?.currency) setCurrency(b.currency); }).catch(() => {});
@@ -464,14 +476,17 @@ export default function AnalyticsSection() {
           week, which this chart does. Drawn as a line rather than bars
           — every other chart on this dashboard is already a bar or pie,
           and a line reads the week-shape (rise/fall from day to day)
-          more directly than seven disconnected columns would. Fixed
-          90-day lookback (see dayPattern's own comment above), not tied
-          to the TimeSlicer, since a single week's or day's slice would
-          be too little data to call a "pattern" at all. Sunday→Saturday
-          order comes straight from the backend
-          (sales_patterns::day_of_week_pattern), not re-sorted here. */}
+          more directly than seven disconnected columns would. Follows
+          the TimeSlicer like every other chart here (see dayPattern's
+          own comment above) — the label states the real lookback used,
+          which only diverges from `range` itself when the slicer picked
+          fewer than 7 days. Sunday→Saturday order comes straight from
+          the backend (sales_patterns::day_of_week_pattern), not
+          re-sorted here. */}
       <div className="card" style={{ height: 240, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem', flexShrink: 0 }}>Avg revenue by day of week — last 90 days</div>
+        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem', flexShrink: 0 }}>
+          Avg revenue by day of week — last {dayPatternLookbackDays} day{dayPatternLookbackDays === 1 ? '' : 's'}
+        </div>
         {dayPattern === null ? (
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
         ) : dayPattern.every((d) => d.occurrences === 0) ? (

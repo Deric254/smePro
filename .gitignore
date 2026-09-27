@@ -1,6 +1,11 @@
 # --- Frontend ---
 node_modules/
 dist/
+# Build artifacts from a specific verification pass (see VERIFICATION.md) —
+# not part of the documented release process (see RELEASE.md), same
+# category as dist/ above.
+dist_verified/
+release_binary/
 *.local
 
 # --- Rust / Tauri ---

@@ -719,7 +719,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                   // which state a given item is in.
                   && !(moduleId === 'inventory' && editingId === null && (f.name === 'unit_cost' || f.name === 'unit_price'))
                 ).map((f) => (
-                  <FieldInput key={f.name} field={f} value={formValues[f.name] ?? ''} units={units} currencies={currencies} businessCurrency={businessCurrency} onChange={(v) => setFormValues((p) => ({ ...p, [f.name]: v }))} />
+                  <FieldInput key={f.name} field={f} value={formValues[f.name] ?? ''} units={units} currencies={currencies} businessCurrency={businessCurrency} moduleId={moduleId} onChange={(v) => setFormValues((p) => ({ ...p, [f.name]: v }))} />
                 ))}
               </div>
               <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.8rem' }}>
@@ -757,6 +757,8 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                           ? renderSalesCustomerCell(r)
                           : moduleId === 'sales' && c === 'unit_price'
                           ? renderSalesPriceCell(r, businessCurrency)
+                          : moduleId === 'debt_credit' && c === 'direction'
+                          ? renderDebtDirectionCell(r)
                           : formatCell(r[c], schema!.fields.find((f) => f.name === c)?.type, businessCurrency)}
                       </td>
                     ))}
@@ -1155,6 +1157,22 @@ function renderSalesPriceCell(r: Record_, currency: string) {
   );
 }
 
+// Same "owed_to_business" vs "anything else" interpretation
+// debt_settlement.rs's summary()/settle() already use — a plain
+// display label for whatever's actually in the raw `direction`
+// value, rather than showing that raw machine value (or an old
+// free-typed one from before the dropdown above existed) verbatim.
+function renderDebtDirectionCell(r: Record_) {
+  const direction = typeof r.direction === 'string' ? r.direction : '';
+  if (!direction) return <span style={{ color: 'var(--ink-faint)' }}>—</span>;
+  const isReceivable = direction === 'owed_to_business';
+  return (
+    <span style={{ color: isReceivable ? 'inherit' : 'var(--stamp)' }}>
+      {isReceivable ? 'Owed to you' : 'You owe'}
+    </span>
+  );
+}
+
 // Combines tax_rate + tax_amount into one "rate% · amount" cell.
 function renderInvoiceTaxCell(r: Record_, currency: string) {
   const rate = typeof r.tax_rate === 'number' ? r.tax_rate : null;
@@ -1188,8 +1206,33 @@ function PurchaseItemSelector({ items, value, required, onChange }: { items: Rec
   );
 }
 
-function FieldInput({ field, value, units, currencies, businessCurrency, onChange }: { field: FieldDef; value: string; units: Unit[]; currencies: Currency[]; businessCurrency: string; onChange: (v: string) => void }) {
+function FieldInput({ field, value, units, currencies, businessCurrency, moduleId, onChange }: { field: FieldDef; value: string; units: Unit[]; currencies: Currency[]; businessCurrency: string; moduleId?: string; onChange: (v: string) => void }) {
   const inputType = field.type === 'integer' || field.type === 'real' ? 'number' : field.type === 'date' ? 'date' : 'text';
+  // debt_credit's `direction` is a plain `type: "text"` field in the
+  // schema (the module engine has no enum/choice field type — see
+  // debt_settlement.rs's own doc comment on this), which otherwise
+  // falls through to a bare free-text box below. That's the one place
+  // in the whole app that decides whether a manually-added record
+  // counts as "owed to you" or "you owe" on the DebtSummary widget —
+  // and the ONLY way "you owe" ever gets populated at all, since
+  // neither pos.rs nor receiving.rs ever writes anything but
+  // "owed_to_business" automatically. A typo'd or inconsistent free-
+  // text value here silently miscounts a real receivable/payable, so
+  // this constrains it to the exact two values settle()/summary() any
+  // interpret, the same way the boolean/unit/currency cases below
+  // already constrain their own fields to a fixed option set.
+  if (moduleId === 'debt_credit' && field.name === 'direction') {
+    return (
+      <div>
+        <label>direction</label>
+        <select value={value} required={field.required} onChange={(e) => onChange(e.target.value)}>
+          <option value="">—</option>
+          <option value="owed_to_business">Customer owes you (receivable)</option>
+          <option value="owed_by_business">You owe them (payable)</option>
+        </select>
+      </div>
+    );
+  }
   if (field.type === 'boolean') {
     return (
       <div>
