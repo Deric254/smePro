@@ -118,6 +118,13 @@ export default function AnalyticsSection() {
     return () => { cancelled = true; };
   }, [range]);
 
+  // Cheap client-side sums of data already on screen — used to show
+  // each bar/slice's share of the visible total in its tooltip, no
+  // extra fetch needed.
+  const seriesTotal = series.reduce((sum, p) => sum + p.value, 0);
+  const topItemsTotal = topItems.reduce((sum, p) => sum + p.value, 0);
+  const paymentMixTotal = paymentMix.reduce((sum, p) => sum + p.value, 0);
+
   return (
     <div style={{ marginBottom: '1rem' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', marginBottom: '0.7rem' }}>
@@ -125,19 +132,20 @@ export default function AnalyticsSection() {
         <TimeSlicer value={range} onChange={setRange} />
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.7rem', marginBottom: '0.7rem' }}>
-        <KpiCard label={`Revenue — ${range.label}`} value={revenue} loading={loading} format="money" currency={currency} />
-        <KpiCard label="Sales" value={orderCount} loading={loading} format="count" currency={currency} />
-        <KpiCard label="Average sale" value={avgSale} loading={loading} format="money" currency={currency} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.5rem', marginBottom: '0.5rem' }}>
+        <KpiCard label={`Revenue — ${range.label}`} value={revenue} loading={loading} format="money" currency={currency} compact />
+        <KpiCard label="Sales" value={orderCount} loading={loading} format="count" currency={currency} compact />
+        <KpiCard label="Average sale" value={avgSale} loading={loading} format="money" currency={currency} compact />
       </div>
 
-      {/* 220 → 180: the single largest fixed height on this page.
-          Every value that used to need vertical room here (bar +
-          value-label above it) still fits — margin.top was already
-          generous (26px) specifically to stop label clipping; 180 just
-          removes the leftover slack below that, not the room the
-          labels actually need. */}
-      <div className="card" style={{ height: 180 }}>
+      {/* 180 → 260: the space these KPI tiles and the Dashboard-level
+          cards above this section now give up (condensed padding,
+          merged pulse/highlights row) is spent here instead — this
+          trend chart is the first thing a person looks at, so it gets
+          the real estate. margin.top stays 26px, same reasoning as
+          before (label-clipping headroom); the extra height is pure
+          bar-area gain, not a proportional scale-up of the margins. */}
+      <div className="card" style={{ height: 260 }}>
         {loading ? (
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
         ) : series.length === 0 ? (
@@ -171,6 +179,14 @@ export default function AnalyticsSection() {
                     off. Room added on every side, not just the top, so a
                     wide currency-formatted label on the first/last bar
                     doesn't clip left/right either. */}
+                {/* Recharts' inner <svg> clips anything outside its own
+                    pixel bounds (the browser's default `overflow: hidden`
+                    on nested svg elements) — the previous top:18 margin
+                    was too tight for the value-label text sitting above
+                    the tallest bar, which is exactly what was getting cut
+                    off. Room added on every side, not just the top, so a
+                    wide currency-formatted label on the first/last bar
+                    doesn't clip left/right either. */}
                 <BarChart data={series} margin={{ top: 26, right: 12, left: 4, bottom: 4 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" />
                   <XAxis
@@ -184,9 +200,27 @@ export default function AnalyticsSection() {
                   <Tooltip
                     contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
                     labelFormatter={(v) => formatBucketLabel(bucket, String(v))}
-                    formatter={(v) => [formatMoney(Number(v), currency), 'Revenue']}
+                    // Beyond the bare revenue figure, shows what share of
+                    // the whole visible range that one bar represents —
+                    // seriesTotal is the same series already on screen,
+                    // just summed once, so this is free (no extra fetch)
+                    // and always in sync with what's plotted.
+                    formatter={(v) => [
+                      `${formatMoney(Number(v), currency)} (${seriesTotal > 0 ? ((Number(v) / seriesTotal) * 100).toFixed(1) : '0'}% of range)`,
+                      'Revenue',
+                    ]}
                   />
-                  <Bar dataKey="value" fill="var(--stamp)" radius={[3, 3, 0, 0]}>
+                  {/* One color per bar (cycling PALETTE) instead of a
+                      single flat fill — makes it easier to keep your
+                      place scanning across a long, scrollable range,
+                      and matches the categorical coloring already used
+                      by the pie chart below. Sign/magnitude here is
+                      shown by height, not color, so there's no semantic
+                      meaning lost by varying it. */}
+                  <Bar dataKey="value" radius={[3, 3, 0, 0]}>
+                    {series.map((_, i) => (
+                      <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
+                    ))}
                     <LabelList
                       dataKey="value"
                       position="top"
@@ -258,9 +292,15 @@ export default function AnalyticsSection() {
                     />
                     <Tooltip
                       contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
-                      formatter={(v) => [formatMoney(Number(v), currency), 'Revenue']}
+                      formatter={(v) => [
+                        `${formatMoney(Number(v), currency)} (${topItemsTotal > 0 ? ((Number(v) / topItemsTotal) * 100).toFixed(1) : '0'}% of top ${topItems.length})`,
+                        'Revenue',
+                      ]}
                     />
-                    <Bar dataKey="value" fill="var(--stamp)" radius={[0, 3, 3, 0]}>
+                    <Bar dataKey="value" radius={[0, 3, 3, 0]}>
+                      {topItems.map((_, i) => (
+                        <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
+                      ))}
                       <LabelList
                         dataKey="value"
                         position="right"
@@ -316,7 +356,7 @@ export default function AnalyticsSection() {
                 </Pie>
                 <Tooltip
                   contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
-                  formatter={(v) => formatMoney(Number(v), currency)}
+                  formatter={(v) => `${formatMoney(Number(v), currency)} (${paymentMixTotal > 0 ? ((Number(v) / paymentMixTotal) * 100).toFixed(1) : '0'}%)`}
                 />
               </PieChart>
             </ResponsiveContainer>
@@ -353,11 +393,18 @@ export default function AnalyticsSection() {
                   <YAxis type="category" dataKey="label" width={110} tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} />
                   <Tooltip
                     contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
-                    formatter={(v) => [formatMoney(Number(v), currency), 'Profit']}
+                    formatter={(v) => [`${formatMoney(Math.abs(Number(v)), currency)} ${Number(v) >= 0 ? 'profit' : 'loss'}`, 'Result']}
                   />
+                  {/* Each category gets its own PALETTE color (was: a
+                      flat profit/loss two-tone) so it's easier to track
+                      one category across this chart and the pie above
+                      — a loss still overrides to red regardless of its
+                      palette slot, since sign is the one thing that has
+                      to read instantly here, before any color-matching
+                      to another chart. */}
                   <Bar dataKey="value" radius={[0, 3, 3, 0]}>
-                    {categoryProfit.map((c) => (
-                      <Cell key={c.category} fill={c.profit_cents >= 0 ? 'var(--stamp)' : '#a15c5c'} />
+                    {categoryProfit.map((c, i) => (
+                      <Cell key={c.category} fill={c.profit_cents >= 0 ? PALETTE[i % PALETTE.length] : '#a15c5c'} />
                     ))}
                     <LabelList
                       dataKey="value"
@@ -376,11 +423,11 @@ export default function AnalyticsSection() {
   );
 }
 
-function KpiCard({ label, value, loading, format, currency }: { label: string; value: number | null; loading: boolean; format: 'money' | 'count'; currency: string }) {
+function KpiCard({ label, value, loading, format, currency, compact = false }: { label: string; value: number | null; loading: boolean; format: 'money' | 'count'; currency: string; compact?: boolean }) {
   return (
-    <div className="card" style={{ padding: '0.7rem 0.9rem' }}>
-      <div style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
-      <div style={{ fontSize: '1.5rem', fontWeight: 600, color: 'var(--stamp)', marginTop: '0.2rem' }}>
+    <div className="card" style={{ padding: compact ? '0.5rem 0.8rem' : '0.7rem 0.9rem' }}>
+      <div style={{ fontSize: '0.7rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
+      <div style={{ fontSize: compact ? '1.25rem' : '1.5rem', fontWeight: 600, color: 'var(--stamp)', marginTop: compact ? '0.1rem' : '0.2rem' }}>
         {loading || value === null ? '—' : format === 'money' ? formatMoney(value, currency) : value.toLocaleString()}
       </div>
     </div>

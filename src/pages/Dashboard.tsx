@@ -3,7 +3,6 @@ import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBus
 import type { ModuleListItem } from '../types';
 import type { DebtSummary, GrossProfitSummary, BusinessPulse, ReportHighlights } from '../api';
 import { formatMoney } from '../lib/money';
-import BusinessPulseCard from '../components/BusinessPulseCard';
 
 // Lazy-loaded: it's the only place recharts is used, and that roughly
 // doubles the bundle size — only downloaded when Dashboard is viewed.
@@ -158,28 +157,47 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
         </div>
       )}
 
-      {pulse && (
-        <div className="card" style={{ marginBottom: '0.9rem', padding: '0.8rem 1.1rem' }}>
-          <BusinessPulseCard pulse={pulse} compact />
-        </div>
-      )}
-
-      {highlights && (highlights.most_urgent_item || highlights.busiest_day) && (
-        <div className="card" style={{ marginBottom: '0.9rem', padding: '0.7rem 1.1rem', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.9rem' }}>
-          {highlights.most_urgent_item && (
-            <span style={{ fontSize: '0.84rem' }}>
+      {/* Pulse and Highlights used to be two separate full-width cards
+          stacked on top of each other, each just a sentence or two of
+          content padded out to card size. Merged into one condensed
+          row: the pulse's headline number + trend, its most pressing
+          flag (low stock), and the highlights' urgent-item/busiest-day
+          — all inline. Every underlying fetch (getBusinessPulse,
+          getReportHighlights) and the has_data/null-until-real-data
+          discipline are unchanged; this only changes how the same data
+          is laid out. BusinessPulseCard itself is untouched — it's
+          still used at full detail in the AI chat panel
+          (AiFloatingButton.tsx) — this row reads pulse's fields
+          directly instead of rendering that component. */}
+      {(pulse || (highlights && (highlights.most_urgent_item || highlights.busiest_day))) && (
+        <div className="card" style={{ marginBottom: '0.6rem', padding: '0.45rem 0.9rem', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.8rem', fontSize: '0.8rem' }}>
+          {pulse && pulse.has_data && (
+            <span>
+              <strong>{formatMoney(pulse.revenue_this_period_cents, currency)}</strong> this month
+              {pulse.pct_change !== null && (
+                <span style={{ color: pulse.pct_change >= 0 ? 'var(--ok)' : 'var(--stamp)', fontWeight: 600, marginLeft: '0.3rem' }}>
+                  {pulse.pct_change >= 0 ? '↑' : '↓'} {Math.abs(pulse.pct_change).toFixed(0)}%
+                </span>
+              )}
+            </span>
+          )}
+          {pulse && pulse.has_data && pulse.low_stock_count > 0 && (
+            <span style={{ color: 'var(--stamp)', fontWeight: 600 }}>{pulse.low_stock_count} low stock</span>
+          )}
+          {highlights?.most_urgent_item && (
+            <span>
               <span style={{ color: 'var(--stamp)', fontWeight: 600 }}>{Math.floor(highlights.most_urgent_item.days_of_stock_left)}d left</span>
               {' '}on {highlights.most_urgent_item.item_name}
             </span>
           )}
-          {highlights.busiest_day && (
-            <span style={{ fontSize: '0.84rem', color: 'var(--ink-soft)' }}>
-              Busiest day: <span style={{ color: 'var(--ink)', fontWeight: 600 }}>{highlights.busiest_day.day_name}</span>
+          {highlights?.busiest_day && (
+            <span style={{ color: 'var(--ink-soft)' }}>
+              Busiest: <span style={{ color: 'var(--ink)', fontWeight: 600 }}>{highlights.busiest_day.day_name}</span>
             </span>
           )}
           <button
             onClick={() => onSelectModule('__reports__')}
-            style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--stamp)', fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', padding: 0 }}
+            style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--stamp)', fontWeight: 600, cursor: 'pointer', padding: 0, fontSize: '0.8rem' }}
           >
             Full reports →
           </button>
@@ -252,44 +270,54 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
 // Gross profit KPI card. Shows the real cost-data coverage fraction
 // whenever it's incomplete (not just a boolean "some missing" flag),
 // so e.g. an 87.5% margin on 4 of 50 real-cost sales reads honestly.
+// Condensed to a single subtitle line (was: margin line + a separate
+// shrinkage-after-write-offs line + a separate cost-coverage aside).
+// Nothing computed here changed and nothing is hidden permanently —
+// the full breakdown (shrinkage-adjusted profit/margin, and the "only
+// N of M sales have real cost data" coverage note) now lives in this
+// card's title attribute, a native hover tooltip, so it's still one
+// hover away instead of costing three lines of card height by default.
 function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; currency: string; onOpen: () => void }) {
   const isProfit = data.profit_cents >= 0;
   const missingCostCount = data.sales_count - data.cost_bearing_sales_count;
+
+  const tooltipParts: string[] = [];
+  if (data.shrinkage_cents > 0) {
+    const afterLabel = `${data.profit_cents_after_shrinkage >= 0 ? '+' : '−'}${formatMoney(Math.abs(data.profit_cents_after_shrinkage), currency)}`;
+    tooltipParts.push(
+      `After ${formatMoney(data.shrinkage_cents, currency)} in stock-take write-offs: ${afterLabel}` +
+      (data.margin_pct_after_shrinkage !== null ? ` (${data.margin_pct_after_shrinkage.toFixed(1)}% margin)` : '')
+    );
+  }
+  if (missingCostCount > 0) {
+    tooltipParts.push(`Only ${data.cost_bearing_sales_count} of ${data.sales_count} sales have real cost data — margin is based on those only`);
+  }
+
   return (
     <button
       className="card"
       onClick={onOpen}
+      title={tooltipParts.join('\n') || undefined}
       style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
-        width: '100%', textAlign: 'left', cursor: 'pointer', padding: '0.8rem 1.1rem',
+        width: '100%', textAlign: 'left', cursor: 'pointer', padding: '0.55rem 0.9rem',
         ...(!isProfit ? { borderColor: 'var(--stamp)', background: 'var(--stamp-wash)' } : {}),
       }}
     >
       <div>
-        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+        <div style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
           Gross profit
         </div>
-        <div style={{ fontSize: '1.7rem', fontWeight: 700, marginTop: '0.15rem', ...(!isProfit ? { color: 'var(--stamp)' } : {}) }}>
+        <div style={{ fontSize: '1.35rem', fontWeight: 700, marginTop: '0.1rem', ...(!isProfit ? { color: 'var(--stamp)' } : {}) }}>
           {isProfit ? '+' : '−'}{formatMoney(Math.abs(data.profit_cents), currency)}
         </div>
-        <div style={{ fontSize: '0.82rem', color: 'var(--ink-soft)', marginTop: '0.1rem' }}>
+        <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>
           {data.margin_pct === null
             ? `Across ${data.sales_count} sale${data.sales_count === 1 ? '' : 's'} — no revenue yet`
-            : `${data.margin_pct.toFixed(1)}% margin, across ${data.sales_count} sale${data.sales_count === 1 ? '' : 's'}`}
+            : `${data.margin_pct.toFixed(1)}% margin, ${data.sales_count} sale${data.sales_count === 1 ? '' : 's'}`}
+          {tooltipParts.length > 0 ? ' · hover for detail' : ''}
         </div>
-        {data.shrinkage_cents > 0 ? (
-          <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.15rem' }}>
-            After {formatMoney(data.shrinkage_cents, currency)} in stock-take write-offs: {data.profit_cents_after_shrinkage >= 0 ? '+' : '−'}
-            {formatMoney(Math.abs(data.profit_cents_after_shrinkage), currency)}
-            {data.margin_pct_after_shrinkage !== null ? ` (${data.margin_pct_after_shrinkage.toFixed(1)}% margin)` : ''}
-          </div>
-        ) : null}
       </div>
-      {missingCostCount > 0 ? (
-        <div style={{ textAlign: 'right', flexShrink: 0, fontSize: '0.78rem', color: 'var(--ink-soft)', maxWidth: '10rem' }}>
-          Only {data.cost_bearing_sales_count} of {data.sales_count} sales have real cost data — margin is based on those only
-        </div>
-      ) : null}
     </button>
   );
 }
@@ -307,21 +335,21 @@ function DebtStandingKpi({ data, currency, onOpen }: { data: DebtSummary; curren
       onClick={onOpen}
       style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem',
-        width: '100%', textAlign: 'left', cursor: 'pointer', padding: '0.8rem 1.1rem',
+        width: '100%', textAlign: 'left', cursor: 'pointer', padding: '0.55rem 0.9rem',
         ...(hasOverdue ? { borderColor: 'var(--stamp)', background: 'var(--stamp-wash)' } : {}),
       }}
     >
       <div>
-        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+        <div style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
           Debt standing
         </div>
-        <div style={{ fontSize: '1.7rem', fontWeight: 700, marginTop: '0.15rem' }}>
+        <div style={{ fontSize: '1.35rem', fontWeight: 700, marginTop: '0.1rem' }}>
           {netPosition >= 0 ? '+' : '−'}{formatMoney(Math.abs(netPosition), currency)}
         </div>
-        <div style={{ fontSize: '0.82rem', color: 'var(--ink-soft)', marginTop: '0.1rem' }}>
+        <div style={{ fontSize: '0.76rem', color: 'var(--ink-soft)' }}>
           {netPosition >= 0
-            ? `Net owed to you, across ${openCount} open record${openCount === 1 ? '' : 's'}`
-            : `Net you owe, across ${openCount} open record${openCount === 1 ? '' : 's'}`}
+            ? `Net owed to you, ${openCount} open record${openCount === 1 ? '' : 's'}`
+            : `Net you owe, ${openCount} open record${openCount === 1 ? '' : 's'}`}
         </div>
       </div>
       {hasOverdue ? (
@@ -364,7 +392,7 @@ const styles: Record<string, React.CSSProperties> = {
   // uses — minmax(300px, 1fr) is wide enough that neither card's
   // content (value + sub-line + right-side overdue/coverage note)
   // wraps awkwardly, and it still collapses to one column below that.
-  kpiRow: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '0.9rem', marginBottom: '0.9rem' },
+  kpiRow: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '0.6rem', marginBottom: '0.6rem' },
   checklistCard: { marginBottom: '0.9rem', padding: '0.9rem 1.1rem' },
   dismissBtn: { padding: '0.25em 0.6em', fontSize: '0.76rem' },
   checklistItem: { display: 'flex', gap: '0.7rem', alignItems: 'flex-start', padding: '0.4rem 0' },
