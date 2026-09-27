@@ -1,4 +1,5 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
+import type { ReactNode } from 'react';
 import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary, getBusinessPulse, getReportHighlights } from '../api';
 import type { ModuleListItem } from '../types';
 import type { DebtSummary, GrossProfitSummary, BusinessPulse, ReportHighlights } from '../api';
@@ -160,19 +161,25 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
       {/* Pulse and Highlights used to be two separate full-width cards
           stacked on top of each other, each just a sentence or two of
           content padded out to card size. Merged into one condensed
-          row: the pulse's headline number + trend, its most pressing
-          flag (low stock), and the highlights' urgent-item/busiest-day
-          — all inline. Every underlying fetch (getBusinessPulse,
+          row. Every underlying fetch (getBusinessPulse,
           getReportHighlights) and the has_data/null-until-real-data
           discipline are unchanged; this only changes how the same data
           is laid out. BusinessPulseCard itself is untouched — it's
           still used at full detail in the AI chat panel
           (AiFloatingButton.tsx) — this row reads pulse's fields
-          directly instead of rendering that component. */}
-      {(pulse || (highlights && (highlights.most_urgent_item || highlights.busiest_day))) && (
-        <div className="card" style={{ marginBottom: '0.6rem', padding: '0.45rem 0.9rem', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.8rem', fontSize: '0.8rem' }}>
-          {pulse && pulse.has_data && (
-            <span>
+          directly instead of rendering that component.
+          Every field BusinessPulse actually carries gets a slot here
+          now — headline + trend, the forecast, low stock, and the top
+          recommendation — plus the highlights' urgent-item/busiest-day,
+          not just the subset that fit before. Built as an array and
+          interspersed with a real "•" separator (was: bare flex gap,
+          which reads as unrelated fragments rather than one readout)
+          since the row has the width to spell each one out. */}
+      {(pulse || (highlights && (highlights.most_urgent_item || highlights.busiest_day))) && (() => {
+        const items: ReactNode[] = [];
+        if (pulse && pulse.has_data) {
+          items.push(
+            <span key="revenue">
               <strong>{formatMoney(pulse.revenue_this_period_cents, currency)}</strong> this month
               {pulse.pct_change !== null && (
                 <span style={{ color: pulse.pct_change >= 0 ? 'var(--ok)' : 'var(--stamp)', fontWeight: 600, marginLeft: '0.3rem' }}>
@@ -180,29 +187,51 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
                 </span>
               )}
             </span>
-          )}
-          {pulse && pulse.has_data && pulse.low_stock_count > 0 && (
-            <span style={{ color: 'var(--stamp)', fontWeight: 600 }}>{pulse.low_stock_count} low stock</span>
-          )}
-          {highlights?.most_urgent_item && (
-            <span>
+          );
+          items.push(
+            <span key="forecast" style={{ color: 'var(--ink-soft)' }}>
+              Forecast: <span style={{ color: 'var(--ink)', fontWeight: 600 }}>{formatMoney(pulse.forecast_next_period_cents, currency)}</span> next period
+            </span>
+          );
+          if (pulse.low_stock_count > 0) {
+            items.push(<span key="lowstock" style={{ color: 'var(--stamp)', fontWeight: 600 }}>{pulse.low_stock_count} low stock</span>);
+          }
+          if (pulse.recommendations.length > 0) {
+            items.push(<span key="rec" style={{ color: 'var(--ink-soft)' }}>{pulse.recommendations[0]}</span>);
+          }
+        }
+        if (highlights?.most_urgent_item) {
+          items.push(
+            <span key="urgent">
               <span style={{ color: 'var(--stamp)', fontWeight: 600 }}>{Math.floor(highlights.most_urgent_item.days_of_stock_left)}d left</span>
               {' '}on {highlights.most_urgent_item.item_name}
             </span>
-          )}
-          {highlights?.busiest_day && (
-            <span style={{ color: 'var(--ink-soft)' }}>
+          );
+        }
+        if (highlights?.busiest_day) {
+          items.push(
+            <span key="busiest" style={{ color: 'var(--ink-soft)' }}>
               Busiest: <span style={{ color: 'var(--ink)', fontWeight: 600 }}>{highlights.busiest_day.day_name}</span>
             </span>
-          )}
-          <button
-            onClick={() => onSelectModule('__reports__')}
-            style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--stamp)', fontWeight: 600, cursor: 'pointer', padding: 0, fontSize: '0.8rem' }}
-          >
-            Full reports →
-          </button>
-        </div>
-      )}
+          );
+        }
+        return (
+          <div className="card" style={{ marginBottom: '0.6rem', padding: '0.45rem 0.9rem', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', fontSize: '0.8rem' }}>
+            {items.map((item, i) => (
+              <span key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                {i > 0 && <span aria-hidden style={{ color: 'var(--ink-faint)' }}>•</span>}
+                {item}
+              </span>
+            ))}
+            <button
+              onClick={() => onSelectModule('__reports__')}
+              style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--stamp)', fontWeight: 600, cursor: 'pointer', padding: 0, fontSize: '0.8rem' }}
+            >
+              Full reports →
+            </button>
+          </div>
+        );
+      })()}
 
       {canViewReports && stats.some((s) => s.module.id === 'sales') && (
         <Suspense fallback={<div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem', marginBottom: '1.6rem' }}>Loading analytics…</div>}>
@@ -281,16 +310,22 @@ function GrossProfitKpi({ data, currency, onOpen }: { data: GrossProfitSummary; 
   const isProfit = data.profit_cents >= 0;
   const missingCostCount = data.sales_count - data.cost_bearing_sales_count;
 
+  // Ordered so the caveat about the number itself (which sales it's
+  // even based on) comes before the caveat about a further adjustment
+  // on top of it — these are two independent notes, not a chain, and
+  // reading them in "what the number covers" → "what's been subtracted
+  // from it since" order makes that clearer than the old shrinkage-
+  // first order did.
   const tooltipParts: string[] = [];
+  if (missingCostCount > 0) {
+    tooltipParts.push(`Margin uses only ${data.cost_bearing_sales_count} of ${data.sales_count} sales with real cost data`);
+  }
   if (data.shrinkage_cents > 0) {
     const afterLabel = `${data.profit_cents_after_shrinkage >= 0 ? '+' : '−'}${formatMoney(Math.abs(data.profit_cents_after_shrinkage), currency)}`;
     tooltipParts.push(
-      `After ${formatMoney(data.shrinkage_cents, currency)} in stock-take write-offs: ${afterLabel}` +
+      `After ${formatMoney(data.shrinkage_cents, currency)} write-offs: ${afterLabel}` +
       (data.margin_pct_after_shrinkage !== null ? ` (${data.margin_pct_after_shrinkage.toFixed(1)}% margin)` : '')
     );
-  }
-  if (missingCostCount > 0) {
-    tooltipParts.push(`Only ${data.cost_bearing_sales_count} of ${data.sales_count} sales have real cost data — margin is based on those only`);
   }
 
   return (

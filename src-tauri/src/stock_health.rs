@@ -305,13 +305,16 @@ pub fn unpriced_items(
 /// Purchasing order lines recorded with a zero unit_cost. Since
 /// v31_purchasing_unit_price, a PO's own `unit_price` is validated
 /// against its `unit_cost` at creation (`min_field` — price can never
-/// be entered below cost), so a $0 price can only ever exist on a row
-/// that already has a $0 cost too — checking `unit_cost = 0` alone
-/// still catches every zero-priced row as well, nothing slips through
-/// by only naming one field here. `unit_cost`'s own floor is `min: 0`,
-/// not `min: 1` — a genuinely free/donated delivery is real,
-/// legitimate data, so this stays a report, not a hard block (same
-/// choice as unpriced_items above, same reasoning).
+/// be entered below cost); since v39_purchasing_unit_cost_floor,
+/// `unit_cost` itself also can't be entered as $0 (`min: 1`) on any PO
+/// created from that migration forward, so this report's own
+/// zero-cost rows are now purely a historical backlog — POs that
+/// predate that floor, or a pre-v39 install that hasn't migrated yet —
+/// rather than an ongoing leak new POs can still create. `unit_price`'s
+/// own floor is still `min: 0`, not `min: 1`: once `unit_cost` can't be
+/// $0, `min_field` alone already forces `unit_price` up to match it,
+/// so a second, redundant `min: 1` on `unit_price` itself would add
+/// nothing.
 ///
 /// Why this matters beyond Purchasing itself: `receiving.rs` creates
 /// a batch at exactly this PO's own unit_cost — a $0 purchase (typo'd

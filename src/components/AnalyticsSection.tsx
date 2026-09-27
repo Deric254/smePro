@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { runReport, getBusinessInfo, getProfitByCategory } from '../api';
-import type { CategoryProfit } from '../api';
+import { runReport, getBusinessInfo, getProfitByCategory, getDayOfWeekPattern } from '../api';
+import type { CategoryProfit, DayOfWeekPattern } from '../api';
 import TimeSlicer, { defaultRange } from './TimeSlicer';
 import type { DateRange } from './TimeSlicer';
 import { formatMoney } from '../lib/money';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LabelList,
+  BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LabelList,
   PieChart, Pie, Cell,
 } from 'recharts';
 
@@ -62,11 +62,22 @@ export default function AnalyticsSection() {
   // own "Loading…" state rather than the previous period's numbers
   // while the new ones are in flight.
   const [categoryProfit, setCategoryProfit] = useState<CategoryProfit[] | null>(null);
+  // Not scoped to `range` like categoryProfit above — this is a
+  // longer-window behavioral pattern (which weekdays tend to be
+  // busiest), not a period total, so it uses the same fixed 90-day
+  // lookback as getDayOfWeekPattern's own default rather than
+  // whatever short slice the TimeSlicer happens to be on. Same
+  // null-until-real-data discipline as everything else here.
+  const [dayPattern, setDayPattern] = useState<DayOfWeekPattern[] | null>(null);
 
   useEffect(() => {
     setCategoryProfit(null);
     getProfitByCategory({ start: range.start, end: range.end }).then((r) => setCategoryProfit(r.categories)).catch(() => setCategoryProfit([]));
   }, [range]);
+
+  useEffect(() => {
+    getDayOfWeekPattern().then((r) => setDayPattern(r.items)).catch(() => setDayPattern([]));
+  }, []);
 
   useEffect(() => {
     getBusinessInfo().then((b: any) => { if (b?.currency) setCurrency(b.currency); }).catch(() => {});
@@ -289,6 +300,13 @@ export default function AnalyticsSection() {
                       dataKey="label"
                       width={110}
                       tick={{ fontSize: 11, fill: 'var(--ink-soft)' }}
+                      // Without this, recharts auto-thins ticks it
+                      // guesses would overlap at this row height and
+                      // silently drops some category labels (the bar
+                      // still renders, its name just doesn't) — forcing
+                      // every tick to render is what the fixed 26px-
+                      // per-row height above is already sized for.
+                      interval={0}
                     />
                     <Tooltip
                       contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
@@ -364,12 +382,25 @@ export default function AnalyticsSection() {
         </div>
       </div>
 
-      {/* Follows the TimeSlicer, same as everything else in this
-          section (see categoryProfit's own comment above on why).
-          Two-tone bars (profit vs. loss) instead of the single-color
-          palette the pie chart above uses, since sign is the one thing
-          this chart needs to communicate before any of its magnitudes. */}
-      <div className="card" style={{ marginTop: '0.7rem', height: 240, display: 'flex', flexDirection: 'column' }}>
+      {/* Profit by category now shares its row with the day-of-week
+          pattern chart instead of running full width alone — halved so
+          there's room for that second, equally important view right
+          beside it, same auto-fit two-up grid as the "Top sellers /
+          Payment method" row above. Follows the TimeSlicer, same as
+          everything else in this section (see categoryProfit's own
+          comment above on why). Two-tone bars (profit vs. loss) instead
+          of the single-color palette the pie chart above uses, since
+          sign is the one thing this chart needs to communicate before
+          any of its magnitudes. */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+          gap: '0.7rem',
+          marginTop: '0.7rem',
+        }}
+      >
+      <div className="card" style={{ height: 240, display: 'flex', flexDirection: 'column' }}>
         <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem', flexShrink: 0 }}>Profit by category — {range.label}</div>
         {categoryProfit === null ? (
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
@@ -390,7 +421,13 @@ export default function AnalyticsSection() {
                 >
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" horizontal={false} />
                   <XAxis type="number" tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v) => formatMoney(v, currency)} />
-                  <YAxis type="category" dataKey="label" width={110} tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} />
+                  {/* Same interval={0} fix as "Top sellers" above, same
+                      bug: recharts was silently skipping some category
+                      tick labels at this row height (the "Beverages"/
+                      "Bakery" rows losing their names to an auto-thin
+                      guess while the bar and its value label still
+                      rendered fine) — forcing every tick to render. */}
+                  <YAxis type="category" dataKey="label" width={90} tick={{ fontSize: 10, fill: 'var(--ink-soft)' }} interval={0} />
                   <Tooltip
                     contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
                     formatter={(v) => [`${formatMoney(Math.abs(Number(v)), currency)} ${Number(v) >= 0 ? 'profit' : 'loss'}`, 'Result']}
@@ -418,6 +455,59 @@ export default function AnalyticsSection() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* The other important chart this row was made room for: the
+          day-of-week pattern behind the "Busiest: <day>" line already
+          shown in the pulse row above (see Dashboard.tsx) — that text
+          names the busiest day but never showed the shape of the whole
+          week, which this chart does. Drawn as a line rather than bars
+          — every other chart on this dashboard is already a bar or pie,
+          and a line reads the week-shape (rise/fall from day to day)
+          more directly than seven disconnected columns would. Fixed
+          90-day lookback (see dayPattern's own comment above), not tied
+          to the TimeSlicer, since a single week's or day's slice would
+          be too little data to call a "pattern" at all. Sunday→Saturday
+          order comes straight from the backend
+          (sales_patterns::day_of_week_pattern), not re-sorted here. */}
+      <div className="card" style={{ height: 240, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '0.4rem', flexShrink: 0 }}>Avg revenue by day of week — last 90 days</div>
+        {dayPattern === null ? (
+          <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Loading…</div>
+        ) : dayPattern.every((d) => d.occurrences === 0) ? (
+          <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>Not enough sales history yet.</div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={dayPattern.map((d) => ({ label: d.day_name, value: d.avg_revenue_cents }))}
+              margin={{ top: 22, right: 12, left: 4, bottom: 4 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v: string) => v.slice(0, 3)} interval={0} />
+              <YAxis tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v) => formatMoney(v, currency)} />
+              <Tooltip
+                contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
+                formatter={(v) => [`${formatMoney(Number(v), currency)} avg`, 'Revenue']}
+              />
+              <Line
+                type="monotone"
+                dataKey="value"
+                stroke="var(--stamp)"
+                strokeWidth={2}
+                dot={{ r: 3, fill: 'var(--stamp)' }}
+                activeDot={{ r: 5 }}
+              >
+                <LabelList
+                  dataKey="value"
+                  position="top"
+                  formatter={(v: ReactNode) => formatMoney(Number(v), currency)}
+                  style={{ fontSize: 9, fill: 'var(--ink-soft)' }}
+                />
+              </Line>
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </div>
       </div>
     </div>
   );

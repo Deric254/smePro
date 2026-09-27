@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 38;
+const CURRENT_VERSION: i32 = 39;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -82,7 +82,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 36 { v36_import_batches(conn)?; }
     if current < 37 { v37_users_terms_acceptance(conn)?; }
     if current < 38 { v38_remove_hr_tax_totp(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 38, "bump this alongside the last `if current < N` check above");
+    if current < 39 { v39_purchasing_unit_cost_floor(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 39, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2572,7 +2573,93 @@ fn v38_remove_hr_tax_totp(conn: &mut Connection) -> Result<()> {
     }
     tx.execute("DELETE FROM modules WHERE id = 'hr'", [])?;
 
-    tx.execute("INSERT INTO _schema_version (version) VALUES (38)", [])?;
+/// THE BUG THIS FIXES: `purchasing.unit_cost`'s floor was `min: 0` —
+/// so a PO could be entered (and later received into a real batch via
+/// `receiving.rs`) with a genuine, literal $0 cost. That $0 then
+/// became the batch's own `unit_cost` (`create_batch_in_tx` only ever
+/// checked cost wasn't *negative*, never that it was actually
+/// nonzero), which became every sale drawn from that batch's own
+/// `cost_at_sale` — silently joining the exact "sale with no real
+/// cost data" population `profit.rs`'s `cost_bearing_sales_count`
+/// exists to flag, `stock_health::zero_cost_purchases` exists to
+/// surface, and this line was ultimately traced back from. Unlike an
+/// unpriced Inventory item (which is `create()`-forced to 0 on
+/// purpose — see crud.rs's own comment — because a brand-new item
+/// legitimately has no cost yet until it's actually purchased), a
+/// Purchase Order *is* the moment a real cost is supposed to be
+/// entered; there's no later, more-authoritative step for it to
+/// arrive from. So `unit_cost` gets a floor of 1, not 0, here — never
+/// let this be the door zero-cost stock walks in through. Genuinely
+/// free stock (a donation, a supplier credit) is intentionally still
+/// unsupported by this pass, same choice `unpriced_items`/
+/// `zero_cost_purchases`' own doc comments already flagged as a
+/// tradeoff, not an oversight — it stays a business decision to
+/// revisit deliberately later, not something to fold in silently
+/// here as a side effect of closing this gap.
+///
+/// `create_batch_in_tx` (batches.rs) got the matching Rust-level floor
+/// in the same change — belt-and-suspenders, same shape as the
+/// existing "price can't be below cost" rule, which lives at both the
+/// schema level (`min_field`) and the Rust level (that same function)
+/// for the identical reason: a batch can be created by repack.rs too,
+/// not only by receiving a PO, so the schema check on Purchasing's own
+/// form alone can't be the only guard.
+///
+/// Same two-part shape as v26/v30/v31: the on-disk
+/// `modules/purchasing.json` template only reaches businesses that
+/// enable Purchasing from here forward — an already-enabled business
+/// is validated against its own stored `modules.schema_json`
+/// snapshot (`crud::load_module` reads that, never the template), so
+/// this migration patches that snapshot for every business that
+/// already has Purchasing enabled. Existing PO rows already sitting at
+/// $0 are deliberately left as-is — this only raises the floor for
+/// what gets written from here on, exactly like v26 never rewrote a
+/// single already-stored value either.
+fn v39_purchasing_unit_cost_floor(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT business_id, schema_json FROM modules WHERE id = 'purchasing' AND enabled = 1",
+        )?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (business_id, schema_json) in rows {
+        let mut parsed: serde_json::Value = match serde_json::from_str(&schema_json) {
+            Ok(v) => v,
+            // Corrupt snapshot pre-dating this migration is out of
+            // scope to repair here; leave it untouched rather than
+            // risk making it worse.
+            Err(_) => continue,
+        };
+        let mut changed = false;
+        if let Some(fields) = parsed.get_mut("fields").and_then(|f| f.as_array_mut()) {
+            for field in fields.iter_mut() {
+                let name = field.get("name").and_then(|n| n.as_str());
+                if name != Some("unit_cost") {
+                    continue;
+                }
+                let already_at_least_one = field.get("min").and_then(|m| m.as_i64()).unwrap_or(0) >= 1;
+                if already_at_least_one {
+                    continue;
+                }
+                if let Some(obj) = field.as_object_mut() {
+                    obj.insert("min".to_string(), serde_json::json!(1));
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let new_json = serde_json::to_string(&parsed).unwrap_or(schema_json);
+            tx.execute(
+                "UPDATE modules SET schema_json = ?1 WHERE business_id = ?2 AND id = 'purchasing'",
+                rusqlite::params![new_json, business_id],
+            )?;
+        }
+    }
+
+    tx.execute("INSERT INTO _schema_version (version) VALUES (39)", [])?;
     tx.commit()?;
     Ok(())
 }

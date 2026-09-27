@@ -164,7 +164,7 @@ export const getTerms = (): Promise<{ version: string; text: string }> => reques
 export const acceptTerms = (): Promise<{ version: string; accepted: boolean }> =>
   request('/terms/accept', { method: 'POST' });
 
-export interface SecurityQuestions { question1: string | null; question2: string | null }
+interface SecurityQuestions { question1: string | null; question2: string | null }
 export const getSecurityQuestions = (biz: string, username: string): Promise<SecurityQuestions> =>
   // GET, not POST — and cache: 'no-store' explicitly, same reasoning
   // as request()'s own default (see api.ts's top): this is live
@@ -217,8 +217,8 @@ export const listAvailableModules = (): Promise<{ modules: AvailableModule[] }> 
 
 // ---- Point of sale — atomically links Sales and Inventory (and,
 // optionally, Debt & Credit for a sale on credit). See pos.rs. ----
-export interface CartItem { inventory_record_id: string; quantity: number }
-export interface CheckoutRequest {
+interface CartItem { inventory_record_id: string; quantity: number }
+interface CheckoutRequest {
   items: CartItem[];
   payment_method?: string;
   customer?: string;
@@ -243,8 +243,8 @@ export const getOrder = (orderId: string) => request(`/pos/orders/${orderId}`);
 // ---- Service sale — the same atomicity + customer-tracking
 // guarantee as checkout above, for businesses with no Inventory
 // module. See pos::create_service_sale. ----
-export interface ServiceLineRequest { description: string; unit_price: number; quantity: number }
-export interface ServiceSaleRequest {
+interface ServiceLineRequest { description: string; unit_price: number; quantity: number }
+interface ServiceSaleRequest {
   lines: ServiceLineRequest[];
   payment_method?: string;
   customer?: string;
@@ -280,7 +280,7 @@ export const getRepeatPurchaseRisk = (): Promise<{ customers: RepeatCustomerRisk
   request('/customers/at-risk');
 
 // ---- Refunds — the counterpart to checkout. See refund.rs. ----
-export interface RefundRequest {
+interface RefundRequest {
   sale_id: string;
   quantity: number;
   refund_amount: number;
@@ -374,7 +374,7 @@ export const cancelStockTake = (stockTakeId: string): Promise<StockTake> =>
   request(`/inventory/stocktake/${stockTakeId}/cancel`, { method: 'POST' });
 
 // ---- Settling a debt/credit record. See debt_settlement.rs. ----
-export interface SettleDebtSummary {
+interface SettleDebtSummary {
   debt_record_id: string; party_name: string; direction: string; amount: number;
   settled: true; payment_method: string; posted_to_bookkeeping_as: 'income' | 'expense' | null;
 }
@@ -597,7 +597,7 @@ export interface ReleaseOption {
   is_prerelease: boolean;
 }
 export const listReleases = (): Promise<{ items: ReleaseOption[] }> => request(`/system/releases`);
-export interface RollbackCheck {
+interface RollbackCheck {
   manifest_url: string;
   target_schema_version: number;
   current_schema_version: number;
@@ -904,7 +904,7 @@ export const cancelInvoice = (invoiceId: string) => request(`/invoices/${invoice
 // always-fresh lookup of whatever's been refunded against the sale
 // an invoice was auto-generated from, so InvoiceView can disclose it
 // without ever rewriting the invoice's own original figures.
-export interface InvoiceRefundStatus { refunded_amount: number; is_refunded: boolean }
+interface InvoiceRefundStatus { refunded_amount: number; is_refunded: boolean }
 export const getInvoiceRefundStatus = (invoiceId: string): Promise<InvoiceRefundStatus> =>
   request(`/invoices/${invoiceId}/refund-status`);
 
@@ -926,7 +926,7 @@ export interface AuditLogEntry {
   details: unknown;
   timestamp: string;
 }
-export interface AuditLogFilters {
+interface AuditLogFilters {
   moduleId?: string;
   recordId?: string;
   userId?: string;
@@ -979,7 +979,7 @@ export interface StockMovementResult {
   total_quantity_out: number;
   net_quantity_change: number;
 }
-export interface StockMovementFilters {
+interface StockMovementFilters {
   inventoryRecordId?: string;
   movementType?: string;
   userId?: string;
@@ -1021,7 +1021,7 @@ export const MOVEMENT_TYPES: { value: string; label: string }[] = [
 // copy files manually. The raw database key is never shipped in the
 // backup itself; a passphrase the owner chooses wraps it instead, so
 // possessing the backup file alone is never enough to open it. ----
-export interface BackupData {
+interface BackupData {
   database_base64: string;
   wrapped_key_base64: string;
   created_at: string;

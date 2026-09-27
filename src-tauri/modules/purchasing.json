@@ -35,7 +35,7 @@
       "name": "unit_cost",
       "type": "money",
       "required": true,
-      "min": 0
+      "min": 1
     },
     {
       "name": "unit_price",

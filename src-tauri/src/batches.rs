@@ -146,6 +146,16 @@ pub(crate) fn live_batch_quantity_in_tx(
 /// app already holds itself to (crud::create, crud::update, repack,
 /// receiving) — held here, per batch, per decision #4 of the spec,
 /// rather than per item.
+///
+/// Also enforces `unit_cost > 0`, not just `>= 0`: this is the one
+/// function every real path that puts cost-bearing stock into the
+/// system funnels through (receiving.rs::receive() from a Purchase
+/// Order, repack.rs producing a new target item's batch), so it's the
+/// single place to close the gap that let a $0-cost batch through and
+/// quietly produce a sale with no real cost data behind it — see
+/// profit.rs's `cost_bearing_sales_count`. `unit_price` keeps its old
+/// `>= 0` floor on its own; it's still allowed to equal `unit_cost`
+/// (zero margin, a real and legitimate choice), just never below it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_batch_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -162,8 +172,13 @@ pub(crate) fn create_batch_in_tx(
     if quantity <= 0 {
         return Err(anyhow!("batch quantity must be greater than zero"));
     }
-    if unit_cost < 0 || unit_price < 0 {
-        return Err(anyhow!("batch cost/price cannot be negative"));
+    if unit_cost <= 0 {
+        return Err(anyhow!(
+            "batch unit cost must be greater than zero — a $0 cost here is what lets a sale go through with no real cost data behind it"
+        ));
+    }
+    if unit_price < 0 {
+        return Err(anyhow!("batch price cannot be negative"));
     }
     if unit_price < unit_cost {
         let business_currency: String = tx
