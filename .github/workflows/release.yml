@@ -302,6 +302,22 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # THE BUG THIS FIXES: Cargo.toml pins every tauri/tauri-plugin-*
+      # crate to an open "2" range (any 2.x.x) and package.json pins
+      # the matching npm packages to "^2" the same way — both sides
+      # are free to drift independently, and Cargo.lock had been
+      # committed pointing at older 2.x releases than package-lock.json
+      # had already resolved to. `tauri build`'s own mismatched-version
+      # check (comparing e.g. the tauri crate against @tauri-apps/api)
+      # then refuses to proceed — this failed identically on every
+      # platform in this matrix, since every one of them checks out the
+      # same committed Cargo.lock. scripts/sync-tauri-versions.sh reads
+      # the versions package-lock.json already locked and pins the
+      # matching Rust crates to exactly those — self-updating, so a
+      # future npm-side bump doesn't reintroduce this same drift.
+      - name: Sync Tauri Rust crates with npm package versions
+        run: bash scripts/sync-tauri-versions.sh
+
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -450,6 +466,13 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      # Same fix as the desktop job's identically-named step, and for
+      # the identical reason — see that step's comment. Needed here
+      # too because `tauri android build` runs the same
+      # mismatched-version check `tauri build` does.
+      - name: Sync Tauri Rust crates with npm package versions
+        run: bash scripts/sync-tauri-versions.sh
 
       - name: Scaffold Android project
         run: |
