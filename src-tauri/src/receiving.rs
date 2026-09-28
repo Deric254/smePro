@@ -62,6 +62,23 @@
 //! comment on `unit_price`: a batch's price is REQUIRED, on purpose,
 //! never silently inherited from anywhere) — and
 //! `batches.rs`'s module doc comment has the full reasoning.
+//!
+//! FIFTH FIX (STILL CURRENT): buying on credit — the exact counterpart
+//! to what `pos.rs`'s own `on_credit` already does for a credit sale.
+//! Before this, a purchase bought without paying the supplier on the
+//! spot had no connection to Debt & Credit at all: `direction` on a
+//! Debt & Credit record was a free-text field this codebase itself
+//! never wrote anything but `owed_to_business` into (see
+//! debt_settlement.rs's own doc comment on that), so "what the
+//! business owes" only ever existed if someone remembered to type it
+//! in by hand. `ReceiveRequest::on_credit` (and the same-named key
+//! `create_and_receive` reads out of its raw body, same shape as
+//! `expiry_date`) now creates a real `owed_by_business` Debt & Credit
+//! record in the same transaction as the stock/batch write, and skips
+//! the immediate cash-basis "expense" Bookkeeping post a paid receipt
+//! still gets — see `receive_in_tx`'s own comments at both of those
+//! spots for the full reasoning, which mirrors checkout()'s credit-sale
+//! logic line for line.
 
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -120,6 +137,23 @@ pub struct ReceiveRequest {
     /// nothing but legacy stock — see batches.rs's FEFO ordering).
     #[serde(default)]
     pub expiry_date: Option<String>,
+    /// Buying on credit — the business owes the supplier, doesn't pay
+    /// now. Exact mirror of `pos::CheckoutRequest::on_credit`, on the
+    /// buying side: when true, this receipt ALSO creates a Debt &
+    /// Credit record (direction `owed_by_business`) for what's owed,
+    /// in the same transaction as the stock/batch write, and skips the
+    /// immediate cash-basis "expense" Bookkeeping post that a paid
+    /// receipt gets instead — see `receive_in_tx`'s own comment on
+    /// exactly where. Before this, `direction` on a Debt & Credit
+    /// record was a free-text field this codebase itself never once
+    /// wrote anything but `owed_to_business` into (see
+    /// debt_settlement.rs's own doc comment) — a business that bought
+    /// on credit had no way to record what it owed short of typing a
+    /// Debt & Credit entry by hand and hoping to remember to.
+    #[serde(default)]
+    pub on_credit: bool,
+    #[serde(default)]
+    pub due_date: Option<String>,
 }
 
 /// Creates a new Purchasing order and receives it immediately, in one
@@ -151,6 +185,15 @@ pub fn create_and_receive(
     // handed to `crud::create`, and threaded through to `receive_in_
     // tx` explicitly instead.
     let expiry_date = body.get("expiry_date").and_then(|v| v.as_str()).map(|s| s.to_string());
+    // Same reasoning, same extraction shape, as expiry_date just
+    // above: `on_credit`/`due_date` describe this RECEIPT action, not
+    // the purchasing ROW itself (a purchase order doesn't "remember"
+    // whether it was paid for on the spot any more than it remembers
+    // a batch's expiry date) — see ReceiveRequest's own doc comment on
+    // `on_credit`. Not a declared purchasing.json field, so pulled out
+    // before `body` reaches `crud::create` for the same reason.
+    let on_credit = body.get("on_credit").and_then(|v| v.as_bool()).unwrap_or(false);
+    let due_date = body.get("due_date").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // Same permission the manual-receive and bulk-import paths both
     // require, checked up front for the same reason: creating a
@@ -161,7 +204,7 @@ pub fn create_and_receive(
     let tx = conn.transaction()?;
     let id = crud::create(&tx, business_id, user_id, "purchasing", body)?;
     let purchasing_table = crud::load_module(&tx, business_id, "purchasing")?.table_name();
-    let summary = receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &id, None, None, expiry_date.as_deref(), Some(user_id))?;
+    let summary = receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &id, None, None, expiry_date.as_deref(), Some(user_id), on_credit, due_date.as_deref())?;
     // Same discipline as receive() and repack(): nothing above is
     // durable until this line.
     tx.commit()?;
@@ -196,6 +239,8 @@ pub fn receive(conn: &mut Connection, business_id: &str, user_id: &str, req: Rec
         req.unit_price,
         req.expiry_date.as_deref(),
         Some(user_id),
+        req.on_credit,
+        req.due_date.as_deref(),
     )?;
     // Same discipline as checkout() and repack(): nothing above is
     // durable until this line.
@@ -233,6 +278,8 @@ pub(crate) fn receive_in_tx(
     unit_price_override: Option<i64>,
     expiry_date: Option<&str>,
     created_by: Option<&str>,
+    on_credit: bool,
+    due_date: Option<&str>,
 ) -> Result<Value> {
     // Receiving adds stock — blocked for the duration of an open
     // stock take for the same reason checkout is (see stock_take.rs).
@@ -242,6 +289,22 @@ pub(crate) fn receive_in_tx(
     // which gets the same protection for free rather than silently
     // being left as a hole.
     crate::stock_take::require_no_open_stock_take(tx, business_id)?;
+
+    // Same "reject before any write happens" discipline as everything
+    // else in this function, same reason checkout() checks its own
+    // on_credit precondition before touching Inventory: a credit
+    // receipt has nowhere to record what's owed without Debt & Credit
+    // enabled, so that's checked here, first, rather than leaving the
+    // stock/batch write to succeed and the debt to silently never get
+    // recorded.
+    let debt_credit_module = if on_credit {
+        Some(
+            crud::load_module(tx, business_id, "debt_credit")
+                .map_err(|_| anyhow!("buying on credit needs the Debt & Credit module enabled for this business"))?,
+        )
+    } else {
+        None
+    };
 
     let row: Option<(String, i64, bool, Option<String>, String, i64, i64, Option<String>)> = tx
         .query_row(
@@ -352,6 +415,54 @@ pub(crate) fn receive_in_tx(
         Some(&batch_id),
     )?;
 
+    // If this delivery was bought on credit, the debt is created here
+    // instead of the cash-basis expense post below — still inside
+    // `tx`, still nothing durable until commit. Exact mirror of
+    // checkout()'s own credit-sale debt block (pos.rs), on the buying
+    // side: same entry_number generation, same "fill any field this
+    // block didn't set from the module's own defaults" loop, same
+    // reasoning for skipping the immediate accounting post (see that
+    // block's own comment just below).
+    if let Some(debt_credit_module) = &debt_credit_module {
+        let mut debt_record: HashMap<String, Value> = HashMap::new();
+        debt_record.insert("party_name".into(), json!(supplier));
+        debt_record.insert("direction".into(), json!("owed_by_business"));
+        debt_record.insert("amount".into(), json!(quantity_received * po_unit_cost));
+        debt_record.insert("settled".into(), json!(false));
+        debt_record.insert(
+            "notes".into(),
+            json!(format!(
+                "Credit purchase, {}",
+                po_number.as_deref().map(|n| format!("PO {n}")).unwrap_or_else(|| "PO number unknown".to_string())
+            )),
+        );
+        // Unlike a credit sale's own debt record, there's no
+        // `source_order_id`-equivalent set here: that field exists so
+        // debt_settlement::settle() can backfill a SALE's own
+        // `payment_method` once it's known — Purchasing has no
+        // analogous field to backfill, so a structured back-reference
+        // here would have no reader. The PO is still traceable, just
+        // through `notes` above rather than a second, unused
+        // structured field.
+        debt_record.insert(
+            "entry_number".into(),
+            json!(crate::debt_settlement::generate_entry_number(tx, business_id)?),
+        );
+        if let Some(d) = due_date {
+            debt_record.insert("due_date".into(), json!(d));
+        }
+        for f in &debt_credit_module.fields {
+            if !debt_record.contains_key(&f.name) {
+                if let Some(d) = &f.default {
+                    debt_record.insert(f.name.clone(), d.clone());
+                }
+            }
+        }
+        debt_credit_module.validate(&debt_record)?;
+        crate::reference_data::validate_field_references(tx, business_id, debt_credit_module, &debt_record)?;
+        crud::insert_validated_record(tx, business_id, debt_credit_module, &debt_record)?;
+    }
+
     // Same Bookkeeping auto-post as before this feature, same
     // reasoning: one expense entry for what was actually paid to the
     // supplier for this delivery (quantity received × the PO's own
@@ -359,22 +470,33 @@ pub(crate) fn receive_in_tx(
     // a batch's own unit_cost IS exactly this PO's unit_cost, no
     // averaging involved to ever drift from it). Best-effort: a
     // business without Bookkeeping enabled can still receive stock.
-    if let Ok(accounting_module) = crud::load_module(&tx, business_id, "accounting") {
-        let mut entry: HashMap<String, Value> = HashMap::new();
-        entry.insert("description".into(), json!(format!("Purchase received — {item_name} from {supplier}")));
-        entry.insert("entry_type".into(), json!("expense"));
-        entry.insert("category".into(), json!("Purchasing"));
-        entry.insert("amount".into(), json!(quantity_received * po_unit_cost));
-        for f in &accounting_module.fields {
-            if !entry.contains_key(&f.name) {
-                if let Some(d) = &f.default {
-                    entry.insert(f.name.clone(), d.clone());
+    //
+    // Deliberately skipped when on_credit (exact mirror of checkout()'s
+    // own `if !req.on_credit` — see that block's comment): no cash has
+    // actually left the business yet, that's exactly what the Debt &
+    // Credit record just above already represents. Posting this too
+    // would double-count the same outflow twice in Bookkeeping — once
+    // now, and again for real when the debt is actually paid off (see
+    // debt_settlement::settle(), which posts the expense at that
+    // point instead).
+    if !on_credit {
+        if let Ok(accounting_module) = crud::load_module(tx, business_id, "accounting") {
+            let mut entry: HashMap<String, Value> = HashMap::new();
+            entry.insert("description".into(), json!(format!("Purchase received — {item_name} from {supplier}")));
+            entry.insert("entry_type".into(), json!("expense"));
+            entry.insert("category".into(), json!("Purchasing"));
+            entry.insert("amount".into(), json!(quantity_received * po_unit_cost));
+            for f in &accounting_module.fields {
+                if !entry.contains_key(&f.name) {
+                    if let Some(d) = &f.default {
+                        entry.insert(f.name.clone(), d.clone());
+                    }
                 }
             }
+            accounting_module.validate(&entry)?;
+            crate::reference_data::validate_field_references(tx, business_id, &accounting_module, &entry)?;
+            crud::insert_validated_record(tx, business_id, &accounting_module, &entry)?;
         }
-        accounting_module.validate(&entry)?;
-        crate::reference_data::validate_field_references(&tx, business_id, &accounting_module, &entry)?;
-        crud::insert_validated_record(&tx, business_id, &accounting_module, &entry)?;
     }
 
     // NOTE: the weighted-average rounding-reconciliation Bookkeeping
@@ -401,6 +523,7 @@ pub(crate) fn receive_in_tx(
         "batch_unit_cost": po_unit_cost,
         "batch_unit_price": batch_unit_price,
         "batch_expiry_date": expiry_date,
+        "on_credit": on_credit,
     });
 
     // Committing and audit-logging are each caller's own responsibility

@@ -1105,7 +1105,12 @@ pub fn import(
                         if module.id == "purchasing" {
                             let quantity = record.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0);
                             let purchasing_table = module.table_name();
-                            match receiving::receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &new_id, Some(quantity), None, row_expiry_date.as_deref(), Some(user_id)) {
+                            // Bulk import never supports a credit purchase — there's
+                            // no spreadsheet column for it, and no notion of "on
+                            // credit" a row could even express — so this always
+                            // passes false/None, same as it always has by omission
+                            // before these two parameters existed.
+                            match receiving::receive_in_tx(&tx, business_id, &purchasing_table, "module_inventory", &new_id, Some(quantity), None, row_expiry_date.as_deref(), Some(user_id), false, None) {
                                 Ok(summary) => {
                                     let _ = audit::log(&tx, business_id, Some(user_id), "_receiving", "receive", Some(&new_id), Some(&summary));
                                 }

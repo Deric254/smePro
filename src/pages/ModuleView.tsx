@@ -482,6 +482,18 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       if (moduleId === 'purchasing' && editingId === null && formValues.expiry_date) {
         payload.expiry_date = formValues.expiry_date;
       }
+      // Same create-only extraction as expiry_date just above, same
+      // reason (see the checkbox's own comment in the form JSX).
+      // due_date only travels along when on_credit is actually
+      // checked — an unchecked box leaving a stray due_date behind
+      // would be silently meaningless to receiving.rs anyway (it's
+      // read from the same body key that on_credit is), but sending
+      // it regardless would misleadingly suggest the two are
+      // independent choices when they aren't.
+      if (moduleId === 'purchasing' && editingId === null && formValues.on_credit === 'true') {
+        payload.on_credit = true;
+        if (formValues.due_date) payload.due_date = formValues.due_date;
+      }
       if (editingId !== null) {
         await updateRecord(moduleId, editingId, payload);
       } else {
@@ -699,6 +711,39 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                       type="date"
                       value={formValues.expiry_date ?? ''}
                       onChange={(e) => setFormValues((p) => ({ ...p, expiry_date: e.target.value }))}
+                    />
+                  </div>
+                )}
+                {/* Same reasoning and shape as expiry_date just above:
+                    `on_credit`/`due_date` describe this receiving
+                    action, not a field the purchasing row itself
+                    stores (see receiving.rs's ReceiveRequest doc
+                    comment on `on_credit`) — create-only, since
+                    create_and_receive is the only path that ever reads
+                    these keys. This is the buying-side counterpart to
+                    the "Buy now, pay later" toggle on the Sell page:
+                    without it, "You owe" on the Debt & Credit Ledger
+                    had no way to ever gain a record short of typing
+                    one in by hand there directly. */}
+                {moduleId === 'purchasing' && editingId === null && (
+                  <div>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={formValues.on_credit === 'true'}
+                        onChange={(e) => setFormValues((p) => ({ ...p, on_credit: e.target.checked ? 'true' : '' }))}
+                      />
+                      Buy on credit (pay the supplier later)
+                    </label>
+                  </div>
+                )}
+                {moduleId === 'purchasing' && editingId === null && formValues.on_credit === 'true' && (
+                  <div>
+                    <label>due date</label>
+                    <input
+                      type="date"
+                      value={formValues.due_date ?? ''}
+                      onChange={(e) => setFormValues((p) => ({ ...p, due_date: e.target.value }))}
                     />
                   </div>
                 )}

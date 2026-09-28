@@ -57,7 +57,7 @@ fn test_receiving_creates_a_batch_at_the_po_cost_and_never_touches_legacy_cost()
     // its own now, no fallback to compare it against.
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Sugar", 50, 3000, 3000);
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None, on_credit: false, due_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
     // Exactly this delivery's own cost — no averaging with the 50
@@ -97,7 +97,7 @@ fn test_first_receipt_on_zero_stock_creates_a_batch_at_exactly_the_po_cost() {
     let inv_id = make_inventory_item(&conn, &biz, "RICE-002", "Basmati Rice", 0, 0, 6000);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Basmati Rice", 40, 4550, 6000);
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None, on_credit: false, due_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
     // The new batch's cost is exactly what was paid — there is nothing
@@ -115,7 +115,7 @@ fn test_partial_delivery_receives_less_than_ordered() {
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Sunflower Oil", 100, 11000, 15000);
 
     // Ordered 100, only 60 actually arrived.
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: Some(60), unit_price: None, expiry_date: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: Some(60), unit_price: None, expiry_date: None, on_credit: false, due_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
     assert!(result["partial_delivery"].as_bool().unwrap());
@@ -131,11 +131,11 @@ fn test_cannot_receive_the_same_purchase_order_twice() {
     let inv_id = make_inventory_item(&conn, &biz, "SALT-001", "Salt", 20, 500, 800);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Salt", 30, 600, 800);
 
-    let first = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None, unit_price: None, expiry_date: None };
+    let first = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None, unit_price: None, expiry_date: None, on_credit: false, due_date: None };
     crate::receiving::receive(&mut conn, &biz, &uid, first).unwrap();
 
     // Same PO again -- must be rejected, not silently double-count the stock.
-    let second = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
+    let second = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None, on_credit: false, due_date: None };
     assert!(crate::receiving::receive(&mut conn, &biz, &uid, second).is_err());
 
     // Stock must reflect exactly one receipt, not two.
@@ -159,7 +159,7 @@ fn test_receiving_no_longer_blends_or_rounds_an_uneven_delivery() {
     let inv_id = make_inventory_item(&conn, &biz, "FLOUR-001", "Flour", 10, 1000, 1500);
     let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Flour", 7, 1333, 1500);
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None, on_credit: false, due_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
     assert_eq!(result["batch_unit_cost"].as_i64().unwrap(), 1333);
@@ -204,7 +204,7 @@ fn test_purchase_order_without_inventory_link_is_rejected() {
     )
     .unwrap();
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None, on_credit: false, due_date: None };
     assert!(crate::receiving::receive(&mut conn, &biz, &uid, req).is_err());
 }
 
@@ -229,7 +229,7 @@ fn test_purchasing_quantity_cost_price_are_frozen_once_received() {
     patch.insert("unit_cost".into(), json!(550));
     assert!(crate::crud::update(&conn, &biz, &uid, "purchasing", &po_id, &patch, false).is_ok());
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None, unit_price: None, expiry_date: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None, unit_price: None, expiry_date: None, on_credit: false, due_date: None };
     crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
 
     // Received: now frozen, on all three fields.
@@ -273,7 +273,7 @@ fn test_receiving_rejects_a_delivery_that_would_price_the_item_below_cost() {
 
     // ...but the person receiving it overrides the price down to 4000
     // — below this delivery's own 5000 cost.
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None, unit_price: Some(4000), expiry_date: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id.clone(), quantity_received: None, unit_price: Some(4000), expiry_date: None, on_credit: false, due_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req);
     assert!(result.is_err(), "must reject an override that would price this delivery below its own cost");
 
@@ -307,4 +307,106 @@ fn test_purchasing_cannot_be_created_priced_below_its_own_cost() {
     po.insert("unit_price".into(), serde_json::json!(4000)); // below cost
     let result = crate::crud::create(&conn, &biz, &uid, "purchasing", &po);
     assert!(result.is_err(), "creating a purchase order priced below its own cost must be rejected");
+}
+
+#[test]
+fn test_receive_on_credit_creates_owed_by_business_debt_and_skips_immediate_expense() {
+    // Exact mirror of checkout()'s own on_credit test coverage, on the
+    // buying side: a credit receipt must create the Debt & Credit
+    // record (direction owed_by_business, for the supplier, for the
+    // real cash outlay) and must NOT also post the immediate
+    // Bookkeeping expense — that would double-count the same money
+    // once now and again for real when the debt is actually settled.
+    let mut conn = test_db();
+    let biz = test_food_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = make_inventory_item(&conn, &biz, "FLOUR-001", "Flour", 0, 1000, 2000);
+    let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Flour", 20, 1000, 2000);
+
+    let req = crate::receiving::ReceiveRequest {
+        purchase_record_id: po_id,
+        quantity_received: None,
+        unit_price: None,
+        expiry_date: None,
+        on_credit: true,
+        due_date: Some("2026-01-15".into()),
+    };
+    let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
+    assert_eq!(result["on_credit"], json!(true));
+
+    let debts = crate::crud::list(&conn, &biz, &uid, "debt_credit", None, 50, 0).unwrap();
+    assert_eq!(debts.len(), 1, "exactly one debt record for this one credit receipt");
+    let debt = &debts[0];
+    assert_eq!(debt["party_name"], json!("Test Supplier"));
+    assert_eq!(debt["direction"], json!("owed_by_business"));
+    assert_eq!(debt["amount"].as_i64().unwrap(), 20 * 1000, "quantity received × the PO's own unit cost");
+    assert_eq!(debt["settled"], json!(false));
+    assert_eq!(debt["due_date"], json!("2026-01-15"));
+
+    let expenses = crate::crud::list(&conn, &biz, &uid, "accounting", None, 50, 0).unwrap();
+    assert!(expenses.is_empty(), "no cash has left the business yet — the expense posts later, at settle() time");
+}
+
+#[test]
+fn test_receive_paid_in_full_still_posts_the_immediate_expense_and_no_debt() {
+    // Regression guard for the branch above: an ordinary (non-credit)
+    // receive must be completely unaffected by on_credit's existence —
+    // still one expense entry, still zero debt records.
+    let mut conn = test_db();
+    let biz = test_food_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = make_inventory_item(&conn, &biz, "FLOUR-002", "Flour", 0, 1000, 2000);
+    let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Flour", 20, 1000, 2000);
+
+    let req = crate::receiving::ReceiveRequest {
+        purchase_record_id: po_id,
+        quantity_received: None,
+        unit_price: None,
+        expiry_date: None,
+        on_credit: false,
+        due_date: None,
+    };
+    let result = crate::receiving::receive(&mut conn, &biz, &uid, req).unwrap();
+    assert_eq!(result["on_credit"], json!(false));
+
+    let expenses = crate::crud::list(&conn, &biz, &uid, "accounting", None, 50, 0).unwrap();
+    assert_eq!(expenses.len(), 1, "a paid receipt still posts its usual immediate expense");
+    let debts = crate::crud::list(&conn, &biz, &uid, "debt_credit", None, 50, 0).unwrap();
+    assert!(debts.is_empty(), "nothing owed on a receipt that was paid in full");
+}
+
+#[test]
+fn test_receive_on_credit_requires_debt_credit_module_and_leaves_nothing_partial() {
+    // Same "reject before any write happens, and leave absolutely
+    // nothing behind" guarantee this file's other rejection tests
+    // already prove for a below-cost price override — checked here for
+    // the on_credit precondition specifically.
+    let mut conn = test_db();
+    let id = crate::business_panel::create_business(&mut conn, "No Debt Module Biz", "USD", "UTC").expect("create business");
+    crate::onboarding::apply_business_type(&mut conn, &id, "retail").expect("enable modules");
+    // "retail" bundles Debt & Credit in by default along with everything
+    // else — every preset that includes Purchasing also includes it —
+    // so proving this precondition needs it switched back off by hand.
+    crate::business_panel::disable_module(&conn, &id, "debt_credit").expect("disable debt_credit");
+    let biz = id;
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = make_inventory_item(&conn, &biz, "GADGET-001", "Gadget", 0, 1000, 2000);
+    let po_id = make_purchase_order(&mut conn, &biz, &uid, &inv_id, "Gadget", 5, 1000, 2000);
+
+    let req = crate::receiving::ReceiveRequest {
+        purchase_record_id: po_id.clone(),
+        quantity_received: None,
+        unit_price: None,
+        expiry_date: None,
+        on_credit: true,
+        due_date: None,
+    };
+    let result = crate::receiving::receive(&mut conn, &biz, &uid, req);
+    assert!(result.is_err(), "buying on credit without Debt & Credit enabled must be rejected");
+
+    let list = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(list[0]["quantity"].as_i64().unwrap(), 0, "stock must be untouched by a rejected receive");
+    let po_list = crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap();
+    let po = po_list.iter().find(|r| r["id"] == json!(po_id)).unwrap();
+    assert_eq!(po["received"], json!(false), "the purchase order must still be unreceived, not partially processed");
 }

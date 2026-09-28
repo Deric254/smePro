@@ -623,7 +623,7 @@ fn test_open_stock_take_blocks_receiving() {
 
     crate::stock_take::initiate(&mut conn, &biz, &uid).unwrap();
 
-    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None };
+    let req = crate::receiving::ReceiveRequest { purchase_record_id: po_id, quantity_received: None, unit_price: None, expiry_date: None, on_credit: false, due_date: None };
     let result = crate::receiving::receive(&mut conn, &biz, &uid, req);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("stock take is in progress"));

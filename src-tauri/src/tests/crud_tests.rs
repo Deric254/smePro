@@ -706,6 +706,8 @@ fn test_crud_update_rejects_inventory_price_edit_once_batched() {
         quantity_received: None,
         unit_price: None,
         expiry_date: None,
+        on_credit: false,
+        due_date: None,
     }).unwrap();
 
     // With a real batch now behind it, hand-editing the Inventory

@@ -32,6 +32,8 @@ fn receive(
         quantity_received: None,
         unit_price,
         expiry_date: expiry_date.map(|s| s.to_string()),
+        on_credit: false,
+        due_date: None,
     };
     crate::receiving::receive(conn, biz, uid, req).unwrap()
 }

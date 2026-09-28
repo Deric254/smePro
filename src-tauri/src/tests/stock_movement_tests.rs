@@ -27,6 +27,8 @@ fn receive_po(conn: &mut rusqlite::Connection, biz: &str, uid: &str, po_id: &str
         quantity_received: None,
         unit_price: Some(unit_price),
         expiry_date: None,
+        on_credit: false,
+        due_date: None,
     }).unwrap();
 }
 
