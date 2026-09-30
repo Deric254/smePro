@@ -410,3 +410,75 @@ fn test_receive_on_credit_requires_debt_credit_module_and_leaves_nothing_partial
     let po = po_list.iter().find(|r| r["id"] == json!(po_id)).unwrap();
     assert_eq!(po["received"], json!(false), "the purchase order must still be unreceived, not partially processed");
 }
+
+fn purchasing_form_body(inv_id: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    body.insert("supplier".into(), json!("Form Supplier"));
+    body.insert("item_name".into(), json!("Flour"));
+    body.insert("inventory_record_id".into(), json!(inv_id));
+    body.insert("quantity".into(), json!(10));
+    body.insert("unit_cost".into(), json!(1000));
+    body.insert("unit_price".into(), json!(2000));
+    body
+}
+
+#[test]
+fn test_create_and_receive_reads_on_credit_and_due_date_from_the_form_body() {
+    // The Purchasing "+ New" form goes through create_and_receive, never
+    // through receive() — so the on_credit / due_date extraction from the
+    // raw body (the exact keys ModuleView.tsx sends) is only proven here.
+    let mut conn = test_db();
+    let biz = test_food_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = make_inventory_item(&conn, &biz, "FLOUR-101", "Flour", 0, 1000, 2000);
+
+    let mut body = purchasing_form_body(&inv_id);
+    body.insert("on_credit".into(), json!(true));
+    body.insert("due_date".into(), json!("2026-03-01"));
+    let result = crate::receiving::create_and_receive(&mut conn, &biz, &uid, &body).unwrap();
+    assert_eq!(result["receiving"]["on_credit"], json!(true));
+
+    let debts = crate::crud::list(&conn, &biz, &uid, "debt_credit", None, 50, 0).unwrap();
+    assert_eq!(debts.len(), 1);
+    assert_eq!(debts[0]["party_name"], json!("Form Supplier"));
+    assert_eq!(debts[0]["direction"], json!("owed_by_business"));
+    assert_eq!(debts[0]["amount"].as_i64().unwrap(), 10 * 1000);
+    assert_eq!(debts[0]["due_date"], json!("2026-03-01"));
+    let expenses = crate::crud::list(&conn, &biz, &uid, "accounting", None, 50, 0).unwrap();
+    assert!(expenses.is_empty(), "no immediate expense for a credit purchase");
+    let stock = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(stock[0]["quantity"].as_i64().unwrap(), 10, "stock still arrives immediately");
+}
+
+#[test]
+fn test_create_and_receive_without_on_credit_is_a_normal_paid_receipt() {
+    let mut conn = test_db();
+    let biz = test_food_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let inv_id = make_inventory_item(&conn, &biz, "FLOUR-102", "Flour", 0, 1000, 2000);
+
+    let result = crate::receiving::create_and_receive(&mut conn, &biz, &uid, &purchasing_form_body(&inv_id)).unwrap();
+    assert_eq!(result["receiving"]["on_credit"], json!(false));
+    assert!(crate::crud::list(&conn, &biz, &uid, "debt_credit", None, 50, 0).unwrap().is_empty());
+    assert_eq!(crate::crud::list(&conn, &biz, &uid, "accounting", None, 50, 0).unwrap().len(), 1);
+}
+
+#[test]
+fn test_create_and_receive_on_credit_rejected_without_debt_module_leaves_no_purchase_order() {
+    // create_and_receive creates the PO row AND receives it in one
+    // transaction — a rejected credit receipt must not strand an
+    // unreceived PO row behind either.
+    let mut conn = test_db();
+    let biz = test_food_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    crate::business_panel::disable_module(&conn, &biz, "debt_credit").expect("disable debt_credit");
+    let inv_id = make_inventory_item(&conn, &biz, "FLOUR-103", "Flour", 0, 1000, 2000);
+
+    let mut body = purchasing_form_body(&inv_id);
+    body.insert("on_credit".into(), json!(true));
+    assert!(crate::receiving::create_and_receive(&mut conn, &biz, &uid, &body).is_err());
+
+    assert!(crate::crud::list(&conn, &biz, &uid, "purchasing", None, 50, 0).unwrap().is_empty(), "no PO row left behind");
+    let stock = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0).unwrap();
+    assert_eq!(stock[0]["quantity"].as_i64().unwrap(), 0);
+}

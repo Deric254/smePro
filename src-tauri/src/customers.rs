@@ -126,37 +126,62 @@ pub fn find_or_create(conn: &Connection, business_id: &str, name: Option<&str>, 
     Ok(id)
 }
 
-/// The JOIN condition shared by `list` and `detail` below: a
-/// phone-tracked customer matches sales by phone; a phone-less
-/// customer matches by name instead (case-insensitively, same rule as
-/// `find_or_create`), restricted to sales that ALSO have no phone
-/// recorded — a sale that did include a phone belongs to whichever
-/// phone-tracked customer owns that phone, never to a same-named
-/// phone-less record.
-const SALE_MATCH_CONDITION: &str = "
-    (
-        (c.phone IS NOT NULL AND s.customer_phone = c.phone)
-        OR
-        (c.phone IS NULL AND (s.customer_phone IS NULL OR s.customer_phone = '') AND LOWER(s.customer) = LOWER(c.name))
-    )
-";
+/// The two halves of the match rule `detail` below (and, historically,
+/// `list`/`repeat_purchase_risk`) combine with OR: a phone-tracked
+/// customer matches sales by phone; a phone-less customer matches by
+/// name instead (case-insensitively, same rule as `find_or_create`),
+/// restricted to sales that ALSO have no phone recorded — a sale that
+/// did include a phone belongs to whichever phone-tracked customer
+/// owns that phone, never to a same-named phone-less record.
+///
+/// Kept as two separate constants, not one OR'd string, so `list` and
+/// `repeat_purchase_risk` below can join each branch separately — a
+/// plain, indexable equality per branch
+/// (`idx_module_sales_customer_phone` / `idx_module_sales_customer_name_lower`,
+/// see db_migrations.rs v40) — then combine with UNION ALL, rather
+/// than one un-indexable OR that forces a full customers × sales scan.
+/// `detail` combines them back into one OR'd condition below, which is
+/// fine there: it always filters to a single customer first, so
+/// there's no quadratic cost to avoid.
+const SALE_MATCH_BY_PHONE: &str = "c.phone IS NOT NULL AND s.customer_phone = c.phone";
+const SALE_MATCH_BY_NAME: &str =
+    "c.phone IS NULL AND (s.customer_phone IS NULL OR s.customer_phone = '') AND LOWER(s.customer) = LOWER(c.name)";
 
 /// Lists every customer with a real purchase, sorted by lifetime value
 /// (highest first) — the naturally useful default: a business owner
 /// glancing at this list sees their best customers first, not an
 /// arbitrary alphabetical or chronological order.
+///
+/// `matched` below is a UNION ALL of the two branches in
+/// `SALE_MATCH_BY_PHONE`'s own comment, each a plain indexed equality,
+/// instead of one un-indexable OR — the two branches are mutually
+/// exclusive by construction (one requires c.phone IS NOT NULL, the
+/// other c.phone IS NULL), so UNION ALL can never double-count a sale
+/// for the same customer the way an unconditional UNION ALL usually
+/// risks.
 pub fn list(conn: &Connection, business_id: &str) -> Result<Value> {
     let sales_table = crate::crud::load_module(conn, business_id, "sales")
         .map(|m| m.table_name())
         .unwrap_or_else(|_| "sales_records".to_string());
 
     let sql = format!(
-        "SELECT c.id, c.name, c.phone, c.created_at,
-                COALESCE(SUM(s.revenue), 0) as lifetime_value,
-                COUNT(s.id) as order_count,
-                MAX(s.created_at) as last_purchase_at
+        "WITH matched AS (
+             SELECT c.id AS customer_id, s.id AS sale_id, s.revenue, s.created_at
+             FROM customers c
+             JOIN {sales_table} s ON s.business_id = c.business_id AND s.deleted_at IS NULL AND {SALE_MATCH_BY_PHONE}
+             WHERE c.business_id = ?1
+             UNION ALL
+             SELECT c.id AS customer_id, s.id AS sale_id, s.revenue, s.created_at
+             FROM customers c
+             JOIN {sales_table} s ON s.business_id = c.business_id AND s.deleted_at IS NULL AND {SALE_MATCH_BY_NAME}
+             WHERE c.business_id = ?1
+         )
+         SELECT c.id, c.name, c.phone, c.created_at,
+                COALESCE(SUM(m.revenue), 0) as lifetime_value,
+                COUNT(m.sale_id) as order_count,
+                MAX(m.created_at) as last_purchase_at
          FROM customers c
-         LEFT JOIN {sales_table} s ON s.business_id = c.business_id AND s.deleted_at IS NULL AND {SALE_MATCH_CONDITION}
+         LEFT JOIN matched m ON m.customer_id = c.id
          WHERE c.business_id = ?1
          GROUP BY c.id
          ORDER BY lifetime_value DESC"
@@ -351,8 +376,12 @@ pub fn repeat_purchase_risk(
         "WITH customer_sales AS (
              SELECT c.id AS customer_id, c.name, c.phone, s.created_at
              FROM customers c
-             JOIN {sales_table} s
-               ON s.business_id = c.business_id AND s.deleted_at IS NULL AND {SALE_MATCH_CONDITION}
+             JOIN {sales_table} s ON s.business_id = c.business_id AND s.deleted_at IS NULL AND {SALE_MATCH_BY_PHONE}
+             WHERE c.business_id = ?1
+             UNION ALL
+             SELECT c.id AS customer_id, c.name, c.phone, s.created_at
+             FROM customers c
+             JOIN {sales_table} s ON s.business_id = c.business_id AND s.deleted_at IS NULL AND {SALE_MATCH_BY_NAME}
              WHERE c.business_id = ?1
          ),
          gaps AS (
@@ -361,18 +390,31 @@ pub fn repeat_purchase_risk(
              FROM customer_sales
          ),
          stats AS (
-             SELECT cs.customer_id, cs.name, cs.phone,
+             SELECT customer_id, name, phone,
                     COUNT(*) AS order_count,
-                    MAX(cs.created_at) AS last_purchase_at,
-                    (SELECT AVG(g.gap_days) FROM gaps g WHERE g.customer_id = cs.customer_id AND g.gap_days IS NOT NULL) AS avg_gap_days
-             FROM customer_sales cs
-             GROUP BY cs.customer_id
+                    MAX(created_at) AS last_purchase_at
+             FROM customer_sales
+             GROUP BY customer_id
              HAVING COUNT(*) >= 2
+         ),
+         -- One aggregate pass over `gaps`, not a per-customer
+         -- correlated re-scan of it (what this used to be): a
+         -- correlated subquery has no index to lean on inside a CTE,
+         -- so it was re-scanning every matched sale once per repeat
+         -- customer — exactly the same shape of quadratic cost the
+         -- UNION ALL above fixes for the join itself, just one step
+         -- further downstream.
+         gap_stats AS (
+             SELECT customer_id, AVG(gap_days) AS avg_gap_days
+             FROM gaps
+             WHERE gap_days IS NOT NULL
+             GROUP BY customer_id
          )
-         SELECT customer_id, name, phone, order_count, avg_gap_days,
-                CAST(julianday(?2) - julianday(last_purchase_at) AS INTEGER) AS days_since
-         FROM stats
-         ORDER BY (CAST(julianday(?2) - julianday(last_purchase_at) AS INTEGER)) - (avg_gap_days * ?3) DESC"
+         SELECT s.customer_id, s.name, s.phone, s.order_count, gs.avg_gap_days,
+                CAST(julianday(?2) - julianday(s.last_purchase_at) AS INTEGER) AS days_since
+         FROM stats s
+         JOIN gap_stats gs ON gs.customer_id = s.customer_id
+         ORDER BY (CAST(julianday(?2) - julianday(s.last_purchase_at) AS INTEGER)) - (gs.avg_gap_days * ?3) DESC"
     );
 
     let mut stmt = conn.prepare(&sql)?;

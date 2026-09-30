@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 39;
+const CURRENT_VERSION: i32 = 40;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -83,7 +83,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 37 { v37_users_terms_acceptance(conn)?; }
     if current < 38 { v38_remove_hr_tax_totp(conn)?; }
     if current < 39 { v39_purchasing_unit_cost_floor(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 39, "bump this alongside the last `if current < N` check above");
+    if current < 40 { v40_sales_matching_indexes(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 40, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2665,6 +2666,77 @@ fn v39_purchasing_unit_cost_floor(conn: &mut Connection) -> Result<()> {
     }
 
     tx.execute("INSERT INTO _schema_version (version) VALUES (39)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Supporting indexes for two joins that match sales to something
+/// else by name/phone rather than by a foreign key — the same
+/// "matched by plain text, not a foreign key" convention documented
+/// on stock_health.rs and customers.rs's own `SALE_MATCH_CONDITION` —
+/// which had nothing to make that matching fast at any real data
+/// volume. Every index here is additive (CREATE INDEX IF NOT EXISTS),
+/// changes no data, and is safe to run any number of times.
+///
+/// `idx_module_sales_customer_phone` and `idx_module_sales_customer_name_lower`
+/// split what `customers.rs`'s `SALE_MATCH_CONDITION` used to evaluate
+/// as one big OR (unindexable, forcing a full scan of every sale for
+/// every customer) into two separately-indexable lookups — see
+/// `customers.rs`'s own comment on why that OR is now two UNION'd
+/// branches instead. `idx_module_inventory_name` does the same for
+/// `profit::by_category`'s and stock_health.rs's plain (case-sensitive,
+/// unlike v15's own LOWER(TRIM(...)) index) `i.name = s.item_name`
+/// joins — a different expression than v15's, so it needs its own
+/// index; v15's remains for whatever still uses that lookup.
+///
+/// This migration is the backstop, not the primary guarantee: a fresh
+/// install has no `module_sales`/`module_inventory` table yet at the
+/// point migrations run (those tables are created later, the first
+/// time some business enables that module — see
+/// `ModuleDef::create_table` in module.rs, which asserts these exact
+/// same indexes itself for exactly that reason), so `has_table` below
+/// is false and this is a no-op for a brand-new database. What
+/// actually reaches a fresh install is `create_table`'s own copy of
+/// these `CREATE INDEX IF NOT EXISTS` statements. What THIS migration
+/// is for is the business that already had Sales/Inventory enabled —
+/// and so already has these tables — before this shipped, and has no
+/// other reason to ever call `create_table` again (disabling a module
+/// doesn't drop its table, and nothing re-creates an already-existing
+/// one) short of this migration reaching in directly.
+fn v40_sales_matching_indexes(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    let has_table = |name: &str| -> Result<bool> {
+        Ok(tx.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )? == 1)
+    };
+    if has_table("module_sales")? {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_module_sales_customer_phone
+             ON module_sales(business_id, customer_phone)",
+            [],
+        )?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_module_sales_customer_name_lower
+             ON module_sales(business_id, LOWER(customer))",
+            [],
+        )?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_module_sales_item_name
+             ON module_sales(business_id, item_name)",
+            [],
+        )?;
+    }
+    if has_table("module_inventory")? {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_module_inventory_name
+             ON module_inventory(business_id, name)",
+            [],
+        )?;
+    }
+    tx.execute("INSERT INTO _schema_version (version) VALUES (40)", [])?;
     tx.commit()?;
     Ok(())
 }

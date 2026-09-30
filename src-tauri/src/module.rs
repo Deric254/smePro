@@ -342,6 +342,49 @@ impl ModuleDef {
                  WHERE deleted_at IS NULL;",
                 [],
             )?;
+            // Plain (case-sensitive) equality, a different expression
+            // than the LOWER(TRIM(...)) index just above — needed for
+            // the several joins that match Sales to Inventory by exact
+            // item_name (profit::by_category, stock_health.rs's own
+            // slow-mover and unpriced-item queries): none of those can
+            // use an expression index built on a different expression
+            // than the one they actually query with. Asserted both
+            // here (so it exists the moment this table is ever
+            // created, fresh install or not) and in db_migrations.rs
+            // v40 (so it retroactively reaches a business that enabled
+            // Inventory before this existed and never disables/
+            // re-enables it, which is the only path back through
+            // here) — same belt-and-suspenders reasoning as the index
+            // just above it already uses.
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS idx_module_inventory_name
+                 ON module_inventory(business_id, name);",
+                [],
+            )?;
+        }
+        // Sales-specific: customers::list/repeat_purchase_risk match a
+        // sale to a customer by phone (SALE_MATCH_BY_PHONE) or, for a
+        // phone-less customer, by lowercased name (SALE_MATCH_BY_NAME)
+        // — see customers.rs's own comment on why those are two plain,
+        // separately-indexable equalities rather than one OR. Same
+        // belt-and-suspenders reasoning as the Inventory block above:
+        // asserted here AND in db_migrations.rs v40.
+        if self.id == "sales" {
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS idx_module_sales_customer_phone
+                 ON module_sales(business_id, customer_phone);",
+                [],
+            )?;
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS idx_module_sales_customer_name_lower
+                 ON module_sales(business_id, LOWER(customer));",
+                [],
+            )?;
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS idx_module_sales_item_name
+                 ON module_sales(business_id, item_name);",
+                [],
+            )?;
         }
 
         // Refunds-specific: refund.rs looks up "everything already

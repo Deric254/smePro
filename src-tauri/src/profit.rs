@@ -278,6 +278,19 @@ pub struct CategoryProfit {
 /// keeps the previous all-time behavior — used by ai_context.rs, which
 /// wants the standing lifetime picture, not whatever period a Dashboard
 /// slicer happens to be on.
+///
+/// Aggregates Sales by item_name FIRST (`by_item` below, a handful of
+/// rows once GROUP BY collapses it), THEN joins that to Inventory —
+/// not the other way around. Joining the raw Sales rows straight to
+/// Inventory, one row per sale, used to mean matching every single
+/// sale against Inventory by name individually; pre-aggregating first
+/// means Inventory is only ever joined against as many rows as there
+/// are distinct items sold, regardless of how many times each one
+/// sold. `module_inventory`'s own `(business_id, LOWER(TRIM(name)))`
+/// uniqueness constraint (see db_migrations.rs v18) is what makes this
+/// safe: a `by_item` row can only ever match at most one Inventory
+/// row, so nothing here can double-count a sale's revenue across two
+/// categories.
 pub fn by_category(
     conn: &Connection,
     business_id: &str,
@@ -305,15 +318,24 @@ pub fn by_category(
     }
 
     let sql = format!(
-        "SELECT COALESCE(NULLIF(TRIM(i.category), ''), 'Uncategorized') AS category,
-                COALESCE(SUM(s.revenue), 0), COALESCE(SUM(s.cost_at_sale), 0), COUNT(*),
-                COALESCE(SUM(CASE WHEN s.cost_at_sale > 0 THEN 1 ELSE 0 END), 0)
-         FROM {sales_table} s
+        "WITH by_item AS (
+             SELECT s.item_name,
+                    SUM(s.revenue) AS revenue_cents,
+                    SUM(s.cost_at_sale) AS cost_cents,
+                    COUNT(*) AS sales_count,
+                    SUM(CASE WHEN s.cost_at_sale > 0 THEN 1 ELSE 0 END) AS cost_bearing_sales_count
+             FROM {sales_table} s
+             WHERE {}
+             GROUP BY s.item_name
+         )
+         SELECT COALESCE(NULLIF(TRIM(i.category), ''), 'Uncategorized') AS category,
+                COALESCE(SUM(bi.revenue_cents), 0), COALESCE(SUM(bi.cost_cents), 0),
+                COALESCE(SUM(bi.sales_count), 0), COALESCE(SUM(bi.cost_bearing_sales_count), 0)
+         FROM by_item bi
          LEFT JOIN {inventory_table} i
-           ON i.business_id = s.business_id AND i.name = s.item_name AND i.deleted_at IS NULL
-         WHERE {}
+           ON i.business_id = ?1 AND i.name = bi.item_name AND i.deleted_at IS NULL
          GROUP BY category
-         ORDER BY (COALESCE(SUM(s.revenue), 0) - COALESCE(SUM(s.cost_at_sale), 0)) DESC",
+         ORDER BY (COALESCE(SUM(bi.revenue_cents), 0) - COALESCE(SUM(bi.cost_cents), 0)) DESC",
         where_clauses.join(" AND ")
     );
 

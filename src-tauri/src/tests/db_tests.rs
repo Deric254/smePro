@@ -89,3 +89,50 @@ fn test_open_reuses_the_same_encryption_key_across_launches() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&key_path);
 }
+
+#[test]
+fn test_v40_index_migration_reaches_a_business_that_already_had_sales_enabled() {
+    // Simulates the real deployment case v40's own doc comment exists
+    // to cover: an install that already had Sales/Inventory enabled —
+    // so module_sales/module_inventory already exist — BEFORE v40
+    // shipped, and has no other reason to ever call
+    // ModuleDef::create_table again (disabling a module doesn't drop
+    // its table). Goes through the REAL db::open() migration path —
+    // not test_db()'s schema.sql shortcut, which this file's own
+    // top-of-file comment notes bypasses db_migrations.rs entirely —
+    // dropping just the three new indexes on an otherwise fully real,
+    // already-migrated database, then re-opening exactly as a real
+    // app restart would.
+    let path = tmp_db_path();
+    let mut conn = crate::db::open(&path).expect("open");
+    let biz = crate::business_panel::create_business(&mut conn, "Upgrade Co", "USD", "UTC").expect("create business");
+    crate::onboarding::apply_business_type(&mut conn, &biz, "retail").expect("enable modules incl. sales/inventory");
+
+    for idx in ["idx_module_sales_customer_phone", "idx_module_sales_customer_name_lower", "idx_module_sales_item_name", "idx_module_inventory_name"] {
+        conn.execute(&format!("DROP INDEX IF EXISTS {idx}"), []).unwrap();
+    }
+    conn.execute("DELETE FROM _schema_version WHERE version = 40", []).unwrap();
+    let has_index = |conn: &rusqlite::Connection, name: &str| -> bool {
+        conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?1", [name], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false)
+    };
+    assert!(!has_index(&conn, "idx_module_sales_customer_phone"), "test setup: index must actually be gone first");
+    drop(conn);
+
+    // The actual real-world event: the app restarts on an upgraded
+    // binary, calling db::open() on the SAME on-disk file again —
+    // which is what runs migrations, not a direct call to
+    // db_migrations::run() on a connection already held open.
+    let conn = crate::db::open(&path).expect("re-open after \"upgrade\"");
+
+    for idx in ["idx_module_sales_customer_phone", "idx_module_sales_customer_name_lower", "idx_module_sales_item_name", "idx_module_inventory_name"] {
+        assert!(has_index(&conn, idx), "{idx} must exist after upgrading an install that already had these tables");
+    }
+    let version: i64 = conn.query_row("SELECT MAX(version) FROM _schema_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(version, 40);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(crate::db::key_path_for(std::path::Path::new(&path)));
+}
