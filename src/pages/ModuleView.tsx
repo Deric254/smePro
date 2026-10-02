@@ -9,6 +9,7 @@ import type { NewInvoiceItem, ImportExcelResult, BatchSummary } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
 import { formatMoney, parseMoneyInput } from '../lib/money';
 import InvoiceView from '../components/InvoiceView';
+import { confirmDialog } from '../components/ConfirmDialog';
 import ReceiptView from '../components/ReceiptView';
 import DebtSummaryWidget from '../components/DebtSummary';
 
@@ -401,13 +402,16 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         setWriteOffNotice('No expired stock to write off.');
         return;
       }
-      const lines = preview.items.slice(0, 8).map((i) => `• ${i.item_name}: ${i.units} unit${i.units === 1 ? '' : 's'}`).join('\n');
-      const more = preview.items.length > 8 ? `\n…and ${preview.items.length - 8} more item(s)` : '';
-      const ok = window.confirm(
-        `Write off ALL expired stock?\n\n${preview.units_written_off} unit(s) across ${preview.items_written_off} item(s), ` +
-        `costing ${formatMoney(preview.total_write_off_cost, businessCurrency)}.\n\n${lines}${more}\n\n` +
-        'This removes them from stock, records the loss in the stock take history and profit report, and cannot be undone.'
-      );
+      const lines = preview.items.slice(0, 8).map((i) => `${i.item_name}: ${i.units} unit${i.units === 1 ? '' : 's'}`);
+      if (preview.items.length > 8) lines.push(`…and ${preview.items.length - 8} more item(s)`);
+      const ok = await confirmDialog({
+        title: 'Write off all expired stock?',
+        message: `${preview.units_written_off} unit(s) across ${preview.items_written_off} item(s), costing ${formatMoney(preview.total_write_off_cost, businessCurrency)}.`,
+        items: lines,
+        note: 'This removes them from stock, records the loss in the stock take history and profit report, and cannot be undone.',
+        confirmLabel: 'Write off stock',
+        tone: 'danger',
+      });
       if (!ok) return;
       const done = await writeOffExpired();
       setWriteOffNotice(

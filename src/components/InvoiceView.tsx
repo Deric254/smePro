@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { getToken, getLogoUrl, markInvoiceSent, markInvoicePaid, cancelInvoice, getInvoiceRefundStatus, ApiError, API_BASE as API } from '../api';
 import { formatMoney, multiplyMoney } from '../lib/money';
+import { confirmDialog } from './ConfirmDialog';
 import '../styles/invoice-print.css';
 
 // unit_price, subtotal, tax_amount, total below are all integer minor
@@ -260,7 +261,16 @@ export default function InvoiceView({ invoiceId, onClose, onStatusChanged }: { i
           )}
           {(invoice.status === 'draft' || invoice.status === 'sent') && (
             <button
-              onClick={() => { if (confirm('Cancel this invoice? This cannot be undone.')) handleAction(() => cancelInvoice(invoice.id)); }}
+              onClick={async () => {
+                const ok = await confirmDialog({
+                  title: 'Cancel this invoice?',
+                  message: 'This cannot be undone.',
+                  confirmLabel: 'Cancel invoice',
+                  cancelLabel: 'Keep invoice',
+                  tone: 'danger',
+                });
+                if (ok) handleAction(() => cancelInvoice(invoice.id));
+              }}
               disabled={actionLoading}
               style={secondaryBtn}
             >

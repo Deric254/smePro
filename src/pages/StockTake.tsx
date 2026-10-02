@@ -6,6 +6,7 @@ import {
 import type { StockTake, StockTakeSummary, StockTakeCloseResult } from '../api';
 import { formatBackendDateTime } from '../lib/date';
 import { formatMoney } from '../lib/money';
+import { confirmDialog } from '../components/ConfirmDialog';
 
 export default function StockTakePage() {
   const [open, setOpen] = useState<StockTake | null>(null);
@@ -117,9 +118,14 @@ export default function StockTakePage() {
 
   async function handleCancel() {
     if (!open) return;
-    if (!window.confirm('Cancel this stock take? All counts entered so far will be discarded — inventory quantities are untouched either way.')) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: 'Cancel this stock take?',
+      message: 'All counts entered so far will be discarded. Inventory quantities are untouched either way.',
+      confirmLabel: 'Cancel stock take',
+      cancelLabel: 'Keep counting',
+      tone: 'danger',
+    });
+    if (!ok) return;
     setCancelling(true);
     setError(null);
     try {
