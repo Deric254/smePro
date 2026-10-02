@@ -151,7 +151,7 @@ fn test_gross_profit_summary_includes_shrinkage_from_closed_stock_take() {
     // the item's legacy cost of 500 cents = 2500 cents written off.
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 30 },
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 30, reason: None },
     ).unwrap();
     crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
 
@@ -178,7 +178,7 @@ fn test_gross_profit_summary_excludes_shrinkage_from_a_cancelled_stock_take() {
     let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 10 },
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 10, reason: None },
     ).unwrap();
     crate::stock_take::cancel(&mut conn, &biz, &uid, &stock_take_id).unwrap();
 
@@ -206,7 +206,7 @@ fn test_profit_by_item_includes_per_item_shrinkage() {
     // Tea is left uncounted (skipped) -> zero shrinkage for Tea.
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: rice_item_id, counted_qty: 30 },
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: rice_item_id, counted_qty: 30, reason: None },
     ).unwrap();
     crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
 

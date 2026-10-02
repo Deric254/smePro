@@ -105,7 +105,7 @@ fn test_the_ledger_sums_back_to_the_items_real_quantity() {
     let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: st_id.clone(), item_id, counted_qty: 88 },
+        crate::stock_take::RecordCountRequest { stock_take_id: st_id.clone(), item_id, counted_qty: 88, reason: None },
     ).unwrap();
     crate::stock_take::close(&mut conn, &biz, &uid, &st_id).unwrap();
 
@@ -189,7 +189,7 @@ fn test_shrinkage_movement_cost_matches_the_stock_takes_own_write_off() {
     let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: st_id.clone(), item_id, counted_qty: 30 },
+        crate::stock_take::RecordCountRequest { stock_take_id: st_id.clone(), item_id, counted_qty: 30, reason: None },
     ).unwrap();
     let summary = crate::stock_take::close(&mut conn, &biz, &uid, &st_id).unwrap();
 
@@ -222,7 +222,7 @@ fn test_a_surplus_is_recorded_at_zero_cost_not_an_invented_one() {
     let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: st_id.clone(), item_id, counted_qty: 45 },
+        crate::stock_take::RecordCountRequest { stock_take_id: st_id.clone(), item_id, counted_qty: 45, reason: None },
     ).unwrap();
     crate::stock_take::close(&mut conn, &biz, &uid, &st_id).unwrap();
 
@@ -244,7 +244,7 @@ fn test_a_cancelled_stock_take_writes_no_movements_at_all() {
     let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: st_id.clone(), item_id, counted_qty: 10 },
+        crate::stock_take::RecordCountRequest { stock_take_id: st_id.clone(), item_id, counted_qty: 10, reason: None },
     ).unwrap();
     crate::stock_take::cancel(&mut conn, &biz, &uid, &st_id).unwrap();
 

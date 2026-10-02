@@ -152,13 +152,25 @@ pub fn lookup_products(
                    ) AS rn
             FROM inventory_batches
             WHERE business_id = ?1 AND deleted_at IS NULL AND quantity_remaining > 0
+              AND (expiry_date IS NULL OR date(expiry_date) IS NULL OR date(expiry_date) >= date(?2))
          )
-         SELECT i.id, i.name, i.sku, COALESCE(fb.unit_price, i.unit_price) AS unit_price, i.quantity
+         SELECT i.id, i.name, i.sku, COALESCE(fb.unit_price, i.unit_price) AS unit_price,
+                i.quantity - COALESCE((
+                    SELECT SUM(xb.quantity_remaining) FROM inventory_batches xb
+                    WHERE xb.inventory_record_id = i.id AND xb.business_id = ?1 AND xb.deleted_at IS NULL
+                      AND xb.quantity_remaining > 0 AND xb.expiry_date IS NOT NULL
+                      AND date(xb.expiry_date) IS NOT NULL AND date(xb.expiry_date) < date(?2)
+                ), 0) AS sellable_quantity
          FROM {table} i
          LEFT JOIN front_batch fb ON fb.inventory_record_id = i.id AND fb.rn = 1
          WHERE i.business_id = ?1 AND i.deleted_at IS NULL"
     );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(business_id.to_string())];
+    // ?2 = shop-local today: expired batches neither set the price
+    // shown nor count toward the quantity shown (they can't be sold).
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(business_id.to_string()),
+        Box::new(crate::batches::local_today()),
+    ];
     if let Some(term) = search {
         if !term.trim().is_empty() {
             params.push(Box::new(format!("%{term}%")));
@@ -375,6 +387,10 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         None
     };
 
+    // Shop-local "today" for the expiry check below — taken once so
+    // every line of one sale is judged against the same date.
+    let today = crate::batches::local_today();
+
     for item in &req.items {
         if item.quantity <= 0 {
             return Err(anyhow!("quantity must be greater than zero"));
@@ -391,7 +407,22 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             return Err(anyhow!("product not found: {}", item.inventory_record_id));
         };
 
-        if current_qty < item.quantity && !req.allow_oversell {
+        // EXPIRED STOCK CAN NEVER BE SOLD. Units in batches past their
+        // expiry date still count in `current_qty` (they're still on
+        // the shelf and on the books until a stock take writes them
+        // off) but are not available to sell — not even with
+        // allow_oversell, which only ever covers a genuine shortfall.
+        let expired_qty = crate::batches::expired_quantity_in_tx(&tx, business_id, &item.inventory_record_id, &today)?;
+        let sellable_qty = (current_qty - expired_qty).max(0);
+
+        if sellable_qty < item.quantity && !req.allow_oversell {
+            if expired_qty > 0 {
+                return Err(anyhow!(
+                    "not enough sellable stock for '{name}': {sellable_qty} available, {} requested — \
+                     {expired_qty} expired unit(s) can't be sold; remove them with a stock take",
+                    item.quantity
+                ));
+            }
             return Err(anyhow!(
                 "not enough stock for '{name}': {current_qty} available, {} requested",
                 item.quantity
@@ -420,9 +451,9 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
         // item's own legacy unit_price/unit_cost, exactly the single
         // basis an oversold line always used before this feature
         // existed.
-        let coverable_qty = item.quantity.min(current_qty.max(0));
+        let coverable_qty = item.quantity.min(sellable_qty);
         let mut portions: Vec<crate::batches::ConsumedPortion> = if coverable_qty > 0 {
-            crate::batches::fefo_consume_in_tx(
+            crate::batches::fefo_consume_sellable_in_tx(
                 &tx,
                 business_id,
                 &item.inventory_record_id,
@@ -430,6 +461,7 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
                 current_qty,
                 legacy_unit_cost,
                 legacy_unit_price,
+                &today,
             )?
         } else {
             Vec::new()

@@ -310,17 +310,27 @@ export interface StockTakeItem {
   item_name: string;
   expected_qty: number;
   counted_qty: number | null;
+  // One of StockTake.reasons' codes, or null when none was given.
+  reason: string | null;
+}
+export interface StockTakeReason {
+  code: string;
+  label: string;
 }
 export interface StockTake {
   id: string;
   status: 'in_progress' | 'closed' | 'cancelled';
+  kind: 'count' | 'expired_write_off';
   created_at: string;
   closed_at: string | null;
   items: StockTakeItem[];
+  // The server's own list of allowed reasons — the dropdown's only source.
+  reasons: StockTakeReason[];
 }
 export interface StockTakeSummary {
   id: string;
   status: 'in_progress' | 'closed' | 'cancelled';
+  kind: 'count' | 'expired_write_off';
   created_at: string;
   closed_at: string | null;
   item_count: number;
@@ -343,6 +353,8 @@ export interface StockTakeAdjustment {
   // in cents, of what was written off via FEFO. Always 0 for a
   // surplus or a confirmed-correct count.
   write_off_cost: number;
+  reason: string | null;
+  reason_label: string | null;
 }
 export interface StockTakeCloseResult {
   stock_take_id: string;
@@ -361,11 +373,26 @@ export const getOpenStockTake = (): Promise<{ open: StockTake | null }> =>
   request('/inventory/stocktake/open');
 export const getStockTakeHistory = (): Promise<{ stock_takes: StockTakeSummary[] }> =>
   request('/inventory/stocktake/history');
-export const recordStockTakeCount = (stockTakeId: string, itemId: string, countedQty: number) =>
+export const recordStockTakeCount = (stockTakeId: string, itemId: string, countedQty: number, reason: string | null) =>
   request('/inventory/stocktake/count', {
     method: 'POST',
-    body: JSON.stringify({ stock_take_id: stockTakeId, item_id: itemId, counted_qty: countedQty }),
+    body: JSON.stringify({ stock_take_id: stockTakeId, item_id: itemId, counted_qty: countedQty, reason }),
   });
+
+// One-touch expired write-off. The preview runs the exact same server code
+// as the real thing and rolls it back, so what you confirm is what happens.
+export interface ExpiredWriteOffResult {
+  stock_take_id: string | null;
+  dry_run: boolean;
+  items_written_off: number;
+  units_written_off: number;
+  total_write_off_cost: number;
+  items: { inventory_record_id: string; item_name: string; units: number; write_off_cost: number }[];
+}
+export const previewExpiredWriteOff = (): Promise<ExpiredWriteOffResult> =>
+  request('/inventory/stocktake/expired-preview');
+export const writeOffExpired = (): Promise<ExpiredWriteOffResult> =>
+  request('/inventory/stocktake/write-off-expired', { method: 'POST' });
 export const closeStockTake = (stockTakeId: string): Promise<StockTakeCloseResult> =>
   request(`/inventory/stocktake/${stockTakeId}/close`, { method: 'POST' });
 // Discards a forgotten/abandoned count with zero effect on inventory
@@ -583,7 +610,16 @@ export interface ExpiringBatch {
   expiry_date: string;
   days_to_expiry: number;
 }
-export const getExpiringBatches = (withinDays = 30, limit = 50): Promise<{ items: ExpiringBatch[] }> =>
+export interface ExpiryTotals {
+  expired_batches: number;
+  expired_items: number;
+  expired_units: number;
+  // Expired units at their own batch's real cost, in cents.
+  expired_cost_value: number;
+  expiring_batches: number;
+  expiring_units: number;
+}
+export const getExpiringBatches = (withinDays = 30, limit = 50): Promise<{ items: ExpiringBatch[]; summary: ExpiryTotals }> =>
   request(`/inventory/expiring-batches?within_days=${withinDays}&limit=${limit}`);
 
 // Rollback — list real GitHub releases and check one tag's manifest

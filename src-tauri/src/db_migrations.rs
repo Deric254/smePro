@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 40;
+const CURRENT_VERSION: i32 = 41;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -84,7 +84,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 38 { v38_remove_hr_tax_totp(conn)?; }
     if current < 39 { v39_purchasing_unit_cost_floor(conn)?; }
     if current < 40 { v40_sales_matching_indexes(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 40, "bump this alongside the last `if current < N` check above");
+    if current < 41 { v41_stock_take_reasons(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 41, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2737,6 +2738,36 @@ fn v40_sales_matching_indexes(conn: &mut Connection) -> Result<()> {
         )?;
     }
     tx.execute("INSERT INTO _schema_version (version) VALUES (40)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Adds the two plain, nullable-or-defaulted columns behind stock-take
+/// reasons and the one-touch expired write-off: `stock_take_items.reason`
+/// (why a counted item differs from what the books expected — one of the
+/// fixed codes in stock_take.rs::REASONS, NULL for counts recorded before
+/// this existed) and `stock_takes.kind` ('count' for a normal guided
+/// count, 'expired_write_off' for the one-touch clean-up), so history can
+/// tell the two apart. Additive only — no rebuild, no data rewritten.
+fn v41_stock_take_reasons(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    let has_reason: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('stock_take_items') WHERE name='reason'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_reason == 0 {
+        tx.execute("ALTER TABLE stock_take_items ADD COLUMN reason TEXT", [])?;
+    }
+    let has_kind: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('stock_takes') WHERE name='kind'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_kind == 0 {
+        tx.execute("ALTER TABLE stock_takes ADD COLUMN kind TEXT NOT NULL DEFAULT 'count'", [])?;
+    }
+    tx.execute("INSERT INTO _schema_version (version) VALUES (41)", [])?;
     tx.commit()?;
     Ok(())
 }

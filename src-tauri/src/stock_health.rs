@@ -389,13 +389,39 @@ pub struct ExpiringBatch {
     pub days_to_expiry: i64,
 }
 
+/// Totals for the whole business, never cut short by the list's
+/// `limit` — the numbers a "write off expired" decision is made on must
+/// be complete, not just the first page. "Expired" means expiry date
+/// strictly before today (the same rule checkout uses to refuse a sale);
+/// a batch expiring today is still sellable and counts as "expiring".
+#[derive(Debug, Serialize)]
+pub struct ExpiryTotals {
+    pub expired_batches: i64,
+    pub expired_items: i64,
+    pub expired_units: i64,
+    /// Expired units at their own batch's real cost, in cents — what a
+    /// write-off will cost the business.
+    pub expired_cost_value: i64,
+    pub expiring_batches: i64,
+    pub expiring_units: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExpiringBatchesReport {
+    pub items: Vec<ExpiringBatch>,
+    pub summary: ExpiryTotals,
+}
+
 /// `within_days`: only batches expiring within this many days (from
-/// `today`) are included — a discovery report, not a full history.
+/// `today`) are listed — a discovery report, not a full history.
 /// Clamped to [1, 365], same discipline as `slow_movers`' own
 /// `stale_after_days`. A batch already past its expiry date still
 /// shows up, with a negative `days_to_expiry`, deliberately — an
 /// already-expired batch waiting for someone to remove/write it off is
 /// exactly the kind of thing this report exists to surface, not hide.
+/// Expired batches sort first. `summary` counts everything, regardless
+/// of `limit`; a stored date that can't be read as a date is left out of
+/// both (it cannot be judged, and receiving no longer accepts one).
 pub fn expiring_batches(
     conn: &Connection,
     business_id: &str,
@@ -403,7 +429,7 @@ pub fn expiring_batches(
     today: &str,
     within_days: i64,
     limit: i64,
-) -> Result<Vec<ExpiringBatch>> {
+) -> Result<ExpiringBatchesReport> {
     crate::rbac::require(conn, user_id, "inventory", "read")?;
     let inventory_module = crud::load_module(conn, business_id, "inventory")
         .map_err(|_| anyhow!("the Inventory module isn't enabled for this business"))?;
@@ -412,15 +438,18 @@ pub fn expiring_batches(
     let within_days = within_days.clamp(1, 365);
     let limit = limit.clamp(1, 500);
 
+    // One definition of "days to expiry", used by the list and the
+    // totals alike: whole days from `today` to the expiry date.
     let sql = format!(
         "SELECT b.id, b.inventory_record_id, i.name, b.quantity_remaining, b.unit_cost, b.unit_price,
-                b.expiry_date, CAST(julianday(b.expiry_date) - julianday(?2) AS INTEGER) AS days_to_expiry
+                date(b.expiry_date),
+                CAST(ROUND(julianday(date(b.expiry_date)) - julianday(date(?2))) AS INTEGER) AS days_to_expiry
          FROM inventory_batches b
          JOIN {inventory_table} i ON i.id = b.inventory_record_id AND i.business_id = b.business_id
          WHERE b.business_id = ?1 AND b.deleted_at IS NULL AND b.quantity_remaining > 0
-           AND b.expiry_date IS NOT NULL AND i.deleted_at IS NULL
-           AND CAST(julianday(b.expiry_date) - julianday(?2) AS INTEGER) <= ?3
-         ORDER BY b.expiry_date ASC, b.received_at ASC
+           AND b.expiry_date IS NOT NULL AND date(b.expiry_date) IS NOT NULL AND i.deleted_at IS NULL
+           AND CAST(ROUND(julianday(date(b.expiry_date)) - julianday(date(?2))) AS INTEGER) <= ?3
+         ORDER BY date(b.expiry_date) ASC, b.received_at ASC, b.id ASC
          LIMIT ?4"
     );
 
@@ -437,6 +466,34 @@ pub fn expiring_batches(
             days_to_expiry: r.get(7)?,
         })
     })?;
+    let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    let totals_sql = format!(
+        "SELECT COALESCE(SUM(CASE WHEN d < 0 THEN 1 ELSE 0 END), 0),
+                COUNT(DISTINCT CASE WHEN d < 0 THEN inv_id END),
+                COALESCE(SUM(CASE WHEN d < 0 THEN qty ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN d < 0 THEN qty * cost ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN d >= 0 AND d <= ?3 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN d >= 0 AND d <= ?3 THEN qty ELSE 0 END), 0)
+         FROM (
+             SELECT b.inventory_record_id AS inv_id, b.quantity_remaining AS qty, b.unit_cost AS cost,
+                    CAST(ROUND(julianday(date(b.expiry_date)) - julianday(date(?2))) AS INTEGER) AS d
+             FROM inventory_batches b
+             JOIN {inventory_table} i ON i.id = b.inventory_record_id AND i.business_id = b.business_id
+             WHERE b.business_id = ?1 AND b.deleted_at IS NULL AND b.quantity_remaining > 0
+               AND b.expiry_date IS NOT NULL AND date(b.expiry_date) IS NOT NULL AND i.deleted_at IS NULL
+         )"
+    );
+    let summary = conn.query_row(&totals_sql, params![business_id, today, within_days], |r| {
+        Ok(ExpiryTotals {
+            expired_batches: r.get(0)?,
+            expired_items: r.get(1)?,
+            expired_units: r.get(2)?,
+            expired_cost_value: r.get(3)?,
+            expiring_batches: r.get(4)?,
+            expiring_units: r.get(5)?,
+        })
+    })?;
+
+    Ok(ExpiringBatchesReport { items, summary })
 }

@@ -6,7 +6,7 @@ import {
 } from '../api';
 import type {
   DebtSummary, GrossProfitSummary, BasketPair, ItemProfit, ItemMarginTrend, DebtAgingSummary,
-  SlowMover, StockRunway, UnpricedItem, ZeroCostPurchase, ExpiringBatch, RefundRate, DayOfWeekPattern, HourOfDayPattern, PeriodTrendPoint, SeasonalMonthPattern,
+  SlowMover, StockRunway, UnpricedItem, ZeroCostPurchase, ExpiringBatch, ExpiryTotals, RefundRate, DayOfWeekPattern, HourOfDayPattern, PeriodTrendPoint, SeasonalMonthPattern,
 } from '../api';
 import type { ModuleListItem, ModuleSchema } from '../types';
 import { formatMoney } from '../lib/money';
@@ -92,7 +92,7 @@ export default function Reports() {
   const [stockRunway, setStockRunway] = useState<StockRunway[] | null>(null);
   const [unpricedItems, setUnpricedItems] = useState<UnpricedItem[] | null>(null);
   const [zeroCostPurchases, setZeroCostPurchases] = useState<ZeroCostPurchase[] | null>(null);
-  const [expiringBatches, setExpiringBatches] = useState<ExpiringBatch[] | null>(null);
+  const [expiringBatches, setExpiringBatches] = useState<{ items: ExpiringBatch[]; summary: ExpiryTotals } | null>(null);
   const [stockLoading, setStockLoading] = useState(false);
 
   const [debtAging, setDebtAging] = useState<DebtAgingSummary | null>(null);
@@ -156,7 +156,7 @@ export default function Reports() {
       getStockRunway(30, 15).then((r) => setStockRunway(r.items)),
       getUnpricedItems(50).then((r) => setUnpricedItems(r.items)),
       getZeroCostPurchases(50).then((r) => setZeroCostPurchases(r.items)),
-      getExpiringBatches(30, 50).then((r) => setExpiringBatches(r.items)),
+      getExpiringBatches(30, 50).then((r) => setExpiringBatches({ items: r.items, summary: r.summary })),
     ]).finally(() => setStockLoading(false));
   }
 
@@ -235,7 +235,7 @@ export default function Reports() {
           {(unpricedItems || zeroCostPurchases) && (
             <UnpricedItemsCard items={unpricedItems ?? []} zeroCostPurchases={zeroCostPurchases ?? []} currency={currency} />
           )}
-          {expiringBatches && <ExpiringBatchesCard items={expiringBatches} currency={currency} />}
+          {expiringBatches && <ExpiringBatchesCard items={expiringBatches.items} summary={expiringBatches.summary} currency={currency} />}
         </div>
       </CollapsibleSection>
 

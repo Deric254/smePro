@@ -62,16 +62,24 @@ This skips the auto-bump and releases exactly that tag.
    This generates every platform-specific format (`.ico`, `.icns`, PNGs)
    from one source image.
 
-5. **Android signing (optional)** — without any setup, the Android APK
-   is built with Android's standard debug signing, which is a
-   completely normal, installable, working APK — just not eligible for
-   the Play Store. For that, add these repo secrets and the workflow
-   automatically switches to using them:
-   - `ANDROID_KEYSTORE_BASE64` — your release keystore file, base64-encoded
+5. **Android signing (strongly recommended — do this once)** — Android
+   only upgrades an installed app with an APK signed by the SAME key,
+   otherwise it shows a bare **"App not installed"**. Without the
+   secrets below, the workflow signs with a throwaway fallback key kept
+   in a GitHub Actions cache; GitHub deletes caches unused for 7 days,
+   so after a quiet week the next APK is signed with a different key and
+   will not install over the earlier one. Set these repo secrets once
+   and the key never changes:
+   - `ANDROID_KEYSTORE_BASE64` — your keystore file, base64-encoded
      (`base64 -i release.keystore | pbcopy` on macOS, or `base64 -w0 release.keystore` on Linux)
    - `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`
 
-   No keystore yet? `keytool -genkey -v -keystore release.keystore -alias upload -keyalg RSA -keysize 2048 -validity 10000`
+   Generate it ONCE, on your own machine, and back the file up
+   somewhere safe (lose it and nobody can upgrade existing installs):
+   `keytool -genkey -v -keystore release.keystore -alias smepro -keyalg RSA -keysize 2048 -validity 10000`
+
+   The APK is published as `SME-Pro-v<version>.apk`. The build fails
+   (rather than publishing) if Gradle produces an unsigned APK.
 
 ## Verifying it worked
 

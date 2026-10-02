@@ -26,6 +26,7 @@ pub const REPACK_CONSUMED: &str = "repack_consumed";
 pub const REPACK_PRODUCED: &str = "repack_produced";
 pub const STOCK_TAKE_SHRINKAGE: &str = "stock_take_shrinkage";
 pub const STOCK_TAKE_SURPLUS: &str = "stock_take_surplus";
+pub const EXPIRED_WRITE_OFF: &str = "expired_write_off";
 
 /// Human-facing label for one movement type. Centralised here so the
 /// list endpoint, the Excel export and any future surface all name a
@@ -39,6 +40,7 @@ pub fn label_for(movement_type: &str) -> &'static str {
         REPACK_PRODUCED => "Repack (produced)",
         STOCK_TAKE_SHRINKAGE => "Stock take shrinkage",
         STOCK_TAKE_SURPLUS => "Stock take surplus",
+        EXPIRED_WRITE_OFF => "Expired write-off",
         _ => "Other",
     }
 }

@@ -59,7 +59,7 @@ fn test_close_applies_counted_variance_to_inventory_quantity() {
     // shrinkage, the exact scenario this feature exists to catch.
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 33 },
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 33, reason: None },
     ).unwrap();
 
     let summary = crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
@@ -86,7 +86,7 @@ fn test_cancel_discards_counts_and_leaves_inventory_untouched() {
     // this must not leak into inventory.quantity in any form.
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 12 },
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 12, reason: None },
     ).unwrap();
 
     let cancelled = crate::stock_take::cancel(&mut conn, &biz, &uid, &stock_take_id).unwrap();
@@ -162,9 +162,9 @@ fn test_close_persists_write_off_cost_onto_the_stock_take_item_row() {
     let tea_item_id = items.iter().find(|i| i["inventory_record_id"].as_str().unwrap() == tea_id).unwrap()["id"].as_str().unwrap().to_string();
 
     // Rice: shrinkage of 10 units at 500 cents = 5000.
-    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: rice_item_id.clone(), counted_qty: 30 }).unwrap();
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: rice_item_id.clone(), counted_qty: 30, reason: None }).unwrap();
     // Tea: exact match, no write-off.
-    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: tea_item_id.clone(), counted_qty: 20 }).unwrap();
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: tea_item_id.clone(), counted_qty: 20, reason: None }).unwrap();
     crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
 
     let rice_write_off: i64 = conn.query_row("SELECT write_off_cost_cents FROM stock_take_items WHERE id = ?1", rusqlite::params![rice_item_id], |r| r.get(0)).unwrap();
@@ -196,8 +196,7 @@ fn test_close_leaves_uncounted_items_untouched_and_reports_them_as_skipped() {
         crate::stock_take::RecordCountRequest {
             stock_take_id: stock_take_id.clone(),
             item_id: counted_item["id"].as_str().unwrap().to_string(),
-            counted_qty: 18,
-        },
+            counted_qty: 18, reason: None },
     ).unwrap();
     // Skipped Item never gets a record_count() call at all.
 
@@ -220,8 +219,8 @@ fn test_recounting_the_same_item_before_close_overwrites_not_rejects() {
     let stock_take_id = initiated["id"].as_str().unwrap().to_string();
     let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
 
-    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: item_id.clone(), counted_qty: 7 }).unwrap();
-    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: item_id.clone(), counted_qty: 9 }).unwrap();
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: item_id.clone(), counted_qty: 7, reason: None }).unwrap();
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: item_id.clone(), counted_qty: 9, reason: None }).unwrap();
 
     let fetched = crate::stock_take::get(&conn, &biz, &uid, &stock_take_id).unwrap();
     assert_eq!(fetched["items"][0]["counted_qty"].as_i64().unwrap(), 9, "a recount must overwrite, not stack or reject");
@@ -238,7 +237,7 @@ fn test_cannot_record_a_negative_count() {
     let stock_take_id = initiated["id"].as_str().unwrap().to_string();
     let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
 
-    let result = crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id, item_id, counted_qty: -3 });
+    let result = crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id, item_id, counted_qty: -3, reason: None });
     assert!(result.is_err());
 }
 
@@ -254,7 +253,7 @@ fn test_cannot_record_a_count_against_an_already_closed_stock_take() {
     let item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
     crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
 
-    let result = crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 5 });
+    let result = crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 5, reason: None });
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("already closed"));
 }
@@ -416,7 +415,7 @@ fn test_close_applies_a_positive_variance_directly_at_legacy_cost() {
     // Physically found MORE than the system expected.
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 47 },
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 47, reason: None },
     ).unwrap();
 
     let summary = crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
@@ -471,7 +470,7 @@ fn test_surplus_on_a_sold_out_batch_item_creates_a_new_priced_batch_not_a_zero_p
     let stt_item_id = initiated["items"][0]["id"].as_str().unwrap().to_string();
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: stt_item_id, counted_qty: 20 },
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: stt_item_id, counted_qty: 20, reason: None },
     ).unwrap();
     crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
 
@@ -508,7 +507,7 @@ fn test_close_reports_variance_pct_and_write_off_cost_for_shrinkage() {
     // 7 units physically missing.
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 33 },
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 33, reason: None },
     ).unwrap();
 
     let summary = crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
@@ -535,7 +534,7 @@ fn test_close_reports_n_a_variance_pct_when_expected_qty_is_zero() {
 
     crate::stock_take::record_count(
         &conn, &biz, &uid,
-        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 5 },
+        crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id, counted_qty: 5, reason: None },
     ).unwrap();
 
     let summary = crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
@@ -556,8 +555,8 @@ fn test_history_rollup_reports_max_and_average_variance_pct() {
     let rice_item_id = items.iter().find(|i| i["item_name"] == serde_json::json!("Rice")).unwrap()["id"].as_str().unwrap().to_string();
     let beans_item_id = items.iter().find(|i| i["item_name"] == serde_json::json!("Beans")).unwrap()["id"].as_str().unwrap().to_string();
 
-    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: rice_item_id, counted_qty: 33 }).unwrap();
-    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: beans_item_id, counted_qty: 25 }).unwrap();
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: rice_item_id, counted_qty: 33, reason: None }).unwrap();
+    crate::stock_take::record_count(&conn, &biz, &uid, crate::stock_take::RecordCountRequest { stock_take_id: stock_take_id.clone(), item_id: beans_item_id, counted_qty: 25, reason: None }).unwrap();
 
     crate::stock_take::close(&mut conn, &biz, &uid, &stock_take_id).unwrap();
 

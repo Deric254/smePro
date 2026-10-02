@@ -304,7 +304,20 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         return Err(anyhow!("source inventory item not found: {}", req.source_record_id));
     };
 
-    if source_current_qty < req.source_quantity {
+    // Expired stock can't be repacked any more than it can be sold —
+    // repacking would just turn it into fresh-looking units of another
+    // item. Only sellable (non-expired) units count as available.
+    let today = crate::batches::local_today();
+    let expired_qty = crate::batches::expired_quantity_in_tx(&tx, business_id, &req.source_record_id, &today)?;
+    let source_sellable_qty = (source_current_qty - expired_qty).max(0);
+    if source_sellable_qty < req.source_quantity {
+        if expired_qty > 0 {
+            return Err(anyhow!(
+                "not enough usable stock of '{source_name}' to repack: {source_sellable_qty} available, {} requested — \
+                 {expired_qty} expired unit(s) can't be repacked; remove them with a stock take",
+                req.source_quantity
+            ));
+        }
         return Err(anyhow!(
             "not enough stock of '{source_name}' to repack: {source_current_qty} available, {} requested",
             req.source_quantity
@@ -377,12 +390,13 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
                 "SELECT COALESCE(
                     (SELECT unit_price FROM inventory_batches
                      WHERE inventory_record_id = ?1 AND business_id = ?2 AND deleted_at IS NULL AND quantity_remaining > 0
+                       AND (expiry_date IS NULL OR date(expiry_date) IS NULL OR date(expiry_date) >= date(?4))
                      ORDER BY {fefo} LIMIT 1),
                     ?3
                  )",
                 fefo = crate::batches::FEFO_ORDER_BY,
             ),
-            params![target_record_id, business_id, target_legacy_unit_price],
+            params![target_record_id, business_id, target_legacy_unit_price, today],
             |r| r.get(0),
         )
         .unwrap_or(target_legacy_unit_price);
@@ -397,7 +411,7 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
     // never a single flat `source_unit_cost` — a repack of an item
     // that has more than one live batch now correctly attributes each
     // slice of what it consumed to its own batch's own cost.
-    let source_portions = crate::batches::fefo_consume_in_tx(
+    let source_portions = crate::batches::fefo_consume_sellable_in_tx(
         &tx,
         business_id,
         &req.source_record_id,
@@ -405,7 +419,24 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         source_current_qty,
         source_unit_cost,
         source_unit_price,
+        &today,
     )?;
+    // The repacked units inherit the expiry of the stock they were made
+    // from. If the source came from several batches, the EARLIEST
+    // expiry among the portions actually used wins — the safe choice,
+    // it can never overstate how long the new units last. Undated
+    // portions (legacy / no expiry) don't count; if nothing used had a
+    // date, the new batch has none either.
+    let inherited_expiry: Option<String> = source_portions
+        .iter()
+        .filter_map(|p| match &p.from {
+            crate::batches::ConsumedFrom::Batch { expiry_date: Some(d), .. } => {
+                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()
+            }
+            _ => None,
+        })
+        .min()
+        .map(|d| d.to_string());
     // Exact — a sum of exact integer products, no rounding possible
     // yet at this point (the rounding this function still has to
     // guard against is the NEXT step: dividing this total across the
@@ -525,7 +556,7 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         req.target_quantity_produced,
         new_batch_unit_cost,
         new_batch_unit_price,
-        None, // no expiry inherited from the source — the spec's default for this decision; a future pass could carry a source batch's own expiry through if that's wanted
+        inherited_expiry.as_deref(),
         &repacked_at,
         Some(user_id),
     )?;
@@ -608,6 +639,7 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         // comment. What this repack actually produced is entirely
         // captured by the new batch below.
         "new_batch_id": new_batch_id,
+        "new_batch_expiry_date": inherited_expiry,
         "new_batch_unit_cost": new_batch_unit_cost,
         "new_batch_unit_price": new_batch_unit_price,
         // Reconciliation: exact value consumed from the source vs.

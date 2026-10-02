@@ -3,7 +3,7 @@ import {
   getModuleSchema, listRecords, createRecord, updateRecord, deleteRecord, exportModule,
   downloadImportTemplate, importExcel,
   runReport, exportReport, listUnits, listCurrencies, runForecast, createInvoice, getBusinessInfo,
-  repackStock, settleDebt, getBatches, updateBatchPrice, ApiError,
+  repackStock, settleDebt, getBatches, updateBatchPrice, previewExpiredWriteOff, writeOffExpired, ApiError,
 } from '../api';
 import type { NewInvoiceItem, ImportExcelResult, BatchSummary } from '../api';
 import type { ModuleSchema, Record_, FieldDef, Unit, Currency } from '../types';
@@ -114,6 +114,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         setRecords(r.records);
         // Inventory's own schema already lists "repack" permissions.
         setInventoryCanRepack(moduleId === 'inventory' && s.my_permissions.includes('repack'));
+        setInventoryCanStocktake(moduleId === 'inventory' && s.my_permissions.includes('stocktake'));
         // Only fetch the reference-data lists this module actually needs.
         const needsUnits = s.fields.some((f: FieldDef) => f.type === 'unit');
         const needsCurrencies = s.fields.some((f: FieldDef) => f.type === 'currency');
@@ -171,6 +172,11 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // viewing, which is why receiving needs its own small fetch below
   // when you're on the Purchasing page rather than Inventory itself.
   const [inventoryCanRepack, setInventoryCanRepack] = useState(false);
+  // One-touch "write off expired" (inventory + stocktake permission, same
+  // as a stock take — it IS a stock take of kind expired_write_off).
+  const [inventoryCanStocktake, setInventoryCanStocktake] = useState(false);
+  const [writeOffBusy, setWriteOffBusy] = useState(false);
+  const [writeOffNotice, setWriteOffNotice] = useState<string | null>(null);
 
   const [actionResult, setActionResult] = useState<string | null>(null);
 
@@ -382,6 +388,40 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   // overdue alarm) update immediately alongside the table, not on the
   // next unrelated re-render.
   const [debtSummaryRefreshKey, setDebtSummaryRefreshKey] = useState(0);
+
+  async function handleWriteOffExpired() {
+    setWriteOffBusy(true);
+    setError(null);
+    setWriteOffNotice(null);
+    try {
+      // The preview runs the exact server code the real write-off runs,
+      // then undoes it — so the numbers confirmed here are the numbers applied.
+      const preview = await previewExpiredWriteOff();
+      if (preview.items_written_off === 0) {
+        setWriteOffNotice('No expired stock to write off.');
+        return;
+      }
+      const lines = preview.items.slice(0, 8).map((i) => `• ${i.item_name}: ${i.units} unit${i.units === 1 ? '' : 's'}`).join('\n');
+      const more = preview.items.length > 8 ? `\n…and ${preview.items.length - 8} more item(s)` : '';
+      const ok = window.confirm(
+        `Write off ALL expired stock?\n\n${preview.units_written_off} unit(s) across ${preview.items_written_off} item(s), ` +
+        `costing ${formatMoney(preview.total_write_off_cost, businessCurrency)}.\n\n${lines}${more}\n\n` +
+        'This removes them from stock, records the loss in the stock take history and profit report, and cannot be undone.'
+      );
+      if (!ok) return;
+      const done = await writeOffExpired();
+      setWriteOffNotice(
+        done.items_written_off === 0
+          ? 'No expired stock to write off.'
+          : `Wrote off ${done.units_written_off} expired unit(s) across ${done.items_written_off} item(s) — ${formatMoney(done.total_write_off_cost, businessCurrency)} at cost.`
+      );
+      await refreshRecords(search || undefined);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Could not write off expired stock.');
+    } finally {
+      setWriteOffBusy(false);
+    }
+  }
 
   async function refreshRecords(searchTerm?: string) {
     const r = await listRecords(moduleId, searchTerm);
@@ -629,6 +669,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       </div>
 
       {error && <div style={styles.error}>{error}</div>}
+      {writeOffNotice && <div style={{ ...styles.error, background: 'var(--paper)', color: 'var(--ink-soft)', border: '1px solid var(--paper-line)' }}>{writeOffNotice}</div>}
 
       {moduleId === 'debt_credit' && tab === 'records' && <DebtSummaryWidget refreshKey={debtSummaryRefreshKey} />}
 
@@ -646,6 +687,11 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
               {canExport && <button className="btn btn-outline" onClick={() => exportModule(moduleId)}>Export to Excel</button>}
+              {moduleId === 'inventory' && inventoryCanStocktake && (
+                <button className="btn btn-outline" onClick={handleWriteOffExpired} disabled={writeOffBusy}>
+                  {writeOffBusy ? 'Working…' : 'Write off expired'}
+                </button>
+              )}
               {/* Sales has no generic "+ New" or "Import from Excel" —
                   every sale has to carry real cost and stock data, and
                   the only two paths that produce that are Checkout and

@@ -21,6 +21,8 @@ export default function StockTakePage() {
   // without an in-flight save fighting the input mid-keystroke.
   const [countText, setCountText] = useState<Record<string, string>>({});
   const [savingItemId, setSavingItemId] = useState<string | null>(null);
+  // Chosen reason code per item ('' = none picked yet).
+  const [reasonText, setReasonText] = useState<Record<string, string>>({});
 
   useEffect(() => {
     getBusinessInfo().then((b: any) => { if (b?.currency) setCurrency(b.currency); }).catch(() => {});
@@ -34,10 +36,13 @@ export default function StockTakePage() {
         setHistory(h.stock_takes.filter((s) => s.status === 'closed' || s.status === 'cancelled'));
         if (o.open) {
           const initial: Record<string, string> = {};
+          const initialReasons: Record<string, string> = {};
           for (const item of o.open.items) {
             if (item.counted_qty !== null) initial[item.id] = String(item.counted_qty);
+            if (item.reason) initialReasons[item.id] = item.reason;
           }
           setCountText(initial);
+          setReasonText(initialReasons);
         }
       })
       .catch(() => setError('Could not load stock take status.'))
@@ -54,6 +59,7 @@ export default function StockTakePage() {
       setOpen(st);
       setCloseResult(null);
       setCountText({});
+      setReasonText({});
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not start a stock take.');
     } finally {
@@ -69,12 +75,20 @@ export default function StockTakePage() {
       setError('Enter a whole number of 0 or more before saving a count.');
       return;
     }
+    // A count below what the books expected is a loss of stock — say why.
+    // (A count that matches needs no reason, so any picked one is dropped.)
+    const item = open.items.find((i) => i.id === itemId);
+    const reason = qty === item?.expected_qty ? null : (reasonText[itemId] || null);
+    if (item && qty < item.expected_qty && !reason) {
+      setError(`Pick a reason for the shortfall on "${item.item_name}" (expected ${item.expected_qty}, counted ${qty}).`);
+      return;
+    }
     setSavingItemId(itemId);
     setError(null);
     try {
-      await recordStockTakeCount(open.id, itemId, qty);
+      await recordStockTakeCount(open.id, itemId, qty, reason);
       setOpen((prev) => prev
-        ? { ...prev, items: prev.items.map((i) => (i.id === itemId ? { ...i, counted_qty: qty } : i)) }
+        ? { ...prev, items: prev.items.map((i) => (i.id === itemId ? { ...i, counted_qty: qty, reason } : i)) }
         : prev);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save that count.');
@@ -92,6 +106,7 @@ export default function StockTakePage() {
       setCloseResult(result);
       setOpen(null);
       setCountText({});
+      setReasonText({});
       loadOpenAndHistory();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not close this stock take.');
@@ -111,6 +126,7 @@ export default function StockTakePage() {
       await cancelStockTake(open.id);
       setOpen(null);
       setCountText({});
+      setReasonText({});
       loadOpenAndHistory();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not cancel this stock take.');
@@ -164,7 +180,7 @@ export default function StockTakePage() {
                     <tr key={h.id} style={{ borderTop: '1px solid var(--paper-line)' }}>
                       <td style={{ padding: '0.3rem 0.5rem' }} data-label="Closed">{h.closed_at ? formatBackendDateTime(h.closed_at) : '—'}</td>
                       <td style={{ padding: '0.3rem 0.5rem', color: h.status === 'cancelled' ? 'var(--ink-soft)' : 'inherit' }} data-label="Status">
-                        {h.status === 'cancelled' ? 'Cancelled' : 'Closed'}
+                        {h.status === 'cancelled' ? 'Cancelled' : h.kind === 'expired_write_off' ? 'Expired write-off' : 'Closed'}
                       </td>
                       <td style={{ padding: '0.3rem 0.5rem' }} data-label="Items counted">{h.counted_count} of {h.item_count}</td>
                       <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }} data-label="Worst variance">
@@ -203,6 +219,7 @@ export default function StockTakePage() {
                   <th style={{ padding: '0.4rem 0.5rem' }}>Item</th>
                   <th style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>Expected</th>
                   <th style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>Counted</th>
+                  <th style={{ padding: '0.4rem 0.5rem' }}>Reason</th>
                   <th style={{ padding: '0.4rem 0.5rem' }} />
                 </tr>
               </thead>
@@ -220,6 +237,22 @@ export default function StockTakePage() {
                         onChange={(e) => setCountText((prev) => ({ ...prev, [item.id]: e.target.value }))}
                         style={{ width: '5rem', textAlign: 'right' }}
                       />
+                    </td>
+                    <td style={{ padding: '0.4rem 0.5rem' }} data-label="Reason">
+                      <select
+                        value={reasonText[item.id] ?? ''}
+                        onChange={(e) => setReasonText((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                        aria-label={`Reason for ${item.item_name}`}
+                        style={{ maxWidth: '12rem' }}
+                      >
+                        <option value="">{(() => {
+                          const typed = parseInt(countText[item.id] ?? '', 10);
+                          return !Number.isNaN(typed) && typed < item.expected_qty ? '— Pick a reason —' : '— No reason —';
+                        })()}</option>
+                        {open.reasons.map((r) => (
+                          <option key={r.code} value={r.code}>{r.label}</option>
+                        ))}
+                      </select>
                     </td>
                     <td style={{ padding: '0.4rem 0.5rem' }}>
                       <button
@@ -266,6 +299,7 @@ function CloseSummary({ result, currency, onDismiss }: { result: StockTakeCloseR
               <th style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>Counted</th>
               <th style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>Variance</th>
               <th style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>Variance %</th>
+              <th style={{ padding: '0.3rem 0.5rem' }}>Reason</th>
               <th style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }}>Written off</th>
             </tr>
           </thead>
@@ -281,6 +315,7 @@ function CloseSummary({ result, currency, onDismiss }: { result: StockTakeCloseR
                 <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right', color: a.variance < 0 ? 'var(--stamp)' : 'inherit' }} data-label="Variance %">
                   {a.variance_pct === 'n/a' ? 'n/a' : `${a.variance_pct > 0 ? '+' : ''}${a.variance_pct.toFixed(1)}%`}
                 </td>
+                <td style={{ padding: '0.3rem 0.5rem' }} data-label="Reason">{a.reason_label ?? '—'}</td>
                 <td style={{ padding: '0.3rem 0.5rem', textAlign: 'right' }} data-label="Written off">
                   {a.write_off_cost > 0 ? formatMoney(a.write_off_cost, currency) : '—'}
                 </td>

@@ -236,11 +236,52 @@ pub fn cancel(conn: &mut Connection, business_id: &str, user_id: &str, stock_tak
     get(conn, business_id, user_id, stock_take_id)
 }
 
+/// The fixed list of reasons a counted item can differ from what the
+/// books expected: (code stored in the database, label shown to people).
+/// One list, here, is the single source of truth — the API sends it to
+/// the screen with every stock take, so the dropdown can never drift
+/// from what the server accepts.
+pub const REASONS: [(&str, &str); 6] = [
+    ("expired", "Expired"),
+    ("miscount", "Miscount / recount correction"),
+    ("damaged", "Damaged"),
+    ("theft_loss", "Theft / loss"),
+    ("receiving_error", "Supplier / receiving error"),
+    ("other", "Other"),
+];
+
+/// Empty means "no reason given" (allowed); anything else must be one of
+/// `REASONS`' codes, so a typo or a stale client can't write a value no
+/// report knows how to label.
+fn validate_reason(reason: Option<&str>) -> Result<Option<String>> {
+    let Some(r) = reason.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(None);
+    };
+    if REASONS.iter().any(|(code, _)| *code == r) {
+        Ok(Some(r.to_string()))
+    } else {
+        Err(anyhow!("'{r}' isn't a valid stock take reason"))
+    }
+}
+
+fn reason_label(code: &str) -> Option<&'static str> {
+    REASONS.iter().find(|(c, _)| *c == code).map(|(_, label)| *label)
+}
+
+fn reasons_json() -> Value {
+    json!(REASONS.iter().map(|(code, label)| json!({ "code": code, "label": label })).collect::<Vec<_>>())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RecordCountRequest {
     pub stock_take_id: String,
     pub item_id: String,
     pub counted_qty: i64,
+    /// Why this count differs from expected (one of `REASONS`' codes).
+    /// Optional; a recount overwrites the previous reason along with the
+    /// previous count.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Records a physical count against one item in an open stock take.
@@ -253,6 +294,7 @@ pub fn record_count(conn: &Connection, business_id: &str, user_id: &str, req: Re
     if req.counted_qty < 0 {
         return Err(anyhow!("counted quantity cannot be negative"));
     }
+    let reason = validate_reason(req.reason.as_deref())?;
 
     let status: Option<String> = conn
         .query_row(
@@ -268,9 +310,9 @@ pub fn record_count(conn: &Connection, business_id: &str, user_id: &str, req: Re
     }
 
     let changed = conn.execute(
-        "UPDATE stock_take_items SET counted_qty = ?1, counted_at = datetime('now')
+        "UPDATE stock_take_items SET counted_qty = ?1, counted_at = datetime('now'), reason = ?4
          WHERE id = ?2 AND stock_take_id = ?3",
-        params![req.counted_qty, req.item_id, req.stock_take_id],
+        params![req.counted_qty, req.item_id, req.stock_take_id, reason],
     )?;
     if changed == 0 {
         return Err(anyhow!("stock take item not found: {}", req.item_id));
@@ -306,9 +348,9 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
         _ => {}
     }
 
-    let items: Vec<(String, String, String, i64, Option<i64>)> = {
+    let items: Vec<(String, String, String, i64, Option<i64>, Option<String>)> = {
         let mut stmt = tx.prepare(
-            "SELECT id, inventory_record_id, item_name, expected_qty, counted_qty
+            "SELECT id, inventory_record_id, item_name, expected_qty, counted_qty, reason
              FROM stock_take_items WHERE stock_take_id = ?1 ORDER BY item_name",
         )?;
         let rows = stmt.query_map(params![stock_take_id], |r| {
@@ -318,6 +360,7 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
                 r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
                 r.get::<_, Option<i64>>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -339,7 +382,7 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
     // single flat item-level cost.
     let mut total_write_off_cost: i64 = 0;
 
-    for (item_id, inv_id, item_name, expected_qty, counted_qty) in &items {
+    for (item_id, inv_id, item_name, expected_qty, counted_qty, reason) in &items {
         let Some(counted) = counted_qty else {
             // Never counted during this stock take — expected value
             // stands untouched, reported separately so it's visible
@@ -557,6 +600,8 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
             "variance": variance,
             "variance_pct": variance_pct,
             "write_off_cost": write_off_cost,
+            "reason": reason,
+            "reason_label": reason.as_deref().and_then(reason_label),
         }));
     }
 
@@ -593,22 +638,184 @@ pub fn close(conn: &mut Connection, business_id: &str, user_id: &str, stock_take
 /// Fetches one stock take (open or closed) with its full item list —
 /// used both right after `initiate()` and for viewing an in-progress
 /// count's current state, or a past closed one's final numbers.
+/// One-touch clean-up: writes off EVERY batch past its expiry date, for
+/// every item, in one atomic transaction. Recorded as a closed stock
+/// take of kind 'expired_write_off' (reason "expired" on every line), so
+/// it lands in exactly the same places a counted write-off does with no
+/// special cases anywhere else: the stock take history, the profit
+/// report's shrinkage figure (profit.rs sums closed stock_take_items'
+/// write_off_cost_cents), the stock movement ledger and the audit log.
+///
+/// "Expired" here is the same definition checkout uses (expiry date
+/// strictly before the shop's local today), and each expired batch is
+/// zeroed directly rather than drawn down via FEFO, so it removes
+/// exactly the expired units and never a single fresh one. Each line is
+/// costed at its own batch's real unit cost.
+///
+/// Blocked while a stock take is open, for the same reason checkout is
+/// (see `require_no_open_stock_take`). Nothing expired means nothing is
+/// written and no empty stock take is created, so pressing it twice is
+/// harmless.
+///
+/// `dry_run` runs the identical code path and then rolls the transaction
+/// back instead of committing, so the preview a person confirms is, by
+/// construction, exactly what the real write-off will do.
+pub fn write_off_expired(conn: &mut Connection, business_id: &str, user_id: &str, dry_run: bool) -> Result<Value> {
+    crate::rbac::require(conn, user_id, "inventory", "stocktake")?;
+
+    let inventory_module = crud::load_module(conn, business_id, "inventory")
+        .map_err(|_| anyhow!("the Inventory module isn't enabled for this business"))?;
+    let table = inventory_module.table_name();
+
+    let tx = conn.transaction()?;
+    require_no_open_stock_take(&tx, business_id)?;
+
+    let today = crate::batches::local_today();
+
+    // (batch_id, inventory_record_id, item_name, quantity_remaining, unit_cost)
+    let batches: Vec<(String, String, String, i64, i64)> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT b.id, b.inventory_record_id, i.name, b.quantity_remaining, b.unit_cost
+             FROM inventory_batches b
+             JOIN {table} i ON i.id = b.inventory_record_id AND i.business_id = b.business_id
+             WHERE b.business_id = ?1 AND b.deleted_at IS NULL AND b.quantity_remaining > 0
+               AND i.deleted_at IS NULL AND b.expiry_date IS NOT NULL
+               AND date(b.expiry_date) IS NOT NULL AND date(b.expiry_date) < date(?2)
+             ORDER BY i.name, b.inventory_record_id, b.expiry_date, b.received_at, b.id"
+        ))?;
+        let rows = stmt.query_map(params![business_id, today], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    if batches.is_empty() {
+        return Ok(json!({
+            "stock_take_id": null,
+            "dry_run": dry_run,
+            "items_written_off": 0,
+            "units_written_off": 0,
+            "total_write_off_cost": 0,
+            "items": [],
+        }));
+    }
+
+    let stock_take_id = Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO stock_takes (id, business_id, status, created_by_user_id, closed_at, closed_by_user_id, kind)
+         VALUES (?1, ?2, 'closed', ?3, datetime('now'), ?3, 'expired_write_off')",
+        params![stock_take_id, business_id, user_id],
+    )?;
+
+    let mut items = Vec::new();
+    let mut total_units: i64 = 0;
+    let mut total_cost: i64 = 0;
+
+    // The query above is ordered so one item's batches are contiguous.
+    let mut idx = 0;
+    while idx < batches.len() {
+        let (_, inv_id, item_name, _, _) = &batches[idx];
+        let mut end = idx;
+        while end < batches.len() && batches[end].1 == *inv_id {
+            end += 1;
+        }
+        let group = &batches[idx..end];
+        idx = end;
+
+        let units: i64 = group.iter().map(|b| b.3).sum();
+        let cost: i64 = group.iter().map(|b| b.3 * b.4).sum();
+
+        let current_qty: i64 = tx.query_row(
+            &format!("SELECT quantity FROM {table} WHERE id = ?1 AND business_id = ?2 AND deleted_at IS NULL"),
+            params![inv_id, business_id],
+            |r| r.get(0),
+        )?;
+        if current_qty < units {
+            return Err(anyhow!(
+                "internal inventory inconsistency: '{item_name}' has {units} expired unit(s) in batches but only {current_qty} in stock — aborting, nothing was written off"
+            ));
+        }
+
+        for (batch_id, _, _, qty, _) in group {
+            // Guarded on the exact quantity just read, so a batch that
+            // somehow moved in between is an error, not a silent
+            // over- or under-write-off.
+            let updated = tx.execute(
+                "UPDATE inventory_batches SET quantity_remaining = 0, updated_at = datetime('now')
+                 WHERE id = ?1 AND business_id = ?2 AND quantity_remaining = ?3",
+                params![batch_id, business_id, qty],
+            )?;
+            if updated == 0 {
+                return Err(anyhow!(
+                    "internal inventory inconsistency: batch {batch_id} changed during the write-off — aborting, nothing was written off"
+                ));
+            }
+        }
+        tx.execute(
+            &format!("UPDATE {table} SET quantity = quantity - ?1, updated_at = datetime('now') WHERE id = ?2 AND business_id = ?3 AND deleted_at IS NULL"),
+            params![units, inv_id, business_id],
+        )?;
+        tx.execute(
+            "INSERT INTO stock_take_items
+                (id, stock_take_id, inventory_record_id, item_name, expected_qty, counted_qty, counted_at, write_off_cost_cents, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), ?7, 'expired')",
+            params![Uuid::new_v4().to_string(), stock_take_id, inv_id, item_name, current_qty, current_qty - units, cost],
+        )?;
+        crate::stock_movement::record_in_tx(
+            &tx,
+            business_id,
+            Some(user_id),
+            inv_id,
+            item_name,
+            crate::stock_movement::EXPIRED_WRITE_OFF,
+            -units,
+            cost / units,
+            Some(&stock_take_id),
+        )?;
+
+        total_units += units;
+        total_cost += cost;
+        items.push(json!({
+            "inventory_record_id": inv_id,
+            "item_name": item_name,
+            "units": units,
+            "write_off_cost": cost,
+        }));
+    }
+
+    let summary = json!({
+        "stock_take_id": if dry_run { Value::Null } else { json!(stock_take_id) },
+        "dry_run": dry_run,
+        "items_written_off": items.len(),
+        "units_written_off": total_units,
+        "total_write_off_cost": total_cost,
+        "items": items,
+    });
+    if dry_run {
+        // Dropping the transaction without committing undoes everything above.
+        return Ok(summary);
+    }
+    tx.commit()?;
+    let _ = crate::audit::log(conn, business_id, Some(user_id), "_stock_take", "write_off_expired", Some(&stock_take_id), Some(&summary));
+    Ok(summary)
+}
+
 pub fn get(conn: &Connection, business_id: &str, user_id: &str, stock_take_id: &str) -> Result<Value> {
     crate::rbac::require(conn, user_id, "inventory", "stocktake")?;
 
-    let head: Option<(String, Option<String>, Option<String>)> = conn
+    let head: Option<(String, Option<String>, Option<String>, String)> = conn
         .query_row(
-            "SELECT status, created_at, closed_at FROM stock_takes WHERE id = ?1 AND business_id = ?2",
+            "SELECT status, created_at, closed_at, kind FROM stock_takes WHERE id = ?1 AND business_id = ?2",
             params![stock_take_id, business_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((status, created_at, closed_at)) = head else {
+    let Some((status, created_at, closed_at, kind)) = head else {
         return Err(anyhow!("stock take not found: {stock_take_id}"));
     };
 
     let mut stmt = conn.prepare(
-        "SELECT id, inventory_record_id, item_name, expected_qty, counted_qty
+        "SELECT id, inventory_record_id, item_name, expected_qty, counted_qty, reason
          FROM stock_take_items WHERE stock_take_id = ?1 ORDER BY item_name",
     )?;
     let items: Vec<Value> = stmt
@@ -619,6 +826,7 @@ pub fn get(conn: &Connection, business_id: &str, user_id: &str, stock_take_id: &
                 "item_name": r.get::<_, String>(2)?,
                 "expected_qty": r.get::<_, i64>(3)?,
                 "counted_qty": r.get::<_, Option<i64>>(4)?,
+                "reason": r.get::<_, Option<String>>(5)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -626,9 +834,11 @@ pub fn get(conn: &Connection, business_id: &str, user_id: &str, stock_take_id: &
     Ok(json!({
         "id": stock_take_id,
         "status": status,
+        "kind": kind,
         "created_at": created_at,
         "closed_at": closed_at,
         "items": items,
+        "reasons": reasons_json(),
     }))
 }
 
@@ -663,7 +873,7 @@ pub fn list(conn: &Connection, business_id: &str, user_id: &str) -> Result<Value
     // so both come back NULL/None for a stock take with nothing
     // countable yet, rather than a misleading 0.
     let mut stmt = conn.prepare(
-        "SELECT st.id, st.status, st.created_at, st.closed_at,
+        "SELECT st.id, st.status, st.created_at, st.closed_at, st.kind,
                 (SELECT COUNT(*) FROM stock_take_items sti WHERE sti.stock_take_id = st.id) AS item_count,
                 (SELECT COUNT(*) FROM stock_take_items sti WHERE sti.stock_take_id = st.id AND sti.counted_qty IS NOT NULL) AS counted_count,
                 (SELECT MAX(ABS((sti.counted_qty - sti.expected_qty) * 100.0 / sti.expected_qty))
@@ -681,10 +891,11 @@ pub fn list(conn: &Connection, business_id: &str, user_id: &str) -> Result<Value
                 "status": r.get::<_, String>(1)?,
                 "created_at": r.get::<_, String>(2)?,
                 "closed_at": r.get::<_, Option<String>>(3)?,
-                "item_count": r.get::<_, i64>(4)?,
-                "counted_count": r.get::<_, i64>(5)?,
-                "max_variance_pct": r.get::<_, Option<f64>>(6)?,
-                "avg_variance_pct": r.get::<_, Option<f64>>(7)?,
+                "kind": r.get::<_, String>(4)?,
+                "item_count": r.get::<_, i64>(5)?,
+                "counted_count": r.get::<_, i64>(6)?,
+                "max_variance_pct": r.get::<_, Option<f64>>(7)?,
+                "avg_variance_pct": r.get::<_, Option<f64>>(8)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

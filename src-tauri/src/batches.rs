@@ -180,6 +180,16 @@ pub(crate) fn create_batch_in_tx(
     if unit_price < 0 {
         return Err(anyhow!("batch price cannot be negative"));
     }
+    // "Expired" is decided by comparing this date to today, so a date
+    // in any other format would silently compare wrong and let expired
+    // stock through. Reject it at the door instead.
+    if let Some(d) = expiry_date {
+        if chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_err() {
+            return Err(anyhow!(
+                "expiry date '{d}' isn't a valid date — use the format YYYY-MM-DD (for example 2026-12-31)"
+            ));
+        }
+    }
     if unit_price < unit_cost {
         let business_currency: String = tx
             .query_row("SELECT currency FROM businesses WHERE id = ?1", params![business_id], |r| r.get(0))
@@ -230,6 +240,35 @@ pub(crate) fn create_batch_in_tx(
 pub(crate) const FEFO_ORDER_BY: &str =
     "is_legacy_migration ASC, (expiry_date IS NULL) ASC, expiry_date ASC, received_at ASC, id ASC";
 
+/// Today's date on this device's own clock (the shop's local day, not
+/// UTC) as YYYY-MM-DD. Used for every "is this batch expired?" decision
+/// so a batch expires at the shop's local midnight, not hours later.
+pub(crate) fn local_today() -> String {
+    chrono::Local::now().date_naive().to_string()
+}
+
+/// Units of one item sitting in live batches whose expiry date is
+/// strictly before `today`. A batch is still sellable ON its expiry
+/// date and expired from the next day. An unparseable stored date
+/// counts as not expired (it cannot be judged) — create_batch_in_tx
+/// no longer lets one in.
+pub(crate) fn expired_quantity_in_tx(
+    tx: &rusqlite::Connection,
+    business_id: &str,
+    inventory_record_id: &str,
+    today: &str,
+) -> Result<i64> {
+    let total: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(quantity_remaining), 0) FROM inventory_batches
+         WHERE business_id = ?1 AND inventory_record_id = ?2 AND deleted_at IS NULL
+           AND quantity_remaining > 0 AND expiry_date IS NOT NULL
+           AND date(expiry_date) IS NOT NULL AND date(expiry_date) < date(?3)",
+        params![business_id, inventory_record_id, today],
+        |r| r.get(0),
+    )?;
+    Ok(total)
+}
+
 /// Consumes `qty_needed` units of one Inventory item in strict FEFO
 /// order — batches with a real expiry date first (soonest first),
 /// then no-expiry batches (oldest received first), then legacy stock
@@ -263,6 +302,42 @@ pub(crate) fn fefo_consume_in_tx(
     legacy_unit_cost: i64,
     legacy_unit_price: i64,
 ) -> Result<Vec<ConsumedPortion>> {
+    fefo_consume_core(tx, business_id, inventory_record_id, qty_needed, current_inventory_qty, legacy_unit_cost, legacy_unit_price, None)
+}
+
+/// Same as `fefo_consume_in_tx`, but NEVER draws from a batch whose
+/// expiry date is before `today` — used by every path that SELLS or
+/// repacks stock (checkout, repack). Stock take deliberately keeps the
+/// plain version above: writing expired stock off is the one thing
+/// that must still be able to consume it. Callers must size
+/// `qty_needed` against sellable (non-expired) stock first; if they
+/// ask for more, this returns a hard error rather than touch expired
+/// stock. `current_inventory_qty` is still the item's full quantity —
+/// expired batches stay counted so the legacy remainder is computed
+/// correctly.
+pub(crate) fn fefo_consume_sellable_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    business_id: &str,
+    inventory_record_id: &str,
+    qty_needed: i64,
+    current_inventory_qty: i64,
+    legacy_unit_cost: i64,
+    legacy_unit_price: i64,
+    today: &str,
+) -> Result<Vec<ConsumedPortion>> {
+    fefo_consume_core(tx, business_id, inventory_record_id, qty_needed, current_inventory_qty, legacy_unit_cost, legacy_unit_price, Some(today))
+}
+
+fn fefo_consume_core(
+    tx: &rusqlite::Transaction<'_>,
+    business_id: &str,
+    inventory_record_id: &str,
+    qty_needed: i64,
+    current_inventory_qty: i64,
+    legacy_unit_cost: i64,
+    legacy_unit_price: i64,
+    skip_expired_before: Option<&str>,
+) -> Result<Vec<ConsumedPortion>> {
     if qty_needed <= 0 {
         return Err(anyhow!("internal error: FEFO consumption called with a non-positive quantity"));
     }
@@ -278,10 +353,11 @@ pub(crate) fn fefo_consume_in_tx(
         "SELECT id, quantity_remaining, unit_cost, unit_price, expiry_date
          FROM inventory_batches
          WHERE business_id = ?1 AND inventory_record_id = ?2 AND deleted_at IS NULL AND quantity_remaining > 0
+           AND (?3 IS NULL OR expiry_date IS NULL OR date(expiry_date) IS NULL OR date(expiry_date) >= date(?3))
          ORDER BY {FEFO_ORDER_BY}"
     ))?;
     let batch_rows: Vec<(String, i64, i64, i64, Option<String>)> = stmt
-        .query_map(params![business_id, inventory_record_id], |r| {
+        .query_map(params![business_id, inventory_record_id, skip_expired_before], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

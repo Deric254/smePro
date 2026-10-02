@@ -551,6 +551,7 @@ jobs:
           mkdir -p "$JAVA_DIR"
           cp src-tauri/android/com/smepro/app/SmeProForegroundService.kt "$JAVA_DIR/"
           cp src-tauri/android/com/smepro/app/SmeProApplication.kt "$JAVA_DIR/"
+          cp src-tauri/android/com/smepro/app/InstallerPlugin.kt "$JAVA_DIR/"
 
           MANIFEST="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
           python3 -c "
@@ -586,6 +587,46 @@ jobs:
           with open(path, 'w') as f:
               f.write(content)
           "
+
+      - name: Add FileProvider (needed by InstallerPlugin.kt for in-app updates)
+        # Same step mobile-android.sh already runs locally. CI was
+        # missing it, so a CI-built APK registered the installer plugin
+        # (lib.rs) with no FileProvider declared in its manifest.
+        run: |
+          XML_RES_DIR="src-tauri/gen/android/app/src/main/res/xml"
+          mkdir -p "$XML_RES_DIR"
+          cat > "$XML_RES_DIR/file_paths.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths xmlns:android="http://schemas.android.com/apk/res/android">
+              <cache-path name="update_apk_internal" path="." />
+              <external-cache-path name="update_apk_external" path="." />
+          </paths>
+          EOF
+          python3 - <<'PYEOF'
+          path = "src-tauri/gen/android/app/src/main/AndroidManifest.xml"
+          with open(path) as f:
+              content = f.read()
+          if "fileprovider" not in content:
+              provider = (
+                  '    <provider\n'
+                  '        android:name="androidx.core.content.FileProvider"\n'
+                  '        android:authorities="${applicationId}.fileprovider"\n'
+                  '        android:exported="false"\n'
+                  '        android:grantUriPermissions="true">\n'
+                  '        <meta-data\n'
+                  '            android:name="android.support.FILE_PROVIDER_PATHS"\n'
+                  '            android:resource="@xml/file_paths" />\n'
+                  '    </provider>\n'
+                  '</application>'
+              )
+              patched = content.replace("</application>", provider, 1)
+              assert patched != content, "could not find </application> to patch"
+              with open(path, "w") as f:
+                  f.write(patched)
+              print("Added FileProvider")
+          else:
+              print("FileProvider already present")
+          PYEOF
 
       - name: Add REQUEST_INSTALL_PACKAGES permission (needed for in-app updates)
         # See the matching comment in mobile-android.sh — this permission
@@ -659,6 +700,15 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass smeprofallback -keypass smeprofallback \
             -dname "CN=SME Pro, OU=Fallback, O=SME Pro, L=Unknown, ST=Unknown, C=US"
+
+      - name: Warn when signing with the fallback keystore
+        if: steps.check-keystore.outputs.has_real_keystore == 'false'
+        run: |
+          if [ "${{ steps.fallback-keystore.outputs.cache-hit }}" != "true" ]; then
+            echo "::warning::A NEW fallback signing key was just generated (the cached one was missing or evicted). Phones with an earlier build installed will refuse this APK with 'App not installed' — uninstall the old app first (this clears its local data), or better, set the ANDROID_KEYSTORE_* repo secrets once so the signing key never changes. See RELEASE.md."
+          else
+            echo "::notice::Signing with the cached fallback key. GitHub deletes caches unused for 7 days, which silently changes this key. Set the ANDROID_KEYSTORE_* repo secrets to make it permanent."
+          fi
 
       - name: Write keystore.properties (real keystore or fallback)
         env:
@@ -768,17 +818,47 @@ jobs:
           # explicitly restricts the build to just those two.
           npm run tauri android build -- --apk --target aarch64 --target armv7
 
-      - name: Locate built APK(s)
+      - name: Locate, verify and name the APK
         id: find-apk
+        env:
+          TAG: ${{ needs.bump-version.outputs.new_tag }}
         run: |
+          set -euo pipefail
           APK_DIR="src-tauri/gen/android/app/build/outputs/apk"
           echo "Found:"
           find "$APK_DIR" -name "*.apk"
+
+          # An unsigned release APK is always named *-unsigned.apk by
+          # the Android Gradle Plugin, and Android refuses to install
+          # it with a bare "App not installed". Fail the build here
+          # instead of publishing an APK that can never install.
+          if find "$APK_DIR" -name "*-unsigned.apk" | grep -q .; then
+            echo "::error::The APK came out UNSIGNED, so Android would refuse to install it. The signingConfig patch in 'Wire the keystore into Gradle' did not apply to this Tauri version's build.gradle.kts template. Refusing to publish."
+            exit 1
+          fi
+
+          # Name it "SME-Pro-v<version>.apk" instead of Gradle's
+          # internal "app-universal-release.apk". Hyphens, not spaces:
+          # GitHub rewrites spaces in asset names, and the in-app
+          # updater (AndroidUpdateChecker.tsx) reuses the asset name as
+          # a local file name. It still ends in .apk, which is all the
+          # updater looks for.
+          mkdir -p dist-apk
+          i=0
+          for f in $(find "$APK_DIR" -name "*.apk"); do
+            i=$((i+1))
+            if [ "$i" -eq 1 ]; then
+              cp "$f" "dist-apk/SME-Pro-${TAG}.apk"
+            else
+              cp "$f" "dist-apk/SME-Pro-${TAG}-$i.apk"
+            fi
+          done
           {
             echo "apk_paths<<APK_LIST_EOF"
-            find "$APK_DIR" -name "*.apk"
+            find dist-apk -name "*.apk"
             echo "APK_LIST_EOF"
           } >> "$GITHUB_OUTPUT"
+          ls -l dist-apk
 
       - name: Attach APK to the release
         # tag_name is still required here (this action has no separate

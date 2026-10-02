@@ -1153,11 +1153,13 @@ fn route(
     if parts.as_slice() == ["inventory", "expiring-batches"] && *method == Method::Get {
         if let Err(e) = rbac::require_reports_access(conn, &user_id) { return crud_error(&e); }
         let q = query_params(url);
-        let today = chrono::Utc::now().date_naive().to_string();
+        // Shop-local day — the same clock checkout uses to decide a
+        // batch is expired, so this report and the till always agree.
+        let today = crate::batches::local_today();
         let within_days = q.get("within_days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30);
         let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
         return match crate::stock_health::expiring_batches(conn, &business_id, &user_id, &today, within_days, limit) {
-            Ok(items) => ApiResponse::Json(200, json!({"items": items})),
+            Ok(report) => ApiResponse::Json(200, json!({"items": report.items, "summary": report.summary})),
             Err(e) => crud_error(&e),
         };
     }
@@ -1165,6 +1167,15 @@ fn route(
     // ---- Stock Take: initiate -> count -> close. See stock_take.rs. ----
     if parts.as_slice() == ["inventory", "stocktake", "initiate"] && *method == Method::Post {
         return match stock_take::initiate(conn, &business_id, &user_id) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
+        };
+    }
+    // Read-only preview of the one-touch expired write-off (same code
+    // path, rolled back) — must sit before the generic
+    // `inventory/stocktake/<id>` GET below, which would swallow it.
+    if parts.as_slice() == ["inventory", "stocktake", "expired-preview"] && *method == Method::Get {
+        return match stock_take::write_off_expired(conn, &business_id, &user_id, true) {
             Ok(summary) => ApiResponse::Json(200, summary),
             Err(e) => crud_error(&e),
         };
@@ -1188,6 +1199,12 @@ fn route(
                 Err(e) => crud_error(&e),
             };
         }
+    }
+    if parts.as_slice() == ["inventory", "stocktake", "write-off-expired"] && *method == Method::Post {
+        return match stock_take::write_off_expired(conn, &business_id, &user_id, false) {
+            Ok(summary) => ApiResponse::Json(200, summary),
+            Err(e) => crud_error(&e),
+        };
     }
     if parts.as_slice() == ["inventory", "stocktake", "count"] && *method == Method::Post {
         let req: stock_take::RecordCountRequest = match serde_json::from_str(body) {

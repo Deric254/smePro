@@ -111,7 +111,11 @@ fn test_v40_index_migration_reaches_a_business_that_already_had_sales_enabled() 
     for idx in ["idx_module_sales_customer_phone", "idx_module_sales_customer_name_lower", "idx_module_sales_item_name", "idx_module_inventory_name"] {
         conn.execute(&format!("DROP INDEX IF EXISTS {idx}"), []).unwrap();
     }
-    conn.execute("DELETE FROM _schema_version WHERE version = 40", []).unwrap();
+    // Rewind to "just before v40": drop v40's row AND every later one,
+    // because the runner resumes from MAX(version). Later migrations
+    // are idempotent, so re-running them on reopen is exactly the
+    // real-world upgrade path being simulated.
+    conn.execute("DELETE FROM _schema_version WHERE version >= 40", []).unwrap();
     let has_index = |conn: &rusqlite::Connection, name: &str| -> bool {
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?1", [name], |r| r.get::<_, i64>(0))
             .map(|c| c > 0)
@@ -130,7 +134,7 @@ fn test_v40_index_migration_reaches_a_business_that_already_had_sales_enabled() 
         assert!(has_index(&conn, idx), "{idx} must exist after upgrading an install that already had these tables");
     }
     let version: i64 = conn.query_row("SELECT MAX(version) FROM _schema_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 40);
+    assert_eq!(version, 41);
 
     drop(conn);
     let _ = std::fs::remove_file(&path);
