@@ -743,44 +743,50 @@ jobs:
       # before patching) since `gen/android` is regenerated fresh each
       # run anyway, but harmless either way.
       - name: Wire the keystore into Gradle's release signing config
+        # Best-effort layer 1. Regex-based (not exact-string) so small
+        # template changes between Tauri versions don't break it, and it
+        # REPORTS whether it really applied. Layer 2 (the apksigner step
+        # after the build) guarantees a signed APK even if this no-ops.
         run: |
           python3 - <<'PYEOF'
+          import re
           path = "src-tauri/gen/android/app/build.gradle.kts"
-          with open(path) as f:
-              content = f.read()
+          src = open(path).read()
+          print("----- template build.gradle.kts -----")
+          print(src)
+          print("-------------------------------------")
 
-          if "keystoreProperties" in content:
+          if "keystoreProperties" in src:
               print("Already patched, skipping.")
+              raise SystemExit(0)
+
+          if not re.search(r"^import java\.util\.Properties", src, re.M):
+              src = "import java.util.Properties\n" + src
+          if not re.search(r"^import java\.io\.FileInputStream", src, re.M):
+              src = "import java.io.FileInputStream\n" + src
+
+          signing = """    signingConfigs {
+                  create("release") {
+                      val keystorePropertiesFile = rootProject.file("keystore.properties")
+                      if (keystorePropertiesFile.exists()) {
+                          val keystoreProperties = Properties()
+                          keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+                          storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
+                          storePassword = keystoreProperties["password"] as String
+                          keyAlias = keystoreProperties["keyAlias"] as String
+                          keyPassword = keystoreProperties["keyPassword"] as String
+                      }
+                  }
+              }
+              """
+          src, n1 = re.subn(r"^([ \t]*)buildTypes\s*\{", lambda m: signing + m.group(0), src, count=1, flags=re.M)
+          src, n2 = re.subn(r'(getByName\("release"\)\s*\{)', r'\1\n            signingConfig = signingConfigs.getByName("release")', src, count=1)
+          open(path, "w").write(src)
+
+          if n1 and n2:
+              print("Patched build.gradle.kts: signingConfigs + release signingConfig applied.")
           else:
-              content = "import java.io.FileInputStream\n\n" + content
-
-              signing_config = (
-                  "\n    signingConfigs {\n"
-                  "        create(\"release\") {\n"
-                  "            val keystorePropertiesFile = rootProject.file(\"keystore.properties\")\n"
-                  "            if (keystorePropertiesFile.exists()) {\n"
-                  "                val keystoreProperties = Properties()\n"
-                  "                keystoreProperties.load(FileInputStream(keystorePropertiesFile))\n"
-                  "                storeFile = rootProject.file(keystoreProperties[\"storeFile\"] as String)\n"
-                  "                storePassword = keystoreProperties[\"password\"] as String\n"
-                  "                keyAlias = keystoreProperties[\"keyAlias\"] as String\n"
-                  "                keyPassword = keystoreProperties[\"keyPassword\"] as String\n"
-                  "            }\n"
-                  "        }\n"
-                  "    }\n"
-                  "    buildTypes {"
-              )
-              content = content.replace("    buildTypes {", signing_config, 1)
-
-              content = content.replace(
-                  "        getByName(\"release\") {\n            isMinifyEnabled = true",
-                  "        getByName(\"release\") {\n            signingConfig = signingConfigs.getByName(\"release\")\n            isMinifyEnabled = true",
-                  1,
-              )
-
-              with open(path, "w") as f:
-                  f.write(content)
-              print("Patched build.gradle.kts with a real signingConfig.")
+              print(f"::warning::Gradle patch only partly applied (signingConfigs={n1}, release={n2}). Falling back to post-build apksigner signing.")
           PYEOF
 
       - name: Build APK
@@ -828,13 +834,49 @@ jobs:
           echo "Found:"
           find "$APK_DIR" -name "*.apk"
 
-          # An unsigned release APK is always named *-unsigned.apk by
-          # the Android Gradle Plugin, and Android refuses to install
-          # it with a bare "App not installed". Fail the build here
-          # instead of publishing an APK that can never install.
+          # An unsigned release APK is named *-unsigned.apk by the Android
+          # Gradle Plugin, and Android refuses to install it. If the Gradle
+          # signingConfig did not apply (template drift between Tauri
+          # versions), sign it HERE with apksigner. This is independent of
+          # the Gradle template, so signing can never silently regress.
           if find "$APK_DIR" -name "*-unsigned.apk" | grep -q .; then
-            echo "::error::The APK came out UNSIGNED, so Android would refuse to install it. The signingConfig patch in 'Wire the keystore into Gradle' did not apply to this Tauri version's build.gradle.kts template. Refusing to publish."
-            exit 1
+            echo "::warning::Gradle produced an unsigned APK; signing it with apksigner instead."
+
+            BT_DIR=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+            APKSIGNER="${BT_DIR}apksigner"
+            ZIPALIGN="${BT_DIR}zipalign"
+            test -x "$APKSIGNER" || { echo "::error::apksigner not found in $BT_DIR"; exit 1; }
+
+            KP="src-tauri/gen/android/keystore.properties"
+            test -f "$KP" || { echo "::error::keystore.properties missing"; exit 1; }
+            prop() { grep -E "^$1=" "$KP" | head -1 | cut -d= -f2-; }
+            export KS_PASS="$(prop password)"
+            export KEY_PASS="$(prop keyPassword)"
+            KS_ALIAS="$(prop keyAlias)"
+            KS_FILE="src-tauri/gen/android/$(prop storeFile)"
+            test -f "$KS_FILE" || { echo "::error::keystore file not found: $KS_FILE"; exit 1; }
+
+            while IFS= read -r unsigned; do
+              aligned="${unsigned%-unsigned.apk}-aligned.apk"
+              signed="${unsigned%-unsigned.apk}-signed.apk"
+              "$ZIPALIGN" -p -f 4 "$unsigned" "$aligned"
+              "$APKSIGNER" sign \
+                --ks "$KS_FILE" --ks-key-alias "$KS_ALIAS" \
+                --ks-pass env:KS_PASS --key-pass env:KEY_PASS \
+                --out "$signed" "$aligned"
+              rm -f "$unsigned" "$aligned" "$signed.idsig"
+            done < <(find "$APK_DIR" -name "*-unsigned.apk")
+          fi
+
+          # Verify every APK really carries a valid signature before
+          # publishing. Never ship something Android will reject.
+          BT_DIR=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+          while IFS= read -r apk; do
+            "${BT_DIR}apksigner" verify --verbose "$apk" \
+              || { echo "::error::Signature verification FAILED for $apk. Refusing to publish."; exit 1; }
+          done < <(find "$APK_DIR" -name "*.apk")
+          if find "$APK_DIR" -name "*-unsigned.apk" | grep -q .; then
+            echo "::error::Unsigned APK still present. Refusing to publish."; exit 1
           fi
 
           # Name it "SME-Pro-v<version>.apk" instead of Gradle's
