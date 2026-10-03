@@ -324,6 +324,21 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
         Vec::new()
     };
 
+    // THE GAP THIS CLOSES: `totals.revenue` above is an ALL-TIME sum
+    // with no time dimension, so the assistant had nothing to answer
+    // "how is revenue compared to last month" from — it saw one
+    // lifetime number, concluded there was no prior-month data, and
+    // told the owner their history "wasn't recorded" when it was.
+    // Business pulse (business_pulse.rs) already computed the month
+    // split correctly; the model just never got to see it. Same
+    // can_view_reports gate and same unwrap_or_default degrade as the
+    // other insight-style fields above.
+    let monthly_revenue = if can_view_reports {
+        monthly_revenue(conn, business_id, user_id, &currency, &today)
+    } else {
+        Vec::new()
+    };
+
     Ok(json!({
         "business_name": business_name,
         "currency": currency,
@@ -334,5 +349,44 @@ pub fn build_snapshot(conn: &Connection, business_id: &str, user_id: &str) -> Re
         "profit_by_category": profit_by_category,
         "item_margin_trend_last_30_days": item_margin_trend,
         "customers_going_quiet": customers_going_quiet,
+        "monthly_revenue": monthly_revenue,
     }))
+}
+
+/// Revenue per calendar month, oldest first, capped at the latest 12
+/// months so the prompt stays bounded. Buckets by the sales module's
+/// own time field (same source business_pulse.rs and the Reports
+/// screens use, so the numbers can never disagree with them), and
+/// converts money from integer cents to decimal currency like every
+/// other money value handed to the model. `month_in_progress` flags
+/// the current calendar month, which is only partly elapsed — without
+/// it the model would compare 3 days of October against all of
+/// September as if they were equivalent. Empty on any failure (sales
+/// module off, no permission, no sales yet).
+fn monthly_revenue(conn: &Connection, business_id: &str, user_id: &str, currency: &str, today: &str) -> Vec<Value> {
+    let time_field = crate::forecast::time_field_for(conn, business_id, "sales");
+    let points = report::run(
+        conn, business_id, user_id, "sales",
+        report::ReportQuery {
+            measure_field: Some("revenue"),
+            aggregation: "sum",
+            dimension: Dimension::Time { field: &time_field, bucket: report::TimeBucket::Month },
+            range_start: None,
+            range_end: None,
+        },
+    )
+    .unwrap_or_default();
+
+    let scale = 10_i64.pow(crate::money::decimal_places_for(currency)) as f64;
+    let this_month = &today[..7];
+    let skip = points.len().saturating_sub(12);
+    points
+        .into_iter()
+        .skip(skip)
+        .map(|p| json!({
+            "month": p.label,
+            "revenue": p.value / scale,
+            "month_in_progress": p.label == this_month,
+        }))
+        .collect()
 }

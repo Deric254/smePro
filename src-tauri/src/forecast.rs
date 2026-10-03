@@ -146,7 +146,7 @@ fn round2(v: f64) -> f64 {
 /// genuinely doesn't exist or isn't enabled; this just needs *a*
 /// field name to hand it, not the authority on whether that lookup
 /// succeeds.
-fn time_field_for(conn: &Connection, business_id: &str, module_id: &str) -> String {
+pub(crate) fn time_field_for(conn: &Connection, business_id: &str, module_id: &str) -> String {
     crate::crud::load_module(conn, business_id, module_id)
         .map(|m| m.time_field().to_string())
         .unwrap_or_else(|_| "created_at".to_string())

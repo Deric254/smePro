@@ -125,6 +125,8 @@ pub fn prepare(conn: &Connection, business_id: &str, user_id: &str) -> Result<Pr
          You are given a structured snapshot of the business's CURRENT real data below — \
          use it as ground truth and do not invent numbers that aren't in it. \
          If the snapshot doesn't contain what's needed to answer, say so plainly rather than guessing. \
+         `monthly_revenue` is revenue per calendar month; a month flagged `month_in_progress` is only \
+         partly elapsed, so never present it as a full month or compare it to one as if equivalent. \
          Keep answers short, concrete, and in plain language a busy shop owner would understand. \
          Structure every answer with a short heading, then the direct answer, followed by a \
          'What to do next' section when an action is useful. Use Markdown headings and bullet lists \
