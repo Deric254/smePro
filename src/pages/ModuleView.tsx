@@ -335,8 +335,8 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       const profitLine = typeof summary.repack_profit_uplift === 'number' && summary.repack_margin_uplift_pct != null
         ? ` ${summary.repack_profit_uplift >= 0 ? 'Profit uplift' : 'Profit reduction'}: ${formatMoney(Math.abs(summary.repack_profit_uplift), businessCurrency)} (${summary.repack_margin_uplift_pct >= 0 ? '+' : ''}${summary.repack_margin_uplift_pct.toFixed(1)}% vs. selling in bulk).`
         : '';
-      // Rounding is never silently absorbed — if the weighted-average
-      // cost calculation couldn't land on the exact cent, that's
+      // Rounding is never silently absorbed — if dividing the consumed
+      // cost across the units produced couldn't land on the exact cent, that's
       // spelled out here too, matching the labeled Bookkeeping entry
       // repack.rs posts for it.
       const roundingLine = summary.rounding_adjustment_cents
@@ -344,7 +344,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         : '';
       const newItemLine = summary.target_created ? ' (new item created)' : '';
       setActionResult(
-        `Repacked ${sourceQty} of "${summary.source_name}" into ${targetQty} of "${summary.target_name}"${newItemLine}. New cost: ${formatMoney(summary.target_unit_cost_after, businessCurrency)} each.${profitLine}${roundingLine}`
+        `Repacked ${sourceQty} of "${summary.source_name}" into ${targetQty} of "${summary.target_name}"${newItemLine}. New cost: ${formatMoney(summary.new_batch_unit_cost, businessCurrency)} each.${profitLine}${roundingLine}`
       );
       setRepackSourceId(null);
       setRepackTargetId('');

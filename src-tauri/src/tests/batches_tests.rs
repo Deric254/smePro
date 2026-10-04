@@ -478,6 +478,99 @@ fn test_repacked_units_inherit_the_source_batch_expiry() {
 }
 
 #[test]
+fn test_new_item_created_by_repack_inherits_expiry_category_currency_and_reorder_level() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let source = seed_inventory_item(&conn, &biz, "BEANS-SACK", "Beans sack", 0, 0, 900);
+    conn.execute(
+        "UPDATE module_inventory SET category = 'Grains', currency = 'KES', reorder_level = 12 WHERE id = ?1",
+        rusqlite::params![source],
+    )
+    .unwrap();
+    let po = make_purchase_order(&mut conn, &biz, &uid, &source, "Beans sack", 2, 300, 900);
+    receive(&mut conn, &biz, &uid, &po, Some(900), Some("2031-03-15"));
+
+    let result = crate::repack::repack(
+        &mut conn,
+        &biz,
+        &uid,
+        crate::repack::RepackRequest {
+            source_record_id: source,
+            source_quantity: 1,
+            target_record_id: None,
+            target_quantity_produced: 10,
+            new_target_name: Some("Beans 1kg".into()),
+            new_target_unit_price: Some(60),
+            notes: None,
+        },
+    )
+    .unwrap();
+    let target = result["target_record_id"].as_str().unwrap().to_string();
+
+    let item = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0)
+        .unwrap()
+        .into_iter()
+        .find(|r| r["id"] == json!(target))
+        .unwrap();
+    assert_eq!(item["category"].as_str().unwrap(), "Grains");
+    assert_eq!(item["currency"].as_str().unwrap(), "KES");
+    assert_eq!(item["reorder_level"].as_i64().unwrap(), 12, "re-order level comes from the mother item, not the module default of 5");
+    // 1 sack costing 300 broken into 10 bags: 30 each, at the 60 entered.
+    assert_eq!(item["unit_cost"].as_i64().unwrap(), 30);
+    assert_eq!(item["unit_price"].as_i64().unwrap(), 60);
+    assert_eq!(item["quantity"].as_i64().unwrap(), 10);
+
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &target).unwrap();
+    assert_eq!(summary["batches"][0]["expiry_date"].as_str().unwrap(), "2031-03-15");
+}
+
+#[test]
+fn test_repack_inherits_an_item_level_expiry_date_when_the_schema_has_that_field() {
+    // Some businesses' saved Inventory schema still carries an
+    // item-level `expiry_date` field (the stored schema outlives the
+    // shipped inventory.json), with the expiry typed on the item
+    // itself and no batch behind it.
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    conn.execute("ALTER TABLE module_inventory ADD COLUMN expiry_date TEXT", []).unwrap();
+    conn.execute(
+        "UPDATE modules SET schema_json = json_insert(schema_json, '$.fields[#]', json('{\"name\":\"expiry_date\",\"type\":\"date\",\"required\":false}')) WHERE id = 'inventory'",
+        [],
+    )
+    .unwrap();
+    let source = seed_inventory_item(&conn, &biz, "SUGAR-2KG", "Sugar 2kg", 5, 200, 500);
+    conn.execute("UPDATE module_inventory SET expiry_date = '2031-01-15' WHERE id = ?1", rusqlite::params![source]).unwrap();
+
+    let result = crate::repack::repack(
+        &mut conn,
+        &biz,
+        &uid,
+        crate::repack::RepackRequest {
+            source_record_id: source,
+            source_quantity: 1,
+            target_record_id: None,
+            target_quantity_produced: 2,
+            new_target_name: Some("Sugar 1kg".into()),
+            new_target_unit_price: Some(150),
+            notes: None,
+        },
+    )
+    .unwrap();
+    let target = result["target_record_id"].as_str().unwrap().to_string();
+
+    let item = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0)
+        .unwrap()
+        .into_iter()
+        .find(|r| r["id"] == json!(target))
+        .unwrap();
+    assert_eq!(item["expiry_date"].as_str().unwrap(), "2031-01-15");
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &target).unwrap();
+    assert_eq!(summary["batches"][0]["expiry_date"].as_str().unwrap(), "2031-01-15");
+}
+
+#[test]
 fn test_repack_spanning_batches_inherits_the_earliest_expiry() {
     let mut conn = test_db();
     let biz = test_business(&mut conn);

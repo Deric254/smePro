@@ -136,9 +136,13 @@
 //! (dividing a consumed cost across a whole number of produced units
 //! still doesn't always land on an exact per-unit cent value), it's
 //! just scoped to this one new batch now rather than to the whole
-//! item's blended cost. The target Inventory item's own `unit_cost`/
-//! `unit_price` are never written by this file anymore — see
-//! `batches.rs`'s doc comment for why.
+//! item's blended cost. An EXISTING target's own `unit_cost`/
+//! `unit_price` are never written by this file — see `batches.rs`'s
+//! doc comment for why. A target CREATED by this repack is the one
+//! exception: its row is filled in with the derived cost and the
+//! price entered, so it never shows 0.00 (it has no earlier legacy
+//! history to keep frozen, and no legacy stock for those columns to
+//! price).
 //!
 use crate::crud;
 use anyhow::{anyhow, Result};
@@ -340,16 +344,52 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         new_record.insert("name".to_string(), json!(name));
         new_record.insert("quantity".to_string(), json!(0));
         new_record.insert("unit_cost".to_string(), json!(0));
-        // Deliberately 0, not req.new_target_unit_price: that price
-        // belongs to the batch this repack is about to create for this
-        // item (a few lines down), not to the item record itself — see
-        // crud::create()'s own forced-zero treatment of these two
-        // fields for the same reasoning. Writing it here too would
-        // resurrect exactly the two-sources-of-truth problem this file
-        // moved away from: a legacy `unit_price` sitting on the item
-        // that could silently go stale the moment a second batch at a
-        // different price is ever created for it.
+        // Placeholder only: the real unit_cost can't be known until the
+        // source has been consumed below, so both of these are filled in
+        // with their final values (derived cost, the price supplied for
+        // this repack) right after the new batch is created.
         new_record.insert("unit_price".to_string(), json!(0));
+        // A retail item broken out of a bulk one belongs to the same
+        // product family, so it starts with the mother item's category,
+        // currency and re-order level instead of blank/default values.
+        // (Its expiry is inherited separately, on the new batch below.)
+        // Only fields this business's Inventory module actually defines
+        // are copied, and an empty value on the source is skipped so the
+        // module default still applies. Done before the defaults loop so
+        // an inherited value always wins over a default.
+        for field in ["category", "currency", "reorder_level"] {
+            if !inventory_module.fields.iter().any(|f| f.name == field) {
+                continue;
+            }
+            let inherited: rusqlite::types::Value = tx.query_row(
+                &format!("SELECT {field} FROM {table} WHERE id = ?1 AND business_id = ?2"),
+                params![req.source_record_id, business_id],
+                |r| r.get(0),
+            )?;
+            match inherited {
+                rusqlite::types::Value::Integer(n) => {
+                    new_record.insert(field.to_string(), json!(n));
+                }
+                rusqlite::types::Value::Real(x) => {
+                    new_record.insert(field.to_string(), json!(x));
+                }
+                rusqlite::types::Value::Text(s) if !s.is_empty() => {
+                    new_record.insert(field.to_string(), json!(s));
+                }
+                _ => {}
+            }
+        }
+        // A mother item with no currency of its own falls back to the
+        // business currency, so the new item is never left without one.
+        if inventory_module.fields.iter().any(|f| f.name == "currency") && !new_record.contains_key("currency") {
+            let business_currency: Option<String> = tx
+                .query_row("SELECT currency FROM businesses WHERE id = ?1", params![business_id], |r| r.get(0))
+                .ok()
+                .filter(|c: &String| !c.is_empty());
+            if let Some(c) = business_currency {
+                new_record.insert("currency".to_string(), json!(c));
+            }
+        }
         for f in &inventory_module.fields {
             if !new_record.contains_key(&f.name) {
                 if let Some(d) = &f.default {
@@ -425,8 +465,24 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
     // from. If the source came from several batches, the EARLIEST
     // expiry among the portions actually used wins — the safe choice,
     // it can never overstate how long the new units last. Undated
-    // portions (legacy / no expiry) don't count; if nothing used had a
-    // date, the new batch has none either.
+    // portions (legacy / no expiry) don't count. If no batch used had a
+    // date, fall back to the expiry typed on the source item itself —
+    // some businesses' Inventory schema carries an item-level
+    // `expiry_date` field (it lives in each business's saved module
+    // schema, so it survives even though the shipped inventory.json no
+    // longer lists it), and stock that predates batches has no other
+    // place to keep one. If neither has a date, the new batch has none.
+    let source_item_expiry: Option<String> = if inventory_module.fields.iter().any(|f| f.name == "expiry_date") {
+        tx.query_row(
+            &format!("SELECT expiry_date FROM {table} WHERE id = ?1 AND business_id = ?2"),
+            params![req.source_record_id, business_id],
+            |r| r.get::<_, Option<String>>(0),
+        )?
+        .and_then(|d| chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok())
+        .map(|d| d.to_string())
+    } else {
+        None
+    };
     let inherited_expiry: Option<String> = source_portions
         .iter()
         .filter_map(|p| match &p.from {
@@ -436,7 +492,8 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
             _ => None,
         })
         .min()
-        .map(|d| d.to_string());
+        .map(|d| d.to_string())
+        .or(source_item_expiry);
     // Exact — a sum of exact integer products, no rounding possible
     // yet at this point (the rounding this function still has to
     // guard against is the NEXT step: dividing this total across the
@@ -547,6 +604,24 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         Some(&req.source_record_id),
     )?;
 
+    // A target created by this repack gets its item row fully populated:
+    // the cost derived from what was consumed, the selling price entered
+    // for this repack (both already checked above: price >= cost), and
+    // the inherited expiry where an item-level `expiry_date` field
+    // exists. An existing target's own row is never touched.
+    if new_target_name.is_some() {
+        tx.execute(
+            &format!("UPDATE {table} SET unit_cost = ?1, unit_price = ?2, updated_at = datetime('now') WHERE id = ?3 AND business_id = ?4"),
+            params![new_batch_unit_cost, new_batch_unit_price, target_record_id, business_id],
+        )?;
+        if inherited_expiry.is_some() && inventory_module.fields.iter().any(|f| f.name == "expiry_date") {
+            tx.execute(
+                &format!("UPDATE {table} SET expiry_date = ?1 WHERE id = ?2 AND business_id = ?3"),
+                params![inherited_expiry, target_record_id, business_id],
+            )?;
+        }
+    }
+
     let repacked_at = chrono::Utc::now().to_rfc3339();
     let new_batch_id = crate::batches::create_batch_in_tx(
         &tx,
@@ -633,11 +708,11 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         "target_quantity_before": target_current_qty,
         "target_quantity_after": target_new_qty,
         "target_quantity_produced": req.target_quantity_produced,
-        // NOTE: the target Inventory item's own unit_cost/unit_price
-        // are NOT touched by this repack (or by anything else, once
-        // any batch exists for an item) — see batches.rs's module doc
-        // comment. What this repack actually produced is entirely
-        // captured by the new batch below.
+        // NOTE: an EXISTING target's own unit_cost/unit_price are NOT
+        // touched by this repack — see batches.rs's module doc
+        // comment. What this repack actually produced is captured by
+        // the new batch below (and, for a newly created target, also
+        // written to its item row).
         "new_batch_id": new_batch_id,
         "new_batch_expiry_date": inherited_expiry,
         "new_batch_unit_cost": new_batch_unit_cost,
