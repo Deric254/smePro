@@ -103,7 +103,18 @@ export default function App() {
   }
 
   if (checkingSetup) {
-    return null; // avoid a flash of the wrong screen while the check is in flight
+    // Avoids a flash of the wrong screen while the check is in flight —
+    // and, on a slow cold start, shows the app is alive instead of an
+    // empty window that looks hung.
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--ink-soft)', fontSize: '0.9rem' }}
+      >
+        Starting SME Pro…
+      </div>
+    );
   }
 
   if (needsSetup && !loggedIn) {

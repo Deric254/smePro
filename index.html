@@ -5,6 +5,11 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>SME Pro</title>
+    <!-- Fonts load without blocking first paint: media="print" makes the browser fetch
+         this stylesheet at low priority, and onload switches it on. Same families, same
+         display=swap behaviour as before; offline or slow networks simply keep the fallback
+         fonts instead of holding the whole window hostage to fonts.googleapis.com. -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" media="print" onload="this.media='all'" />
   </head>
   <body>
     <div id="root"></div>
