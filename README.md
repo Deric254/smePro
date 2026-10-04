@@ -228,6 +228,6 @@ See `MOBILE.md` for exactly what's verified vs. still untested there.
 - `BACKEND.md` — full phase-by-phase build and test history of the
   Rust core (Phases 1–8: engine, business panel, CRUD API, auth/
   licensing, reporting/Excel, AI assistant, remaining modules,
-  onboarding/notifications)
+  onboarding; the notifications chapter is historical — that feature was removed)
 - `FRONTEND.md` — design system ("SME Pro" ledger/stamp
   identity) and the Playwright-verified UI flows
