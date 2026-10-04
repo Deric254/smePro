@@ -349,6 +349,11 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ needs.bump-version.outputs.new_tag }}
           args: ${{ matrix.args }}
+          # latest.json is built once, in publish-release, from the .sig
+          # files these jobs upload. Letting every matrix job
+          # read-modify-write it concurrently is what caused intermittent
+          # "Not Found - update-a-release-asset" failures.
+          uploadUpdaterJson: false
 
   # ------------------------------------------------------------------
   # Android: builds a real APK and attaches it to the SAME release
@@ -944,25 +949,71 @@ jobs:
     needs: [bump-version, create-release, desktop, android]
     if: ${{ always() && needs.desktop.result == 'success' && needs.create-release.result == 'success' }}
     runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ needs.bump-version.outputs.new_tag }}
+      RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
     steps:
-      - name: Verify the desktop updater manifest actually uploaded
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump-version.outputs.new_tag }}
+
+      # latest.json is built exactly once, here, after every desktop job
+      # has finished uploading its installers + .sig files. The desktop
+      # jobs run with uploadUpdaterJson: false, so nothing else ever
+      # reads/deletes/re-uploads it concurrently (that read-modify-write
+      # race is what produced "Not Found - update-a-release-asset").
+      #
+      # Everything below addresses the release by its numeric id through
+      # the REST API: a draft release is not reliably resolvable by tag
+      # name, and the assets list is paginated (a full release has more
+      # than the default 30 files).
+      - name: Build and upload latest.json (once, after all desktop jobs)
         run: |
           set -euo pipefail
-          TAG="${{ needs.bump-version.outputs.new_tag }}"
-          ASSETS=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
+          mkdir sigs
+
+          gh api --paginate "repos/$REPO/releases/$RELEASE_ID/assets?per_page=100" \
+            --jq '.[] | select(.name | endswith(".sig")) | "\(.id)\t\(.name)"' > sig-list.tsv
+          echo "Signature files on the release:"
+          cat sig-list.tsv
+          test -s sig-list.tsv || { echo "::error::No .sig files found on the release. Are TAURI_SIGNING_PRIVATE_KEY / _PASSWORD set and did the desktop jobs upload?"; exit 1; }
+
+          while IFS=$'\t' read -r asset_id asset_name; do
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$REPO/releases/assets/$asset_id" > "sigs/$asset_name"
+          done < sig-list.tsv
+
+          node scripts/make-latest-json.mjs sigs latest.json
+
+          # Remove any stale latest.json (e.g. left by a previous attempt),
+          # then upload the fresh one.
+          gh api --paginate "repos/$REPO/releases/$RELEASE_ID/assets?per_page=100" \
+            --jq '.[] | select(.name == "latest.json") | .id' |
+          while read -r old_id; do
+            gh api --method DELETE "repos/$REPO/releases/assets/$old_id"
+          done
+
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary @latest.json \
+            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=latest.json" > /dev/null
+          echo "latest.json uploaded."
+
+      - name: Verify the desktop updater manifest actually uploaded
+        run: |
+          set -euo pipefail
+          ASSETS=$(gh api --paginate "repos/$REPO/releases/$RELEASE_ID/assets?per_page=100" --jq '.[].name')
           echo "Assets on $TAG:"
           echo "$ASSETS"
           if ! echo "$ASSETS" | grep -qx "latest.json"; then
-            echo "::error::latest.json is missing from $TAG. The desktop auto-updater reads this file from releases/latest/download/latest.json and will fail with 'Could not fetch a valid release JSON from the remote' without it. tauri-action only generates it when TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD are set as repository secrets. Refusing to publish a release the updater cannot consume."
+            echo "::error::latest.json is missing from $TAG. The desktop auto-updater reads it from releases/latest/download/latest.json. Refusing to publish a release the updater cannot consume."
             exit 1
           fi
 
       - name: Publish the release (draft -> published)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release edit "${{ needs.bump-version.outputs.new_tag }}" \
-            --repo "${{ github.repository }}" \
-            --draft=false
+          gh api --method PATCH "repos/$REPO/releases/$RELEASE_ID" -F draft=false > /dev/null
+          echo "Published $TAG."
