@@ -243,6 +243,7 @@ fn test_repack_consumes_source_batches_via_fefo_and_produces_an_independent_targ
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req).unwrap();
     // 3 * 300 = 900 consumed / 30 produced = 30 exactly.
@@ -458,6 +459,7 @@ fn repack_one(conn: &mut rusqlite::Connection, biz: &str, uid: &str, source: &st
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     })
 }
 
@@ -503,6 +505,7 @@ fn test_new_item_created_by_repack_inherits_expiry_category_currency_and_reorder
             new_target_name: Some("Beans 1kg".into()),
             new_target_unit_price: Some(60),
             notes: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -555,6 +558,7 @@ fn test_repack_inherits_an_item_level_expiry_date_when_the_schema_has_that_field
             new_target_name: Some("Sugar 1kg".into()),
             new_target_unit_price: Some(150),
             notes: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -887,4 +891,159 @@ fn test_expiry_report_totals_are_complete_even_when_the_list_is_cut_short() {
     assert_eq!(report.summary.expired_cost_value, 5 * 50 + 2 * 30);
     assert_eq!(report.summary.expiring_batches, 2, "today's batch and the +10d batch (fresh 2999 batches are outside 30 days)");
     assert_eq!(report.summary.expiring_units, 13);
+}
+
+fn repack_from(conn: &mut rusqlite::Connection, biz: &str, uid: &str, source: &str, batch: &str, qty: i64, target: &str, produced: i64) -> anyhow::Result<serde_json::Value> {
+    crate::repack::repack(conn, biz, uid, crate::repack::RepackRequest {
+        source_record_id: source.to_string(),
+        source_batch_id: Some(batch.to_string()),
+        source_quantity: qty,
+        target_record_id: Some(target.to_string()),
+        target_quantity_produced: produced,
+        ..Default::default()
+    })
+}
+
+fn batch_remaining(conn: &rusqlite::Connection, biz: &str, uid: &str, inv: &str, batch: &str) -> i64 {
+    let summary = crate::batches::list_batches(conn, biz, uid, inv).unwrap();
+    summary["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == json!(batch))
+        .map(|b| b["quantity_remaining"].as_i64().unwrap())
+        .unwrap_or(0)
+}
+
+#[test]
+fn test_repack_draws_from_the_chosen_batch_not_the_front_of_the_queue() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let source = seed_inventory_item(&conn, &biz, "SACK", "Sack", 0, 0, 900);
+    let target = seed_inventory_item(&conn, &biz, "BAG", "Bag", 0, 0, 120);
+    // Front of the FEFO queue (soonest expiry), then a later batch the
+    // person actually picks.
+    let po_front = make_purchase_order(&mut conn, &biz, &uid, &source, "Sack", 3, 400, 900);
+    receive(&mut conn, &biz, &uid, &po_front, Some(900), Some("2031-01-01"));
+    let po_later = make_purchase_order(&mut conn, &biz, &uid, &source, "Sack", 5, 500, 900);
+    receive(&mut conn, &biz, &uid, &po_later, Some(900), Some("2032-01-01"));
+
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &source).unwrap();
+    let front_id = summary["batches"][0]["id"].as_str().unwrap().to_string();
+    let later_id = summary["batches"][1]["id"].as_str().unwrap().to_string();
+
+    let result = repack_from(&mut conn, &biz, &uid, &source, &later_id, 2, &target, 20).unwrap();
+
+    assert_eq!(batch_remaining(&conn, &biz, &uid, &source, &later_id), 3, "the chosen batch is the one consumed");
+    assert_eq!(batch_remaining(&conn, &biz, &uid, &source, &front_id), 3, "the front batch is untouched");
+    // Costed on the chosen batch's own cost: 2 × 500 over 20 bags.
+    assert_eq!(result["new_batch_unit_cost"].as_i64().unwrap(), 50);
+    assert_eq!(result["new_batch_expiry_date"].as_str().unwrap(), "2032-01-01");
+}
+
+#[test]
+fn test_repack_rejects_a_chosen_batch_that_cannot_cover_the_quantity() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let source = seed_inventory_item(&conn, &biz, "SACK", "Sack", 0, 0, 900);
+    let target = seed_inventory_item(&conn, &biz, "BAG", "Bag", 0, 0, 120);
+    let po_a = make_purchase_order(&mut conn, &biz, &uid, &source, "Sack", 1, 400, 900);
+    receive(&mut conn, &biz, &uid, &po_a, Some(900), Some("2031-01-01"));
+    let po_b = make_purchase_order(&mut conn, &biz, &uid, &source, "Sack", 5, 500, 900);
+    receive(&mut conn, &biz, &uid, &po_b, Some(900), Some("2032-01-01"));
+
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &source).unwrap();
+    let small_id = summary["batches"][0]["id"].as_str().unwrap().to_string();
+
+    // The item has 6 in total, but the chosen batch only has 1: it must
+    // fail rather than quietly spill into another batch.
+    assert!(repack_from(&mut conn, &biz, &uid, &source, &small_id, 2, &target, 20).is_err());
+    assert_eq!(batch_remaining(&conn, &biz, &uid, &source, &small_id), 1);
+    let item = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0)
+        .unwrap()
+        .into_iter()
+        .find(|r| r["id"] == json!(source))
+        .unwrap();
+    assert_eq!(item["quantity"].as_i64().unwrap(), 6, "a rejected repack changes nothing");
+}
+
+#[test]
+fn test_repack_rejects_a_batch_belonging_to_another_item() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let source = seed_inventory_item(&conn, &biz, "SACK", "Sack", 0, 0, 900);
+    let other = seed_inventory_item(&conn, &biz, "OTHER", "Other", 0, 0, 900);
+    let target = seed_inventory_item(&conn, &biz, "BAG", "Bag", 0, 0, 120);
+    let po_s = make_purchase_order(&mut conn, &biz, &uid, &source, "Sack", 4, 400, 900);
+    receive(&mut conn, &biz, &uid, &po_s, Some(900), None);
+    let po_o = make_purchase_order(&mut conn, &biz, &uid, &other, "Other", 4, 400, 900);
+    receive(&mut conn, &biz, &uid, &po_o, Some(900), None);
+
+    let other_batch = crate::batches::list_batches(&conn, &biz, &uid, &other).unwrap()["batches"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(repack_from(&mut conn, &biz, &uid, &source, &other_batch, 1, &target, 10).is_err());
+    assert_eq!(batch_remaining(&conn, &biz, &uid, &other, &other_batch), 4);
+}
+
+#[test]
+fn test_repack_can_draw_from_the_legacy_pool_explicitly() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    // 4 legacy units, then a dated batch of 3 that FEFO would sell first.
+    let source = seed_inventory_item(&conn, &biz, "SACK", "Sack", 4, 300, 900);
+    let target = seed_inventory_item(&conn, &biz, "BAG", "Bag", 0, 0, 120);
+    let po = make_purchase_order(&mut conn, &biz, &uid, &source, "Sack", 3, 500, 900);
+    receive(&mut conn, &biz, &uid, &po, Some(900), Some("2031-01-01"));
+
+    let result = repack_from(&mut conn, &biz, &uid, &source, crate::batches::LEGACY_SOURCE, 2, &target, 20).unwrap();
+    // Costed at the legacy cost (2 × 300 / 20), and the dated batch is untouched.
+    assert_eq!(result["new_batch_unit_cost"].as_i64().unwrap(), 30);
+    let summary = crate::batches::list_batches(&conn, &biz, &uid, &source).unwrap();
+    assert_eq!(summary["legacy_quantity"].as_i64().unwrap(), 2);
+    assert_eq!(summary["batches"][0]["quantity_remaining"].as_i64().unwrap(), 3);
+}
+
+#[test]
+fn test_repack_into_a_new_item_stores_the_chosen_unit() {
+    let mut conn = test_db();
+    let biz = test_business(&mut conn);
+    let (uid, _) = test_owner(&mut conn, &biz);
+    let source = seed_inventory_item(&conn, &biz, "SACK", "Sack", 5, 300, 900);
+    let unit = crate::reference_data::list_units(&conn, &biz).unwrap()[0]["name"].as_str().unwrap().to_string();
+
+    let result = crate::repack::repack(&mut conn, &biz, &uid, crate::repack::RepackRequest {
+        source_record_id: source.clone(),
+        source_quantity: 1,
+        target_quantity_produced: 10,
+        new_target_name: Some("Bag 1kg".into()),
+        new_target_unit_price: Some(60),
+        new_target_unit: Some(unit.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    let target = result["target_record_id"].as_str().unwrap().to_string();
+    let item = crate::crud::list(&conn, &biz, &uid, "inventory", None, 50, 0)
+        .unwrap()
+        .into_iter()
+        .find(|r| r["id"] == json!(target))
+        .unwrap();
+    assert_eq!(item["unit"].as_str().unwrap(), unit);
+
+    // An unknown unit is refused, same as everywhere else units are used.
+    let bad = crate::repack::repack(&mut conn, &biz, &uid, crate::repack::RepackRequest {
+        source_record_id: source,
+        source_quantity: 1,
+        target_quantity_produced: 10,
+        new_target_name: Some("Bag 2kg".into()),
+        new_target_unit_price: Some(120),
+        new_target_unit: Some("not-a-unit".into()),
+        ..Default::default()
+    });
+    assert!(bad.is_err());
 }

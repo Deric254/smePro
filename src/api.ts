@@ -293,6 +293,9 @@ export const processRefund = (req: RefundRequest) =>
 // ---- Repacking / breaking bulk. See repack.rs. ----
 export const repackStock = (req: {
   source_record_id: string; source_quantity: number;
+  // Which stock of the source to break down: a batch id, or 'legacy'
+  // for the pre-batch pool. Omitted = FEFO order. See repack.rs.
+  source_batch_id?: string;
   // Exactly one of target_record_id / new_target_name must be set —
   // see repack.rs's module doc comment. new_target_unit_price is
   // required alongside new_target_name; its unit_cost is never sent,
@@ -300,6 +303,8 @@ export const repackStock = (req: {
   target_record_id?: string;
   new_target_name?: string;
   new_target_unit_price?: number;
+  // Unit of measure for the new item (an existing unit's name).
+  new_target_unit?: string;
   target_quantity_produced: number; notes?: string;
 }) => request('/inventory/repack', { method: 'POST', body: JSON.stringify(req) });
 

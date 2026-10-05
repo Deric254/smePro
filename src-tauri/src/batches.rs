@@ -428,6 +428,91 @@ fn fefo_consume_core(
     Ok(portions)
 }
 
+/// Sentinel `source_batch_id` meaning "the item's legacy (pre-batch)
+/// pool" — legacy stock is computed, not a row, so it has no id of its
+/// own to select it by.
+pub(crate) const LEGACY_SOURCE: &str = "legacy";
+
+/// Consumes `qty_needed` units from ONE explicitly chosen source — a
+/// specific batch id, or `LEGACY_SOURCE` for the legacy pool — instead
+/// of walking the FEFO queue. Used by repack when the person picked
+/// which batch to break down: FEFO would otherwise silently draw from
+/// whichever batch happens to be at the front, not the one chosen.
+/// Never draws from an expired batch, and never spans sources: if the
+/// chosen one can't cover `qty_needed` on its own it is a hard error,
+/// so what was selected is exactly what gets consumed.
+/// `current_inventory_qty` is the item's full quantity, read in the
+/// same transaction (used to size the legacy pool).
+pub(crate) fn consume_from_source_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    business_id: &str,
+    inventory_record_id: &str,
+    source: &str,
+    qty_needed: i64,
+    current_inventory_qty: i64,
+    legacy_unit_cost: i64,
+    legacy_unit_price: i64,
+    today: &str,
+) -> Result<ConsumedPortion> {
+    if qty_needed <= 0 {
+        return Err(anyhow!("internal error: consumption called with a non-positive quantity"));
+    }
+
+    if source == LEGACY_SOURCE {
+        let legacy_available = (current_inventory_qty - live_batch_quantity_in_tx(tx, business_id, inventory_record_id)?).max(0);
+        if legacy_available < qty_needed {
+            return Err(anyhow!(
+                "not enough legacy stock to repack: {legacy_available} available, {qty_needed} requested"
+            ));
+        }
+        return Ok(ConsumedPortion {
+            from: ConsumedFrom::Legacy,
+            quantity: qty_needed,
+            unit_cost: legacy_unit_cost,
+            unit_price: legacy_unit_price,
+        });
+    }
+
+    let row: Option<(i64, i64, i64, Option<String>, bool)> = tx
+        .query_row(
+            "SELECT quantity_remaining, unit_cost, unit_price, expiry_date,
+                    (expiry_date IS NOT NULL AND date(expiry_date) IS NOT NULL AND date(expiry_date) < date(?4))
+             FROM inventory_batches
+             WHERE id = ?1 AND business_id = ?2 AND inventory_record_id = ?3 AND deleted_at IS NULL",
+            params![source, business_id, inventory_record_id, today],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    let Some((remaining, unit_cost, unit_price, expiry_date, expired)) = row else {
+        return Err(anyhow!("the selected batch no longer exists for this item — reopen the repack and pick again"));
+    };
+    if expired {
+        return Err(anyhow!("the selected batch has expired and can't be repacked; remove it with a stock take"));
+    }
+    if remaining < qty_needed {
+        return Err(anyhow!(
+            "not enough stock in the selected batch: {remaining} available, {qty_needed} requested"
+        ));
+    }
+    let updated = tx.execute(
+        "UPDATE inventory_batches SET quantity_remaining = quantity_remaining - ?1, updated_at = datetime('now')
+         WHERE id = ?2 AND business_id = ?3 AND quantity_remaining >= ?1",
+        params![qty_needed, source, business_id],
+    )?;
+    if updated == 0 {
+        return Err(anyhow!(
+            "internal inventory inconsistency: batch {source} no longer has the stock this operation \
+             expected — aborting rather than risk overselling"
+        ));
+    }
+    Ok(ConsumedPortion {
+        from: ConsumedFrom::Batch { batch_id: source.to_string(), expiry_date },
+        quantity: qty_needed,
+        unit_cost,
+        unit_price,
+    })
+}
+
 /// Refund-time restock into a specific batch — see refund.rs. Credits
 /// `quantity` back onto the originating batch if it's still live; if
 /// that batch was deleted since the sale, creates a brand-new batch

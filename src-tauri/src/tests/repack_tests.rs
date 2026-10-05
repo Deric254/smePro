@@ -37,6 +37,7 @@ fn test_repack_a_dozen_eggs_into_singles_produces_the_exact_correct_cost() {
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req).unwrap();
 
@@ -91,6 +92,7 @@ fn test_repack_never_blends_with_existing_target_stock() {
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req).unwrap();
 
@@ -127,6 +129,7 @@ fn test_repack_cannot_consume_more_than_available_stock() {
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req);
     assert!(result.is_err());
@@ -161,6 +164,7 @@ fn test_repack_rejects_a_result_that_would_price_the_target_below_cost() {
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req);
     assert!(result.is_err(), "a repack that would price the target below its own cost must be rejected");
@@ -189,6 +193,7 @@ fn test_repack_rejects_same_source_and_target() {
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     };
     assert!(crate::repack::repack(&mut conn, &biz, &uid, req).is_err());
 }

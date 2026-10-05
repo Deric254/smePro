@@ -675,6 +675,7 @@ fn test_open_stock_take_blocks_repack() {
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     };
     let result = crate::repack::repack(&mut conn, &biz, &uid, req);
     assert!(result.is_err());

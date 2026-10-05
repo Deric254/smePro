@@ -90,6 +90,7 @@ fn test_checkout_of_a_repacked_item_costs_the_sale_correctly() {
         new_target_unit_price: None,
         target_quantity_produced: 4,
         notes: None,
+        ..Default::default()
     };
     crate::repack::repack(&mut conn, &biz, &uid, repack_req).unwrap();
 
@@ -152,6 +153,7 @@ fn test_checkout_after_a_repack_costs_the_sale_from_the_new_batch_not_the_pre_ex
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     };
     let repack_result = crate::repack::repack(&mut conn, &biz, &uid, repack_req).unwrap();
     assert_eq!(repack_result["new_batch_unit_cost"].as_i64().unwrap(), 100, "1000 consumed / 10 produced, exactly — nothing to blend with the pre-existing 5kg");
@@ -206,6 +208,7 @@ fn test_checkout_after_a_two_level_repack_chain_costs_correctly() {
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     }).unwrap();
     // 500 / 10 = 50 per 100g bag — lands on a new batch now, not the
     // Inventory row's own (frozen, still-0) unit_cost.
@@ -220,6 +223,7 @@ fn test_checkout_after_a_two_level_repack_chain_costs_correctly() {
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     }).unwrap();
     // 50 / 4 = 12.5 -> rounds to 13 (repack.rs rounds up, per its own
     // "never silently lose value" rule) or 12 depending on rounding
@@ -281,6 +285,7 @@ fn test_repacking_to_a_loss_is_rejected_so_no_such_sale_can_ever_happen() {
         new_target_name: None,
         new_target_unit_price: None,
         notes: None,
+        ..Default::default()
     });
     assert!(result.is_err(), "must reject a repack that would price the target below its own cost");
 

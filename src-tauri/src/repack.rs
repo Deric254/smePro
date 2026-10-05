@@ -151,13 +151,20 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct RepackRequest {
     /// The bulk item being broken down (e.g. "Rice — Sack of 90kg").
     pub source_record_id: String,
     /// How many of the source unit are being consumed (usually 1 sack,
     /// but nothing stops breaking multiple sacks in one operation).
     pub source_quantity: i64,
+    /// Which stock of the source to break down: a specific batch id, or
+    /// `"legacy"` for the pre-batch pool. Omit it to draw in FEFO order
+    /// (what a sale would sell next). When supplied, EXACTLY that batch
+    /// is consumed — never a different one — and the request fails if it
+    /// can't cover `source_quantity` on its own.
+    #[serde(default)]
+    pub source_batch_id: Option<String>,
     /// The smaller retail item being produced (e.g. "Rice — 1kg bag"),
     /// when it already exists in Inventory. Omit this and supply
     /// `new_target_name` instead to create it as part of this same
@@ -182,6 +189,11 @@ pub struct RepackRequest {
     /// through the ordinary edit form, not through a repack.
     #[serde(default)]
     pub new_target_unit_price: Option<i64>,
+    /// Unit of measure for the new item (must be an existing unit).
+    /// Only meaningful with `new_target_name`; an existing target keeps
+    /// its own unit.
+    #[serde(default)]
+    pub new_target_unit: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -357,6 +369,13 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
         // are copied, and an empty value on the source is skipped so the
         // module default still applies. Done before the defaults loop so
         // an inherited value always wins over a default.
+        // The unit is NOT inherited: a sack's unit is the wrong unit
+        // for the bags broken out of it, so it's whatever was chosen.
+        if let Some(unit) = req.new_target_unit.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+            if inventory_module.fields.iter().any(|f| f.name == "unit") {
+                new_record.insert("unit".to_string(), json!(unit));
+            }
+        }
         for field in ["category", "currency", "reorder_level"] {
             if !inventory_module.fields.iter().any(|f| f.name == field) {
                 continue;
@@ -451,16 +470,33 @@ pub fn repack(conn: &mut Connection, business_id: &str, user_id: &str, req: Repa
     // never a single flat `source_unit_cost` — a repack of an item
     // that has more than one live batch now correctly attributes each
     // slice of what it consumed to its own batch's own cost.
-    let source_portions = crate::batches::fefo_consume_sellable_in_tx(
-        &tx,
-        business_id,
-        &req.source_record_id,
-        req.source_quantity,
-        source_current_qty,
-        source_unit_cost,
-        source_unit_price,
-        &today,
-    )?;
+    // When a specific batch was chosen, consume exactly that one;
+    // otherwise fall back to FEFO. Without this the repack silently drew
+    // from whichever batch was at the front of the queue, not the one
+    // the person selected.
+    let source_portions = match req.source_batch_id.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        Some(source) => vec![crate::batches::consume_from_source_in_tx(
+            &tx,
+            business_id,
+            &req.source_record_id,
+            source,
+            req.source_quantity,
+            source_current_qty,
+            source_unit_cost,
+            source_unit_price,
+            &today,
+        )?],
+        None => crate::batches::fefo_consume_sellable_in_tx(
+            &tx,
+            business_id,
+            &req.source_record_id,
+            req.source_quantity,
+            source_current_qty,
+            source_unit_cost,
+            source_unit_price,
+            &today,
+        )?,
+    };
     // The repacked units inherit the expiry of the stock they were made
     // from. If the source came from several batches, the EARLIEST
     // expiry among the portions actually used wins — the safe choice,

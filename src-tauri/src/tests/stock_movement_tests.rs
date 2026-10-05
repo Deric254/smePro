@@ -161,6 +161,7 @@ fn test_a_repack_records_both_halves_with_matching_reference() {
         new_target_unit_price: None,
         target_quantity_produced: 50,
         notes: None,
+        ..Default::default()
     }).unwrap();
 
     let m = movements_for(&conn, &biz, &uid);

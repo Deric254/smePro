@@ -13,6 +13,20 @@ import { confirmDialog } from '../components/ConfirmDialog';
 import ReceiptView from '../components/ReceiptView';
 import DebtSummaryWidget from '../components/DebtSummary';
 
+// Matches batches.rs::LEGACY_SOURCE — the legacy (pre-batch) pool has no
+// row of its own, so repack selects it by this sentinel instead of an id.
+const LEGACY_SOURCE = 'legacy';
+
+// A batch is still sellable ON its expiry date and expired from the next
+// day, on the shop's local clock — the same rule batches.rs enforces
+// (which stays the authority; this only decides what the picker offers).
+function isBatchExpired(expiry: string | null): boolean {
+  if (!expiry) return false;
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  return expiry.slice(0, 10) < today;
+}
+
 // Fields that are only ever set by a dedicated backend action, not the
 // generic form: purchasing's `received`/`po_number` (receiving.rs),
 // debt_credit's `settled`/`payment_method`/`source_order_id`/`entry_number`
@@ -191,6 +205,13 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
   const [repackTargetMode, setRepackTargetMode] = useState<'existing' | 'new'>('existing');
   const [repackNewTargetName, setRepackNewTargetName] = useState('');
   const [repackNewTargetPriceText, setRepackNewTargetPriceText] = useState('');
+  const [repackNewTargetUnit, setRepackNewTargetUnit] = useState('');
+  // Which batch of the source is being broken down. Defaults to the one
+  // that would sell next, but is always sent explicitly so the stock
+  // consumed is exactly the stock shown — never whatever FEFO picks.
+  const [repackBatches, setRepackBatches] = useState<BatchSummary | null>(null);
+  const [repackBatchId, setRepackBatchId] = useState('');
+  const repackOpenRef = useRef<string | null>(null);
   const [repackSourceQtyText, setRepackSourceQtyText] = useState('1');
   const [repackTargetQtyText, setRepackTargetQtyText] = useState('');
   const [repackNotes, setRepackNotes] = useState('');
@@ -283,6 +304,38 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
     }
   }
 
+  function closeRepack() {
+    repackOpenRef.current = null;
+    setRepackSourceId(null);
+    setRepackTargetId('');
+    setRepackTargetMode('existing');
+    setRepackNewTargetName('');
+    setRepackNewTargetPriceText('');
+    setRepackNewTargetUnit('');
+    setRepackSourceQtyText('1');
+    setRepackTargetQtyText('');
+    setRepackNotes('');
+    setRepackError(null);
+    setRepackBatches(null);
+    setRepackBatchId('');
+  }
+
+  async function openRepack(id: string) {
+    closeRepack();
+    repackOpenRef.current = id;
+    setRepackSourceId(id);
+    try {
+      const summary = await getBatches(id);
+      if (repackOpenRef.current !== id) return; // closed or switched while loading
+      setRepackBatches(summary);
+      const next = summary.batches.find((b) => !isBatchExpired(b.expiry_date));
+      setRepackBatchId(next ? next.id : summary.legacy_quantity > 0 ? LEGACY_SOURCE : '');
+    } catch (err) {
+      if (repackOpenRef.current !== id) return;
+      setRepackError(err instanceof ApiError ? err.message : 'Could not load batches for this item');
+    }
+  }
+
   async function submitRepack() {
     if (!repackSourceId) return;
     const sourceQty = parseInt(repackSourceQtyText, 10);
@@ -314,14 +367,30 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       setRepackError('Select the item being produced, or switch to "Create a new item".');
       return;
     }
+    if (!repackBatchId) {
+      setRepackError('Select the batch to repack from.');
+      return;
+    }
+    const chosenQty = repackBatchId === LEGACY_SOURCE
+      ? repackBatches?.legacy_quantity
+      : repackBatches?.batches.find((b) => b.id === repackBatchId)?.quantity_remaining;
+    if (chosenQty !== undefined && sourceQty > chosenQty) {
+      setRepackError(`The selected batch only has ${chosenQty} unit${chosenQty === 1 ? '' : 's'} — lower the quantity or pick another batch.`);
+      return;
+    }
+    if (repackTargetMode === 'new' && units.length > 0 && !repackNewTargetUnit) {
+      setRepackError('Select the unit for the new item.');
+      return;
+    }
     setRepackSubmitting(true);
     setRepackError(null);
     try {
       const summary = await repackStock({
         source_record_id: repackSourceId,
+        source_batch_id: repackBatchId,
         source_quantity: sourceQty,
         ...(repackTargetMode === 'new'
-          ? { new_target_name: repackNewTargetName.trim(), new_target_unit_price: newTargetPriceCents }
+          ? { new_target_name: repackNewTargetName.trim(), new_target_unit_price: newTargetPriceCents, ...(repackNewTargetUnit ? { new_target_unit: repackNewTargetUnit } : {}) }
           : { target_record_id: repackTargetId }),
         target_quantity_produced: targetQty,
         notes: repackNotes || undefined,
@@ -346,14 +415,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
       setActionResult(
         `Repacked ${sourceQty} of "${summary.source_name}" into ${targetQty} of "${summary.target_name}"${newItemLine}. New cost: ${formatMoney(summary.new_batch_unit_cost, businessCurrency)} each.${profitLine}${roundingLine}`
       );
-      setRepackSourceId(null);
-      setRepackTargetId('');
-      setRepackTargetMode('existing');
-      setRepackNewTargetName('');
-      setRepackNewTargetPriceText('');
-      setRepackSourceQtyText('1');
-      setRepackTargetQtyText('');
-      setRepackNotes('');
+      closeRepack();
       await refreshRecords();
     } catch (err) {
       setRepackError(err instanceof ApiError ? err.message : 'Could not complete the repack');
@@ -875,7 +937,7 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
                       <td style={styles.td}>
                         <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                           {moduleId === 'inventory' && inventoryCanRepack && (
-                            <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => { setRepackSourceId(r.id); setRepackTargetId(''); setRepackTargetMode('existing'); setRepackNewTargetName(''); setRepackNewTargetPriceText(''); setRepackSourceQtyText('1'); setRepackTargetQtyText(''); setRepackNotes(''); setRepackError(null); }}>
+                            <button className="btn btn-outline" style={{ padding: '0.3em 0.7em', fontSize: '0.78rem' }} onClick={() => openRepack(r.id)}>
                               Repack
                             </button>
                           )}
@@ -996,90 +1058,131 @@ export default function ModuleView({ moduleId }: { moduleId: string }) {
         </div>
       )}
 
-      {repackSourceId && (
-        <div style={styles.overlay} onClick={() => setRepackSourceId(null)}>
-          <div className="card" style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ marginTop: 0 }}>Repack / break bulk</h3>
-            <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-              Converting stock from "{String(records.find((r) => r.id === repackSourceId)?.name ?? 'this item')}".
-            </p>
-            <label>Produces (target item)</label>
-            <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.4rem', fontSize: '0.85rem' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 'normal' }}>
-                <input
-                  type="radio"
-                  checked={repackTargetMode === 'existing'}
-                  onChange={() => setRepackTargetMode('existing')}
-                />
-                An existing item
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 'normal' }}>
-                <input
-                  type="radio"
-                  checked={repackTargetMode === 'new'}
-                  onChange={() => setRepackTargetMode('new')}
-                />
-                Create a new item
-              </label>
-            </div>
-            {repackTargetMode === 'existing' ? (
-              <select value={repackTargetId} onChange={(e) => setRepackTargetId(e.target.value)} style={{ width: '100%' }}>
-                <option value="">Select the item being produced…</option>
-                {records.filter((r) => r.id !== repackSourceId).map((r) => (
-                  <option key={r.id} value={r.id}>{String(r.name ?? r.sku ?? r.id)}</option>
-                ))}
+      {repackSourceId && (() => {
+        const source = records.find((r) => r.id === repackSourceId);
+        const unitOf = (r?: Record_) => (typeof r?.unit === 'string' ? r.unit : '');
+        const sourceUnit = unitOf(source);
+        const targetUnit = unitOf(records.find((r) => r.id === repackTargetId));
+        const nextBatchId = repackBatches?.batches.find((b) => !isBatchExpired(b.expiry_date))?.id;
+        const noStock = !!repackBatches && repackBatches.batches.length === 0 && repackBatches.legacy_quantity === 0;
+        return (
+          <div style={styles.overlay} onClick={closeRepack}>
+            <div className="card" style={{ ...styles.modal, width: 520 }} onClick={(e) => e.stopPropagation()}>
+              <h3 style={{ marginTop: 0 }}>Repack / break bulk</h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+                Converting stock from "{String(source?.name ?? 'this item')}"{sourceUnit ? ` (${sourceUnit})` : ''}.
+              </p>
+              <label>Take stock from (batch)</label>
+              <select value={repackBatchId} onChange={(e) => setRepackBatchId(e.target.value)} disabled={!repackBatches} style={{ width: '100%', marginBottom: '0.6rem' }}>
+                {!repackBatches && <option value="">{repackError ? 'Batches unavailable' : 'Loading batches…'}</option>}
+                {noStock && <option value="">No stock available</option>}
+                {repackBatches?.batches.map((b) => {
+                  const expired = isBatchExpired(b.expiry_date);
+                  return (
+                    <option key={b.id} value={b.id} disabled={expired}>
+                      {b.id === nextBatchId ? 'Next to sell · ' : ''}{b.quantity_remaining} units · {b.expiry_date ? `${expired ? 'EXPIRED ' : 'exp '}${b.expiry_date}` : 'no expiry'} · recv {b.received_at.slice(0, 10)}{b.source_po_number ? ` · PO ${b.source_po_number}` : ''} · cost {formatMoney(b.unit_cost, businessCurrency)}
+                    </option>
+                  );
+                })}
+                {repackBatches && repackBatches.legacy_quantity > 0 && (
+                  <option value={LEGACY_SOURCE}>
+                    Legacy stock (pre-batch) · {repackBatches.legacy_quantity} units · no expiry · cost {formatMoney(repackBatches.legacy_unit_cost, businessCurrency)}
+                  </option>
+                )}
               </select>
-            ) : (
-              <div style={{ display: 'flex', gap: '0.6rem' }}>
-                <div style={{ flex: 2 }}>
-                  <label style={{ fontSize: '0.8rem', fontWeight: 'normal' }}>Name</label>
+              <label>Produces (target item)</label>
+              <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.4rem', fontSize: '0.85rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 'normal' }}>
                   <input
-                    type="text"
-                    placeholder="e.g. Rice — 1kg bag"
-                    value={repackNewTargetName}
-                    onChange={(e) => setRepackNewTargetName(e.target.value)}
-                    style={{ width: '100%' }}
+                    type="radio"
+                    checked={repackTargetMode === 'existing'}
+                    onChange={() => setRepackTargetMode('existing')}
                   />
+                  An existing item
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 'normal' }}>
+                  <input
+                    type="radio"
+                    checked={repackTargetMode === 'new'}
+                    onChange={() => setRepackTargetMode('new')}
+                  />
+                  Create a new item
+                </label>
+              </div>
+              {repackTargetMode === 'existing' ? (
+                <select value={repackTargetId} onChange={(e) => setRepackTargetId(e.target.value)} style={{ width: '100%' }}>
+                  <option value="">Select the item being produced…</option>
+                  {records.filter((r) => r.id !== repackSourceId).map((r) => (
+                    <option key={r.id} value={r.id}>{String(r.name ?? r.sku ?? r.id)}{unitOf(r) ? ` (${unitOf(r)})` : ''}</option>
+                  ))}
+                </select>
+              ) : (
+                <div style={{ display: 'flex', gap: '0.6rem' }}>
+                  <div style={{ flex: 2 }}>
+                    <label style={{ fontSize: '0.8rem', fontWeight: 'normal' }}>Name</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Rice — 1kg bag"
+                      value={repackNewTargetName}
+                      onChange={(e) => setRepackNewTargetName(e.target.value)}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ fontSize: '0.8rem', fontWeight: 'normal' }}>Selling price</label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={repackNewTargetPriceText}
+                      onChange={(e) => setRepackNewTargetPriceText(e.target.value)}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.6rem' }}>
+                <div style={{ flex: 1 }}>
+                  <label>Quantity consumed</label>
+                  <input type="text" inputMode="numeric" value={repackSourceQtyText} onChange={(e) => setRepackSourceQtyText(e.target.value)} style={{ width: '100%' }} />
                 </div>
                 <div style={{ flex: 1 }}>
-                  <label style={{ fontSize: '0.8rem', fontWeight: 'normal' }}>Selling price</label>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="0.00"
-                    value={repackNewTargetPriceText}
-                    onChange={(e) => setRepackNewTargetPriceText(e.target.value)}
-                    style={{ width: '100%' }}
-                  />
+                  <label>Quantity produced</label>
+                  <input type="text" inputMode="numeric" value={repackTargetQtyText} onChange={(e) => setRepackTargetQtyText(e.target.value)} style={{ width: '100%' }} />
                 </div>
               </div>
-            )}
-            <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.6rem' }}>
-              <div style={{ flex: 1 }}>
-                <label>Quantity consumed</label>
-                <input type="text" inputMode="numeric" value={repackSourceQtyText} onChange={(e) => setRepackSourceQtyText(e.target.value)} style={{ width: '100%' }} />
+              <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.6rem' }}>
+                <div style={{ flex: 1 }}>
+                  <label>Unit{repackTargetMode === 'new' && units.length > 0 ? ' *' : ''}</label>
+                  {repackTargetMode === 'new' ? (
+                    <select value={repackNewTargetUnit} onChange={(e) => setRepackNewTargetUnit(e.target.value)} style={{ width: '100%' }}>
+                      <option value="">—</option>
+                      {units.map((u) => <option key={u.id} value={u.name}>{u.name}{u.abbreviation ? ` (${u.abbreviation})` : ''}</option>)}
+                    </select>
+                  ) : (
+                    <input type="text" value={targetUnit || '—'} disabled style={{ width: '100%' }} />
+                  )}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label>Notes (optional)</label>
+                  <input type="text" value={repackNotes} onChange={(e) => setRepackNotes(e.target.value)} style={{ width: '100%' }} />
+                </div>
               </div>
-              <div style={{ flex: 1 }}>
-                <label>Quantity produced</label>
-                <input type="text" inputMode="numeric" value={repackTargetQtyText} onChange={(e) => setRepackTargetQtyText(e.target.value)} style={{ width: '100%' }} />
+              {repackError && <div style={styles.error}>{repackError}</div>}
+              <div style={styles.modalActions}>
+                <button className="btn btn-outline" onClick={closeRepack} disabled={repackSubmitting}>Cancel</button>
+                <button
+                  className="btn btn-stamp"
+                  onClick={submitRepack}
+                  disabled={repackSubmitting || !repackBatchId || (repackTargetMode === 'existing' ? !repackTargetId : !repackNewTargetName.trim())}
+                >
+                  {repackSubmitting ? 'Repacking…' : 'Confirm repack'}
+                </button>
               </div>
-            </div>
-            <label style={{ marginTop: '0.6rem', display: 'block' }}>Notes (optional)</label>
-            <input type="text" value={repackNotes} onChange={(e) => setRepackNotes(e.target.value)} style={{ width: '100%' }} />
-            {repackError && <div style={styles.error}>{repackError}</div>}
-            <div style={styles.modalActions}>
-              <button className="btn btn-outline" onClick={() => setRepackSourceId(null)} disabled={repackSubmitting}>Cancel</button>
-              <button
-                className="btn btn-stamp"
-                onClick={submitRepack}
-                disabled={repackSubmitting || (repackTargetMode === 'existing' ? !repackTargetId : !repackNewTargetName.trim())}
-              >
-                {repackSubmitting ? 'Repacking…' : 'Confirm repack'}
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {settlingId && (
         <div style={styles.overlay} onClick={() => setSettlingId(null)}>
