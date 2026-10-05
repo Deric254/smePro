@@ -47,6 +47,10 @@ export default function AnalyticsSection() {
   const [revenue, setRevenue] = useState<number | null>(null);
   const [orderCount, setOrderCount] = useState<number | null>(null);
   const [avgSale, setAvgSale] = useState<number | null>(null);
+  // Revenue minus cost_at_sale over the same `range`, same filter, same
+  // report engine and same Promise.all as the Revenue KPI beside it —
+  // so the two always describe exactly the same set of sales.
+  const [profit, setProfit] = useState<number | null>(null);
   const [series, setSeries] = useState<{ label: string; value: number }[]>([]);
   const [topItems, setTopItems] = useState<{ label: string; value: number }[]>([]);
   const [paymentMix, setPaymentMix] = useState<{ label: string; value: number }[]>([]);
@@ -113,10 +117,12 @@ export default function AnalyticsSection() {
       // client-side sort needed, just slice to a chart-sized top N.
       runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'category', field: 'item_name', start: range.start, end: range.end }),
       runReport('sales', { agg: 'sum', measure: 'revenue', dimension: 'category', field: 'payment_method', start: range.start, end: range.end }),
+      runReport('sales', { agg: 'sum', measure: 'cost_at_sale', dimension: 'none', start: range.start, end: range.end }),
     ])
-      .then(([rev, count, avg, trend, items, payments]) => {
+      .then(([rev, count, avg, trend, items, payments, cost]) => {
         if (cancelled) return;
         setRevenue(rev.report?.[0]?.value ?? 0);
+        setProfit((rev.report?.[0]?.value ?? 0) - (cost.report?.[0]?.value ?? 0));
         setOrderCount(count.report?.[0]?.value ?? 0);
         setAvgSale(avg.report?.[0]?.value ?? 0);
         setSeries((trend.report ?? []).map((p: { label: string; value: number }) => ({ label: p.label, value: p.value })));
@@ -135,7 +141,7 @@ export default function AnalyticsSection() {
         // from the backend, nothing to substitute here.
         setPaymentMix((payments.report ?? []).map((p: { label: string; value: number }) => ({ label: p.label, value: p.value })));
       })
-      .catch(() => { if (!cancelled) { setRevenue(0); setOrderCount(0); setAvgSale(0); setSeries([]); setTopItems([]); setPaymentMix([]); } })
+      .catch(() => { if (!cancelled) { setRevenue(0); setProfit(0); setOrderCount(0); setAvgSale(0); setSeries([]); setTopItems([]); setPaymentMix([]); } })
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => { cancelled = true; };
@@ -159,6 +165,7 @@ export default function AnalyticsSection() {
         <KpiCard label={`Revenue — ${range.label}`} value={revenue} loading={loading} format="money" currency={currency} compact />
         <KpiCard label="Sales" value={orderCount} loading={loading} format="count" currency={currency} compact />
         <KpiCard label="Average sale" value={avgSale} loading={loading} format="money" currency={currency} compact />
+        <KpiCard label={`Profit — ${range.label}`} value={profit} loading={loading} format="money" currency={currency} compact />
       </div>
 
       {/* 180 → 260: the space these KPI tiles and the Dashboard-level
@@ -419,45 +426,40 @@ export default function AnalyticsSection() {
         ) : categoryProfit.length === 0 ? (
           <div style={{ color: 'var(--ink-soft)', fontSize: '0.85rem' }}>No categorized sales in this period yet.</div>
         ) : (
-          // Same scroll-once-it-doesn't-fit approach as "Top sellers"
-          // above, same reason: a real catalog can have more
-          // categories than a fixed-height card can show at a legible
-          // row height.
-          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-            <div style={{ width: '100%', height: Math.max(categoryProfit.length * 26, 150) }}>
+          // Upright columns (not horizontal rows) so this doesn't
+          // read as a second copy of "Top sellers" beside/above it.
+          // Same scroll-once-it-doesn't-fit approach as the revenue
+          // trend chart, just keyed to category count: each column
+          // keeps a legible 80px, and the chart grows past the card
+          // width (horizontal scroll) rather than squeezing names.
+          <div style={{ overflowX: 'auto', width: '100%', flex: 1, minHeight: 0 }}>
+            <div style={{ height: '100%', width: `max(100%, ${categoryProfit.length * 80}px)` }}>
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart
                   data={categoryProfit.map((c) => ({ label: c.category, value: c.profit_cents }))}
-                  layout="vertical"
-                  margin={{ top: 8, left: 8, right: 56, bottom: 4 }}
+                  margin={{ top: 26, right: 12, left: 4, bottom: 4 }}
                 >
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" horizontal={false} />
-                  <XAxis type="number" tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v) => formatMoney(v, currency)} />
-                  {/* Same interval={0} fix as "Top sellers" above, same
-                      bug: recharts was silently skipping some category
-                      tick labels at this row height (the "Beverages"/
-                      "Bakery" rows losing their names to an auto-thin
-                      guess while the bar and its value label still
-                      rendered fine) — forcing every tick to render. */}
-                  <YAxis type="category" dataKey="label" width={90} tick={{ fontSize: 10, fill: 'var(--ink-soft)' }} interval={0} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--paper-line)" />
+                  {/* interval={0}: force every category name to render
+                      — recharts otherwise silently thins ticks it
+                      guesses would overlap (the bug already fixed on
+                      "Top sellers"). */}
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: 'var(--ink-soft)' }} interval={0} />
+                  <YAxis tick={{ fontSize: 11, fill: 'var(--ink-soft)' }} tickFormatter={(v) => formatMoney(v, currency)} />
                   <Tooltip
                     contentStyle={{ background: 'var(--paper-card)', border: '1px solid var(--paper-line)', fontSize: '0.82rem' }}
                     formatter={(v) => [`${formatMoney(Math.abs(Number(v)), currency)} ${Number(v) >= 0 ? 'profit' : 'loss'}`, 'Result']}
                   />
-                  {/* Each category gets its own PALETTE color (was: a
-                      flat profit/loss two-tone) so it's easier to track
-                      one category across this chart and the pie above
-                      — a loss still overrides to red regardless of its
-                      palette slot, since sign is the one thing that has
-                      to read instantly here, before any color-matching
-                      to another chart. */}
-                  <Bar dataKey="value" radius={[0, 3, 3, 0]}>
+                  {/* Each category keeps its own PALETTE color; a loss
+                      still overrides to red, since sign has to read
+                      instantly. */}
+                  <Bar dataKey="value" radius={[3, 3, 0, 0]}>
                     {categoryProfit.map((c, i) => (
                       <Cell key={c.category} fill={c.profit_cents >= 0 ? PALETTE[i % PALETTE.length] : '#a15c5c'} />
                     ))}
                     <LabelList
                       dataKey="value"
-                      position="right"
+                      position="top"
                       formatter={(v: ReactNode) => formatMoney(Number(v), currency)}
                       style={{ fontSize: 10, fill: 'var(--ink-soft)' }}
                     />
