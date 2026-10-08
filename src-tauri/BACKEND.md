@@ -217,24 +217,29 @@ track of what matters in a pile of individual records.
 
 `src/ai_assistant.rs` — calls a real AI provider, grounding the system
 prompt in the context snapshot above so answers are based on the
-business's actual data, not general knowledge. **Supports three
-providers, chosen by the `AI_PROVIDER` env var:**
-- **`nvidia_nim` (default)** — genuinely free, no credit card, ~40
-  requests/min, OpenAI-compatible API. Serves DeepSeek, Llama, and 80+
-  other models. Get a key at https://build.nvidia.com. This is the
-  sensible default for a system built to be free until you're making
-  money.
-- **`gemini`** — Google's free tier (Flash / Flash-Lite models), no
-  credit card. Note: on the free tier, Google's terms allow using your
-  prompts to improve their models — worth flagging to a business owner
-  if the data is sensitive. Get a key at https://aistudio.google.com.
-- **`claude`** — paid, no free tier, included since it's Anthropic's own
-  model and may be worth it once the business is generating revenue.
+business's actual data, not general knowledge. **Six providers, one
+table (`PROVIDERS` in `ai_assistant.rs`):** NVIDIA NIM (default), Groq,
+OpenRouter and Gemini are free with no credit card; OpenAI and Claude are
+paid. NVIDIA, Groq, OpenRouter and OpenAI share one OpenAI-compatible
+request path.
 
-Without any key set, the default (`nvidia_nim`) returns a clear
-"not configured, here's how to get a free key" message — every other
-feature in the app keeps working regardless. See `.env.example` for the
-full list of variables.
+Provider model names are the least stable thing in the app, so none is
+assumed to stay alive:
+- each provider has an ordered list of candidate models; a retired model
+  (404/410), rate limit (429) or server error just moves to the next one;
+- a rejected key (401/403), billing block (402) or unreachable host skips
+  the rest of that provider's models (they would all fail the same way);
+- if a provider is exhausted, the next **free** provider that has a key
+  is tried; paid providers are never a silent backup;
+- the whole chain runs inside a 45s budget, so a bad day at one vendor
+  costs one slow answer, never a hang;
+- Admin → AI Settings can pin a model per provider; the answer shows
+  which provider/model actually replied (`source` in the ask response).
+
+Without any key set, the active provider returns a clear "not configured,
+here's how to get a free key" message — every other feature keeps working.
+See `.env.example` for the variables. Unit tests (`tests/ai_assistant_tests.rs`)
+run the failover chain against a local mock server.
 
 New endpoints:
 - `GET /ai/context` — the raw snapshot, with no LLM call. Doubles as a
@@ -883,8 +888,8 @@ malformed table behind the way this one did.
 8. **To actually use the AI assistant**: copy `.env.example` to `.env`
    (or export the variables directly), get a **free** key from
    https://build.nvidia.com (default provider, no credit card), and run
-   the server. Gemini and Claude are available as alternatives — see
-   `.env.example`.
+   the server. Add a second free key (e.g. Groq) as an automatic backup —
+   see `.env.example`.
 9. **CORS is wide open (`*`)** on the local API — acceptable since it
    only ever binds to `127.0.0.1` (not reachable from outside the
    device), but worth knowing if the binding address ever changes.

@@ -52,23 +52,6 @@ pub fn get(conn: &Connection, business_id: &str, key: &str) -> Option<String> {
     .ok()
 }
 
-/// The unfiltered version of get_all() — includes API keys. NEVER
-/// wire this to an unauthenticated or non-admin-gated route; it exists
-/// specifically for the already-admin-gated GET /ai/settings endpoint,
-/// which itself only ever reports whether a key is set, not its value.
-pub fn get_all_including_keys(conn: &Connection, business_id: &str) -> Result<Value> {
-    let mut stmt = conn.prepare("SELECT key, value FROM business_settings WHERE business_id = ?1")?;
-    let rows: Vec<(String, String)> = stmt
-        .query_map(params![business_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
-    let mut map = serde_json::Map::new();
-    for (k, v) in rows {
-        map.insert(k, json!(v));
-    }
-    Ok(Value::Object(map))
-}
-
 pub fn set(conn: &Connection, business_id: &str, key: &str, value: &str) -> Result<()> {
     let key = key.trim();
     if key.is_empty() {

@@ -1298,37 +1298,30 @@ type UserAccountLike = { id: string; username: string };
 
 // --------------------------------------------------------- AI Settings
 
-const PROVIDERS = [
-  { id: 'nvidia', label: 'NVIDIA NIM', free: true, url: 'https://build.nvidia.com', keyField: 'nvidia_key_set' as const },
-  { id: 'gemini', label: 'Google Gemini', free: true, url: 'https://aistudio.google.com', keyField: 'gemini_key_set' as const },
-  { id: 'openai', label: 'OpenAI', free: false, url: 'https://platform.openai.com/api-keys', keyField: 'openai_key_set' as const },
-  { id: 'claude', label: 'Claude (Anthropic)', free: false, url: 'https://console.anthropic.com', keyField: 'claude_key_set' as const },
-];
-
 function AiSettingsTab() {
   const [status, setStatus] = useState<AiSettingsStatus | null>(null);
-  const [provider, setProvider] = useState('nvidia');
-  const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
+  const [inputs, setInputs] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getAiSettings()
-      .then((s) => { setStatus(s); setProvider(s.provider); })
-      .catch(() => setError('Could not load AI settings'))
-      .finally(() => setLoading(false));
+      .then(setStatus)
+      .catch(() => setError('Could not load AI settings'));
   }, []);
 
-  async function saveProvider(id: string) {
-    setSaving('provider');
+  // One save path for everything on this screen: write a setting, reload
+  // the status from the server (so the screen shows what is really
+  // stored, not what we hope was), flash a confirmation.
+  async function save(slot: string, key: string, value: string, clearInput?: string) {
+    setSaving(slot);
     setError(null);
     try {
-      await setSetting('ai_provider', id);
-      setProvider(id);
-      setStatus((s) => (s ? { ...s, provider: id } : s));
-      setSaved('provider');
+      await setSetting(key, value);
+      if (clearInput) setInputs((i) => ({ ...i, [clearInput]: '' }));
+      setStatus(await getAiSettings());
+      setSaved(slot);
       setTimeout(() => setSaved(null), 2000);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save');
@@ -1337,26 +1330,7 @@ function AiSettingsTab() {
     }
   }
 
-  async function saveKey(providerId: string) {
-    const key = keyInputs[providerId]?.trim();
-    if (!key) return;
-    setSaving(providerId);
-    setError(null);
-    try {
-      await setSetting(`ai_${providerId}_api_key`, key);
-      setKeyInputs((k) => ({ ...k, [providerId]: '' }));
-      const fresh = await getAiSettings();
-      setStatus(fresh);
-      setSaved(providerId);
-      setTimeout(() => setSaved(null), 2000);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save key');
-    } finally {
-      setSaving(null);
-    }
-  }
-
-  if (loading) return <div style={{ color: 'var(--ink-soft)' }}>Loading…</div>;
+  if (!status) return error ? <ErrorBox error={error} /> : <div style={{ color: 'var(--ink-soft)' }}>Loading…</div>;
 
   return (
     <div>
@@ -1365,23 +1339,28 @@ function AiSettingsTab() {
         <ErrorBox error={error} />
 
         <label>Active provider</label>
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
-          {PROVIDERS.map((p) => (
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.6rem' }}>
+          {status.providers.map((p) => (
             <button
               key={p.id}
-              className={provider === p.id ? 'btn btn-stamp' : 'btn btn-outline'}
-              onClick={() => saveProvider(p.id)}
+              className={status.provider === p.id ? 'btn btn-stamp' : 'btn btn-outline'}
+              onClick={() => save('provider', 'ai_provider', p.id)}
               disabled={saving === 'provider'}
             >
               {p.label}{p.free && <span style={{ fontSize: '0.7rem', opacity: 0.8 }}> · free</span>}
             </button>
           ))}
         </div>
-        {saved === 'provider' && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.8rem' }}>Provider saved.</div>}
+        {saved === 'provider' && <div style={{ color: 'var(--ok)', fontSize: '0.85rem', marginBottom: '0.5rem' }}>Provider saved.</div>}
+        <div style={{ fontSize: '0.8rem', color: 'var(--ink-soft)' }}>
+          If the active provider fails, the assistant automatically tries your other free providers that have a key.
+          Paid providers are only used when selected here. Free tiers may log or train on prompts — avoid them for sensitive data.
+        </div>
       </div>
 
-      {PROVIDERS.map((p) => {
-        const isSet = status?.[p.keyField];
+      {status.providers.map((p) => {
+        const keyInput = inputs[`key:${p.id}`] ?? '';
+        const modelInput = inputs[`model:${p.id}`] ?? p.model;
         return (
           <div key={p.id} className="card" style={{ marginBottom: '0.8rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
@@ -1389,25 +1368,53 @@ function AiSettingsTab() {
                 {p.label}
                 {!p.free && <span style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', fontWeight: 400 }}> — paid, no ongoing free tier</span>}
               </div>
-              <span className={`status-pill ${isSet ? 'status-active' : 'status-inactive'}`}>
-                {isSet ? 'Key configured' : 'Not configured'}
+              <span className={`status-pill ${p.key_set ? 'status-active' : 'status-inactive'}`}>
+                {p.key_set ? 'Key configured' : 'Not configured'}
               </span>
             </div>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
+
+            <label>API key</label>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.6rem' }}>
               <input
                 type="password"
-                placeholder={isSet ? 'Enter a new key to replace it' : 'Paste your API key here'}
-                value={keyInputs[p.id] ?? ''}
-                onChange={(e) => setKeyInputs((k) => ({ ...k, [p.id]: e.target.value }))}
+                placeholder={p.key_set ? 'Enter a new key to replace it' : 'Paste your API key here'}
+                value={keyInput}
+                onChange={(e) => setInputs((i) => ({ ...i, [`key:${p.id}`]: e.target.value }))}
                 style={{ flex: 1 }}
               />
-              <button className="btn btn-outline" onClick={() => saveKey(p.id)} disabled={saving === p.id || !keyInputs[p.id]?.trim()}>
-                {saving === p.id ? 'Saving…' : 'Save'}
+              <button
+                className="btn btn-outline"
+                onClick={() => save(`key:${p.id}`, `ai_${p.id}_api_key`, keyInput.trim(), `key:${p.id}`)}
+                disabled={saving === `key:${p.id}` || !keyInput.trim()}
+              >
+                {saving === `key:${p.id}` ? 'Saving…' : 'Save'}
               </button>
             </div>
-            {saved === p.id && <div style={{ color: 'var(--ok)', fontSize: '0.82rem', marginTop: '0.4rem' }}>Key saved.</div>}
-            <a href={p.url} target="_blank" rel="noreferrer" style={{ fontSize: '0.78rem', display: 'inline-block', marginTop: '0.5rem' }}>
-              Get a {p.free ? 'free' : ''} key at {p.url.replace('https://', '')} →
+            {saved === `key:${p.id}` && <div style={{ color: 'var(--ok)', fontSize: '0.82rem', marginBottom: '0.5rem' }}>Key saved.</div>}
+
+            <label>Model (optional)</label>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <input
+                type="text"
+                placeholder={`Default: ${p.default_model}`}
+                value={modelInput}
+                onChange={(e) => setInputs((i) => ({ ...i, [`model:${p.id}`]: e.target.value }))}
+                style={{ flex: 1 }}
+              />
+              <button
+                className="btn btn-outline"
+                onClick={() => save(`model:${p.id}`, `ai_${p.id}_model`, modelInput.trim())}
+                disabled={saving === `model:${p.id}` || modelInput.trim() === p.model}
+              >
+                {saving === `model:${p.id}` ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+            {saved === `model:${p.id}` && <div style={{ color: 'var(--ok)', fontSize: '0.82rem', marginTop: '0.4rem' }}>Model saved.</div>}
+            <div style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', marginTop: '0.4rem' }}>
+              Leave blank to use the built-in list, which skips retired models automatically. Set one only to pin a specific model.
+            </div>
+            <a href={p.key_url} target="_blank" rel="noreferrer" style={{ fontSize: '0.78rem', display: 'inline-block', marginTop: '0.5rem' }}>
+              Get a {p.free ? 'free ' : ''}key at {p.key_url.replace('https://', '')} →
             </a>
           </div>
         );

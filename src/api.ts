@@ -838,13 +838,17 @@ export interface AiChatMessage {
   // the pulse is "how things stand right now," not a historical fact
   // about that exact past moment.
   business_pulse?: BusinessPulse;
+  // Same story as business_pulse: only on a freshly-returned answer.
+  // Names the provider/model that actually answered, so a backup
+  // answering is visible rather than silent.
+  source?: string;
 }
 export const listAiSessions = (): Promise<{ sessions: AiChatSession[] }> => request('/ai/sessions');
 export const createAiSession = (): Promise<{ session_id: string }> =>
   request('/ai/sessions', { method: 'POST' });
 export const getAiSessionMessages = (sessionId: string): Promise<{ messages: AiChatMessage[] }> =>
   request(`/ai/sessions/${sessionId}/messages`);
-export const askAiInSession = (sessionId: string, question: string): Promise<{ answer: string; session_id: string; business_pulse: BusinessPulse }> =>
+export const askAiInSession = (sessionId: string, question: string): Promise<{ answer: string; source: string; session_id: string; business_pulse: BusinessPulse }> =>
   request(`/ai/sessions/${sessionId}/ask`, { method: 'POST', body: JSON.stringify({ question }) });
 export const clearAiSession = (sessionId: string) =>
   request(`/ai/sessions/${sessionId}/clear`, { method: 'POST' });
@@ -912,12 +916,19 @@ export const getSettings = () => request('/settings');
 export const setSetting = (key: string, value: string) =>
   request('/settings', { method: 'PUT', body: JSON.stringify({ key, value }) });
 
+export interface AiProviderInfo {
+  id: string;
+  label: string;
+  free: boolean;
+  key_url: string;
+  key_set: boolean;
+  /** Admin's model override; empty means "use the built-in list". */
+  model: string;
+  default_model: string;
+}
 export interface AiSettingsStatus {
   provider: string;
-  nvidia_key_set: boolean;
-  gemini_key_set: boolean;
-  openai_key_set: boolean;
-  claude_key_set: boolean;
+  providers: AiProviderInfo[];
 }
 export const getAiSettings = (): Promise<AiSettingsStatus> => request('/ai/settings');
 

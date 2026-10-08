@@ -89,7 +89,7 @@ pub fn get_messages(conn: &Connection, business_id: &str, user_id: &str, session
 }
 
 /// Loads the session's prior turns as `ai_assistant::Turn`s, ready to
-/// hand straight to `ask_with_history` — the one place storage format
+/// hand straight to `ai_assistant::send` — the one place storage format
 /// and provider-call format meet. Ownership-checked like every other
 /// function here: without this, a forged session id in a request could
 /// read a DIFFERENT business's or user's private chat history straight

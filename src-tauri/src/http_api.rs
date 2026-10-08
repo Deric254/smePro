@@ -210,7 +210,7 @@ fn urlish_decode(s: &str) -> String {
 /// `route()` below uses for everything else. See ai_assistant.rs's
 /// `PreparedAiCall` doc comment for why: the outbound call to the AI
 /// provider can take several seconds (up to its own 30s timeout —
-/// see tls_agent()), and this server shares one `Mutex<Connection>`
+/// see TOTAL_BUDGET in ai_assistant.rs), and this server shares one `Mutex<Connection>`
 /// across every request. Holding that lock for the network call's
 /// whole duration would freeze every other endpoint, for every
 /// user, for that long — which is exactly what used to happen here.
@@ -294,11 +294,11 @@ fn handle_ai_ask(
     // history resent to the provider on every future turn (see
     // history_for_provider) — wasted tokens narrating stats the
     // model doesn't need to see again.
-    if let Err(e) = ai_chat::record_turn(&mut guard, &business_id, &user_id, &session_id, &question, &answer) {
+    if let Err(e) = ai_chat::record_turn(&mut guard, &business_id, &user_id, &session_id, &question, &answer.text) {
         return Some(json_err(400, &e.to_string()));
     }
     let pulse = crate::business_pulse::compute(&guard, &business_id, &user_id);
-    Some(ApiResponse::Json(200, json!({"answer": answer, "session_id": session_id, "business_pulse": pulse})))
+    Some(ApiResponse::Json(200, json!({"answer": answer.text, "source": answer.source, "session_id": session_id, "business_pulse": pulse})))
 }
 
 fn route(
@@ -928,34 +928,23 @@ fn route(
         let value = obj.get("value").and_then(Value::as_str).unwrap_or("");
         return match settings::set(conn, &business_id, key, value) {
             Ok(()) => {
-                let _ = audit::log(conn, &business_id, Some(&user_id), "_settings", "set", None, Some(&json!({"key": key, "value": value})));
+                // The audit trail is readable in the admin UI: never write a secret into it.
+                let logged_value = if key.ends_with("_api_key") { "[redacted]" } else { value };
+                let _ = audit::log(conn, &business_id, Some(&user_id), "_settings", "set", None, Some(&json!({"key": key, "value": logged_value})));
                 ApiResponse::Json(200, json!({"ok": true}))
             }
             Err(e) => json_err(400, &e.to_string()),
         };
     }
 
-    // GET /ai/settings — admin-only (unlike GET /settings above, which
-    // deliberately excludes API keys and stays open to every role).
-    // Returns which providers have a key configured, never the key
-    // itself — same "never show a raw secret back" discipline as any
-    // real settings screen. Saving still goes through the existing
-    // PUT /settings, already admin-gated, using keys like
-    // "ai_nvidia_api_key" — no separate write endpoint needed.
+    // GET /ai/settings — admin-only. The provider table (labels, defaults,
+    // which have a key) comes from ai_assistant.rs, the single source of
+    // truth; keys are never returned, only whether one is set. Saving a key
+    // or model goes through the existing admin-gated PUT /settings, using
+    // "ai_<provider>_api_key" / "ai_<provider>_model".
     if parts.as_slice() == ["ai", "settings"] && *method == Method::Get {
         if let Err(e) = rbac::require_admin_tier(conn, &user_id) { return json_err(403, &e.to_string()); }
-        let all = match settings::get_all_including_keys(conn, &business_id) {
-            Ok(v) => v,
-            Err(e) => return json_err(500, &e.to_string()),
-        };
-        let has = |k: &str| all.get(k).and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false);
-        return ApiResponse::Json(200, json!({
-            "provider": all.get("ai_provider").and_then(Value::as_str).unwrap_or("nvidia"),
-            "nvidia_key_set": has("ai_nvidia_api_key"),
-            "gemini_key_set": has("ai_gemini_api_key"),
-            "openai_key_set": has("ai_openai_api_key"),
-            "claude_key_set": has("ai_claude_api_key"),
-        }));
+        return ApiResponse::Json(200, ai_assistant::settings_view(conn, &business_id));
     }
 
     // GET /modules/{id}/import-template — a downloadable .xlsx with

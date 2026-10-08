@@ -145,7 +145,7 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
         setSessionId(activeSession);
       }
       const res = await askAiInSession(activeSession, q);
-      setMessages((m) => [...m, { role: 'ai', content: res.answer, created_at: new Date().toISOString(), business_pulse: res.business_pulse }]);
+      setMessages((m) => [...m, { role: 'ai', content: res.answer, created_at: new Date().toISOString(), business_pulse: res.business_pulse, source: res.source }]);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'Could not reach the assistant';
       setMessages((m) => [...m, { role: 'ai', content: msg, created_at: new Date().toISOString() }]);
@@ -233,6 +233,9 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
                 <div style={m.role === 'user' ? styles.bubbleUser : styles.bubbleAi}>
                   <MarkdownLite text={m.content} />
                 </div>
+                {m.role === 'ai' && m.source && (
+                  <div style={{ fontSize: '0.72rem', color: 'var(--ink-soft)', margin: '0.2rem 0 0.4rem 0.2rem' }}>via {m.source}</div>
+                )}
                 {m.role === 'ai' && m.business_pulse && <BusinessPulseCard pulse={m.business_pulse} />}
               </div>
             ))}
