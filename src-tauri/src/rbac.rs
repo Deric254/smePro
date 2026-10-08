@@ -11,8 +11,7 @@ pub const PERMISSION_DENIED_PREFIX: &str = "permission denied";
 /// Fetches the role name (not just role_id) for a user — the module
 /// permission system (`is_allowed`/`require` below) is keyed by
 /// module+action, but several endpoints in this app aren't about a
-/// specific module at all (activating the license, initiating a real
-/// payment, reconfiguring which modules exist, sending a paid SMS) —
+/// specific module at all (for example reconfiguring which modules exist) —
 /// those need a coarser "is this person the Owner" check instead.
 fn role_name(conn: &Connection, user_id: &str) -> Result<String> {
     conn.query_row(
@@ -26,9 +25,8 @@ fn role_name(conn: &Connection, user_id: &str) -> Result<String> {
 /// Requires the user's role to be exactly "Owner" — every business gets
 /// this built-in, undeletable system role automatically
 /// (`business_panel::create_business`). Used for actions that commit the
-/// business financially or structurally: activating/paying the license,
-/// initiating a real payment charge, and reconfiguring which modules are
-/// enabled. A Staff or Manager account being able to do any of these
+/// business structurally, such as reconfiguring which modules are
+/// enabled. A Staff or Manager account being able to do this
 /// was a real gap — RBAC existed for module data, but not for these.
 pub fn require_owner(conn: &Connection, user_id: &str) -> Result<()> {
     let role = role_name(conn, user_id)?;

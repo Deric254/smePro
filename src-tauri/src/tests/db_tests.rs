@@ -134,7 +134,7 @@ fn test_v40_index_migration_reaches_a_business_that_already_had_sales_enabled() 
         assert!(has_index(&conn, idx), "{idx} must exist after upgrading an install that already had these tables");
     }
     let version: i64 = conn.query_row("SELECT MAX(version) FROM _schema_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 41);
+    assert_eq!(version, 42);
 
     drop(conn);
     let _ = std::fs::remove_file(&path);

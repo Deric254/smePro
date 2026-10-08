@@ -36,8 +36,7 @@ pub struct ReleaseOption {
 /// Real, published (non-draft) releases for this repo, newest first —
 /// what an Owner picks a rollback target from. Owner-gated: this is
 /// app-version control, the same class of action `rbac::require_owner`
-/// already covers elsewhere (reconfiguring which modules exist,
-/// activating the license) — not a per-module data permission.
+/// already covers elsewhere (reconfiguring which modules exist) — not a per-module data permission.
 pub fn list_releases(conn: &Connection, user_id: &str) -> Result<Vec<ReleaseOption>> {
     crate::rbac::require_owner(conn, user_id)?;
 

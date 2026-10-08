@@ -277,3 +277,29 @@ fn test_v38_is_idempotent_when_rerun() {
     let mut conn = test_db(); // already fully migrated, including v38
     crate::db_migrations::run(&mut conn).expect("rerunning v38 against an already-migrated db must no-op");
 }
+
+/// v42 removes the dead licensing tables from an install that still has
+/// them, and a fresh install never creates them in the first place.
+#[test]
+fn v42_drops_dead_license_tables_and_fresh_install_has_none() {
+    let mut conn = test_db();
+    let count = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('licenses','vendor_device','vendor_license')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(count(&conn), 0, "fresh install must not create dead license tables");
+
+    conn.execute_batch(
+        "CREATE TABLE licenses (business_id TEXT PRIMARY KEY);
+         CREATE TABLE vendor_device (id INTEGER PRIMARY KEY);
+         CREATE TABLE vendor_license (id INTEGER PRIMARY KEY);",
+    )
+    .unwrap();
+    conn.execute("DELETE FROM _schema_version WHERE version >= 42", []).unwrap();
+    crate::db_migrations::run(&mut conn).expect("v42 must succeed");
+    assert_eq!(count(&conn), 0, "v42 must drop the legacy license tables");
+}

@@ -40,9 +40,6 @@ use std::sync::OnceLock;
 /// Maximum request body size: 10MB (prevents DoS via huge JSON).
 pub const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
-/// Maximum field length for text inputs (prevents DB bloat).
-pub const MAX_FIELD_LENGTH: usize = 10000;
-
 /// Session inactivity timeout: 24 hours (in seconds).
 pub const SESSION_TIMEOUT_SECS: i64 = 86400;
 

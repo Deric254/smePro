@@ -1,16 +1,14 @@
 # --- Frontend ---
 node_modules/
 dist/
-# Build artifacts from a specific verification pass (see VERIFICATION.md) —
-# not part of the documented release process (see RELEASE.md), same
-# category as dist/ above.
+# Local verification build output — not part of the release process
+# (see RELEASE.md), same category as dist/ above.
 dist_verified/
 release_binary/
 *.local
 
 # --- Rust / Tauri ---
 src-tauri/target/
-vendor-authority/target/
 
 # --- Tauri mobile (generated, regenerated fresh by CI/mobile-android.sh) ---
 src-tauri/gen/
@@ -19,7 +17,6 @@ src-tauri/gen/
 src-tauri/erp.db
 src-tauri/erp.db-*
 src-tauri/.env
-vendor-authority/vendor_authority.db
 
 # --- OS / editor cruft ---
 .DS_Store

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 41;
+const CURRENT_VERSION: i32 = 42;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -85,7 +85,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 39 { v39_purchasing_unit_cost_floor(conn)?; }
     if current < 40 { v40_sales_matching_indexes(conn)?; }
     if current < 41 { v41_stock_take_reasons(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 41, "bump this alongside the last `if current < N` check above");
+    if current < 42 { v42_drop_dead_license_tables(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 42, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2768,6 +2769,21 @@ fn v41_stock_take_reasons(conn: &mut Connection) -> Result<()> {
         tx.execute("ALTER TABLE stock_takes ADD COLUMN kind TEXT NOT NULL DEFAULT 'count'", [])?;
     }
     tx.execute("INSERT INTO _schema_version (version) VALUES (41)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Drops `licenses`, `vendor_device` and `vendor_license`: the
+/// licensing/payment feature they belonged to was removed from the app
+/// entirely (no module reads or writes them any more), but schema.sql
+/// kept creating them on every install. `IF EXISTS`, so a no-op on
+/// installs that never had them. Nothing in them is user business data.
+fn v42_drop_dead_license_tables(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    for table in ["licenses", "vendor_device", "vendor_license"] {
+        tx.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
+    }
+    tx.execute("INSERT INTO _schema_version (version) VALUES (42)", [])?;
     tx.commit()?;
     Ok(())
 }

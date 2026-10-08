@@ -91,8 +91,7 @@ pub fn create_user(
 
 /// Reassigns a user to a different role. Refuses to move the LAST active
 /// user out of the Owner role — a business with zero Owners is bricked
-/// (nobody left who can manage roles, activate licenses, or add more
-/// users), so this is checked directly rather than trusted to the
+/// (nobody left who can manage roles or add more users), so this is checked directly rather than trusted to the
 /// caller's judgment.
 /// THE BUG THIS FIXES: the role change and the session revocation used
 /// to be two separate auto-committed statements. If the process died,

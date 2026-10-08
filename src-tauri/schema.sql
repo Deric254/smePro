@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS roles (
     business_id     TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     name            TEXT NOT NULL,             -- e.g. "Owner", "Cashier", "Accountant" — fully user-defined, nothing beyond "Owner" itself is a fixed name anywhere in the engine
     is_system       INTEGER NOT NULL DEFAULT 0,-- system roles can't be deleted (e.g. Owner)
-    can_administer  INTEGER NOT NULL DEFAULT 0,-- grants the "admin tier" (payments history, settings, reference data) WITHOUT being Owner — a capability flag an Owner toggles per role, not a hardcoded role name like "Manager"
+    can_administer  INTEGER NOT NULL DEFAULT 0,-- grants the "admin tier" (settings, reference data) WITHOUT being Owner — a capability flag an Owner toggles per role, not a hardcoded role name like "Manager"
     UNIQUE(business_id, name)
 );
 
@@ -88,16 +88,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
     timestamp       TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS licenses (
-    business_id     TEXT PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
-    activated       INTEGER NOT NULL DEFAULT 0,
-    activation_date TEXT,
-    last_paid_date  TEXT,
-    next_due_date   TEXT,
-    status          TEXT NOT NULL DEFAULT 'inactive', -- inactive/active/grace/locked
-    license_token   TEXT
-);
-
 CREATE TABLE IF NOT EXISTS admin_recovery (
     business_id     TEXT PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
     admin_code_hash TEXT NOT NULL,
@@ -116,27 +106,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_audit_business_time ON audit_log(business_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_permissions_role ON permissions(role_id);
-
--- Vendor-issued license key redemption (see vendor_license.rs and the
--- separate vendor-authority/ service). This is a distinct mechanism from
--- the recurring payment license above — it's the classic "one key, one
--- device" model, where the vendor issues a key out-of-band and this
--- install redeems it exactly once. Both tables are single-row-per-device
--- (id = 1) by design: a device_id is generated once per install and
--- never changes, and a license key is bound to that device for the life
--- of the install. Actually created defensively at runtime by
--- vendor_license.rs (CREATE TABLE IF NOT EXISTS) — listed here purely so
--- the full schema is visible in one place, matching every other table.
-CREATE TABLE IF NOT EXISTS vendor_device (
-    id          INTEGER PRIMARY KEY CHECK (id = 1),
-    device_id   TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS vendor_license (
-    id            INTEGER PRIMARY KEY CHECK (id = 1),
-    key_id        TEXT NOT NULL,
-    device_id     TEXT NOT NULL,
-    activated_at  TEXT NOT NULL
-);
 
 -- User-addable master data — nothing here is a hardcoded enum in Rust.
 -- A module field can be given type "unit" or "currency" (see module.rs /

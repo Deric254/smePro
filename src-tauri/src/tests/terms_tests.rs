@@ -65,3 +65,14 @@ fn test_login_reports_terms_accepted_false_until_accepted_then_true() {
     // same login credentials still work normally once accepted.
     assert!(crate::auth::login(&conn, &biz, "owner", "password123").is_ok());
 }
+
+#[test]
+fn terms_text_has_no_placeholders_and_matches_version() {
+    let text = crate::terms::TERMS_TEXT;
+    assert!(!text.to_uppercase().contains("PLACEHOLDER"), "Terms text must ship with no placeholders");
+    assert!(!text.contains("TODO") && !text.contains("TBD"), "Terms text must ship finished");
+    assert!(
+        text.contains(&format!("Version: {}", crate::terms::TERMS_VERSION)),
+        "the Version line inside TERMS_TEXT must equal TERMS_VERSION"
+    );
+}

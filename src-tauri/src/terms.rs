@@ -21,17 +21,15 @@ use rusqlite::{params, Connection};
 /// user's prior acceptance stale — including ones who already
 /// accepted an older version — and routes them through the acceptance
 /// screen again on their very next login. See `accepted_current`.
-pub const TERMS_VERSION: &str = "2026-10-08-r3";
+pub const TERMS_VERSION: &str = "2026-10-08-r4";
 
-/// LEGAL TEXT — filled in with real values (legal name, jurisdiction,
-/// contact, warranty, liability), but NOT reviewed by a lawyer. One
-/// placeholder remains open: the data-protection paragraph (§5) still
-/// asks whether a separate Privacy Policy document is needed — that
-/// hasn't been answered yet. Do not treat this as final or
-/// production-ready until both of those are resolved.
+/// LEGAL TEXT — complete, with no open placeholders. It has not been
+/// reviewed by a lawyer; have one review it before commercial release.
+/// `terms_text_has_no_placeholders_and_matches_version` (terms_tests.rs)
+/// fails the build if a placeholder or a stale "Version:" line returns.
 pub const TERMS_TEXT: &str = r#"smePro Terms & Conditions
 
-Version: 2026-10-08-r3
+Version: 2026-10-08-r4
 
 These Terms & Conditions ("Terms") are an agreement between you and
 DericBI Ltd, a company registered in Kenya ("DericBI", "we", "us",
@@ -76,9 +74,17 @@ that business.
 5. Data protection
    Where the Kenyan Data Protection Act, 2019 applies to your use of
    smePro, DericBI will handle personal data processed by the app
-   consistently with it. [PLACEHOLDER: confirm any additional
-   data-protection commitments, and whether a separate Privacy Policy
-   document is also required.]
+   consistently with it. The personal data of your customers and
+   staff that you enter into smePro is held on your device and is not
+   sent to DericBI, except as described in section 4, in technical
+   error reports if crash reporting is enabled for your installation
+   (error details, app version and operating system), and where you
+   choose to share or export it yourself (for example by sharing an
+   invoice or receipt, or creating a backup). As the business using
+   smePro, you are responsible for having a lawful basis for the
+   personal data you record about your customers and staff. For any
+   question about this section, contact DericBI at the address in
+   section 11.
 
 6. Acceptable use
    You agree not to use smePro to store or process data you do not
