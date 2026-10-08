@@ -21,7 +21,7 @@ use rusqlite::{params, Connection};
 /// user's prior acceptance stale — including ones who already
 /// accepted an older version — and routes them through the acceptance
 /// screen again on their very next login. See `accepted_current`.
-pub const TERMS_VERSION: &str = "2026-09-19-r2";
+pub const TERMS_VERSION: &str = "2026-10-08-r3";
 
 /// LEGAL TEXT — filled in with real values (legal name, jurisdiction,
 /// contact, warranty, liability), but NOT reviewed by a lawyer. One
@@ -31,7 +31,7 @@ pub const TERMS_VERSION: &str = "2026-09-19-r2";
 /// production-ready until both of those are resolved.
 pub const TERMS_TEXT: &str = r#"smePro Terms & Conditions
 
-Version: 2026-09-19-r2
+Version: 2026-10-08-r3
 
 These Terms & Conditions ("Terms") are an agreement between you and
 DericBI Ltd, a company registered in Kenya ("DericBI", "we", "us",
@@ -60,11 +60,16 @@ that business.
 
 4. The AI assistant feature
    If you use smePro's AI assistant, the questions you type and
-   relevant business figures needed to answer them are sent to
-   Google's Gemini API to generate a response. On Gemini's free tier,
-   Google's own terms permit Google to use that data to improve their
-   services. Do not use the AI assistant to ask about information you
-   do not want processed under those terms. This is disclosed here
+   relevant business figures needed to answer them are sent over the
+   internet to a third-party AI provider chosen by your administrator
+   under Admin > AI Settings (for example NVIDIA, Groq, OpenRouter or
+   Google Gemini, or a paid provider such as OpenAI or Anthropic if
+   your administrator selects one). If that provider is unavailable,
+   the same data may be sent to another free provider your
+   administrator has configured. The free tiers of these services may
+   log that data or use it to improve their services, under their own
+   terms. Do not use the AI assistant to ask about information you do
+   not want processed under those terms. This is disclosed here
    because it is a real transfer of data outside smePro and outside
    DericBI's own systems, not a hypothetical one.
 
