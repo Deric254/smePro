@@ -73,6 +73,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Seconds, not a 15-minute failure at the packaging step: confirms
+      # only the app itself would ship (see scripts/check-binaries.sh).
+      - name: Check only the app binary ships
+        run: bash scripts/check-binaries.sh
+
       # Same system libraries the desktop (ubuntu-24.04) build already
       # installs, and for the same reason: this job now compiles the
       # real `tauri` crate too (via `cargo test --lib`, which builds
