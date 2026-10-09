@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.127"
+version = "0.1.128"
 edition = "2021"
 # Cargo would otherwise auto-register every file in src/bin/ as a shipped
 # binary (without the dev-tools guard below), and Tauri then cannot tell
