@@ -2,6 +2,12 @@
 name = "core_engine"
 version = "0.1.125"
 edition = "2021"
+# Cargo would otherwise auto-register every file in src/bin/ as a shipped
+# binary (without the dev-tools guard below), and Tauri then cannot tell
+# which binary is the app. Binaries are declared explicitly; sme-pro is
+# the one `tauri build` packages.
+autobins = false
+default-run = "sme-pro"
 
 [lib]
 name = "core_engine"

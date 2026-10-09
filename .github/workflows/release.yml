@@ -353,7 +353,7 @@ jobs:
           # files these jobs upload. Letting every matrix job
           # read-modify-write it concurrently is what caused intermittent
           # "Not Found - update-a-release-asset" failures.
-          uploadUpdaterJson: false
+          includeUpdaterJson: false
 
   # ------------------------------------------------------------------
   # Android: builds a real APK and attaches it to the SAME release
@@ -961,7 +961,7 @@ jobs:
 
       # latest.json is built exactly once, here, after every desktop job
       # has finished uploading its installers + .sig files. The desktop
-      # jobs run with uploadUpdaterJson: false, so nothing else ever
+      # jobs run with includeUpdaterJson: false, so nothing else ever
       # reads/deletes/re-uploads it concurrently (that read-modify-write
       # race is what produced "Not Found - update-a-release-asset").
       #
