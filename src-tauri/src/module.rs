@@ -385,6 +385,14 @@ impl ModuleDef {
                  ON module_sales(business_id, item_name);",
                 [],
             )?;
+            // Every dashboard chart, KPI and report filters sales by a
+            // created_at range — without this each one reads the whole
+            // sales history. Also asserted in db_migrations.rs v43.
+            tx.execute(
+                "CREATE INDEX IF NOT EXISTS idx_module_sales_business_created
+                 ON module_sales(business_id, created_at);",
+                [],
+            )?;
         }
 
         // Refunds-specific: refund.rs looks up "everything already

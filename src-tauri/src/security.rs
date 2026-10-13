@@ -46,7 +46,10 @@ pub const SESSION_TIMEOUT_SECS: i64 = 86400;
 /// Validates that a request body is within size limits.
 pub fn check_body_size(body: &[u8]) -> Result<()> {
     if body.len() > MAX_BODY_SIZE {
-        return Err(anyhow!("request body exceeds {} bytes", MAX_BODY_SIZE));
+        return Err(anyhow!(
+            "this request is too large (the limit is {} MB) — for an Excel import, split the file into smaller ones",
+            MAX_BODY_SIZE / (1024 * 1024)
+        ));
     }
     Ok(())
 }

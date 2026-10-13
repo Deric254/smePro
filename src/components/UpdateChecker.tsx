@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import DraggableBanner from './DraggableBanner';
+import { afterStartup } from '../lib/startup';
 
 // Only resolves inside the Tauri app — a no-op in a plain browser.
 export default function UpdateChecker() {
@@ -16,11 +17,15 @@ export default function UpdateChecker() {
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
+        // No network call until the app has finished starting up.
+        await afterStartup;
+        if (cancelled) return;
         const { check } = await import('@tauri-apps/plugin-updater');
         const update = await check();
-        if (update) {
+        if (update && !cancelled) {
           setAvailable({ version: update.version, body: update.body });
         }
       } catch {
@@ -29,6 +34,7 @@ export default function UpdateChecker() {
         // should interrupt normal use of the app.
       }
     })();
+    return () => { cancelled = true; };
   }, []);
 
   async function handleInstall() {

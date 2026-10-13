@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { afterStartup } from '../lib/startup';
 import DraggableBanner from './DraggableBanner';
 
 // Android-only auto-update path (desktop uses UpdateChecker.tsx +
@@ -35,8 +36,12 @@ export default function AndroidUpdateChecker() {
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
+        // No network call until the app has finished starting up.
+        await afterStartup;
+        if (cancelled) return;
         const { platform } = await import('@tauri-apps/plugin-os');
         if (platform() !== 'android') return;
         setIsAndroid(true);
@@ -51,7 +56,7 @@ export default function AndroidUpdateChecker() {
         if (!res.ok) return; // no releases yet, or offline — fail silently, not an error state
         const info: ReleaseInfo = await res.json();
 
-        if (isNewer(info.tag_name, currentVersion) && info.assets.some((a) => a.name.endsWith('.apk'))) {
+        if (!cancelled && isNewer(info.tag_name, currentVersion) && info.assets.some((a) => a.name.endsWith('.apk'))) {
           setRelease(info);
         }
       } catch {
@@ -60,6 +65,7 @@ export default function AndroidUpdateChecker() {
         // interrupt normal use of the app.
       }
     })();
+    return () => { cancelled = true; };
   }, []);
 
   async function handleUpdate() {

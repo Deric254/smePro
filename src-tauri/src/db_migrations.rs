@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-const CURRENT_VERSION: i32 = 42;
+pub(crate) const CURRENT_VERSION: i32 = 43;
 
 pub fn run(conn: &mut Connection) -> Result<()> {
     conn.execute(
@@ -86,7 +86,8 @@ pub fn run(conn: &mut Connection) -> Result<()> {
     if current < 40 { v40_sales_matching_indexes(conn)?; }
     if current < 41 { v41_stock_take_reasons(conn)?; }
     if current < 42 { v42_drop_dead_license_tables(conn)?; }
-    debug_assert_eq!(CURRENT_VERSION, 42, "bump this alongside the last `if current < N` check above");
+    if current < 43 { v43_sales_date_index(conn)?; }
+    debug_assert_eq!(CURRENT_VERSION, 43, "bump this alongside the last `if current < N` check above");
 
     Ok(())
 }
@@ -2784,6 +2785,35 @@ fn v42_drop_dead_license_tables(conn: &mut Connection) -> Result<()> {
         tx.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
     }
     tx.execute("INSERT INTO _schema_version (version) VALUES (42)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Adds the missing date index on sales. Every dashboard chart, KPI and
+/// report filters sales by a `created_at` range, but the only indexes
+/// were on (business_id, deleted_at) and the name/phone/order lookups, so
+/// each range query read every sale the business had ever made. At
+/// ~1 million sales that was 0.4–14 s per report (the 14 s ones walked
+/// the item-name index and fetched each row at random) and the Dashboard
+/// fires about a dozen of them at once. With this index a range query
+/// reads only the rows in the range. Additive and idempotent; a no-op
+/// when the Sales module has never been enabled (`module::create_table`
+/// creates the same index for a table made later).
+fn v43_sales_date_index(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    let has_sales: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='module_sales'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_sales == 1 {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_module_sales_business_created
+             ON module_sales(business_id, created_at)",
+            [],
+        )?;
+    }
+    tx.execute("INSERT INTO _schema_version (version) VALUES (43)", [])?;
     tx.commit()?;
     Ok(())
 }

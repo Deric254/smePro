@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Response, Server};
 
@@ -13,6 +14,9 @@ enum ApiResponse {
     Json(u16, Value),
     Xlsx(u16, Vec<u8>, String), // status, bytes, filename
     Image(u16, Vec<u8>, String), // status, bytes, mime type
+    /// A large file streamed from disk, never held in memory: status,
+    /// body, exact length, download filename. Used by backups.
+    Download(u16, Box<dyn std::io::Read + Send>, usize, String),
 }
 
 pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
@@ -62,26 +66,39 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
                 return;
             }
 
-            let mut body_str = String::new();
-            let _ = request.as_reader().read_to_string(&mut body_str);
+            let bearer = header_value(request.headers(), "Authorization")
+                .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
 
-            if let Err(e) = crate::security::check_body_size(body_str.as_bytes()) {
-                let response = Response::from_string(json!({"error": e.to_string()}).to_string()).with_status_code(413);
-                let response = cors_headers().into_iter().fold(response, |r, h| r.with_header(h));
-                let _ = request.respond(response);
+            // Restoring a backup streams the upload straight to disk, so
+            // it is handled before the body below is read into memory
+            // (that read, and the 10 MB limit that goes with it, are for
+            // ordinary JSON requests).
+            let path_only = url.split('?').next().unwrap_or("");
+            if method == Method::Post && (path_only == "/admin/restore" || path_only == "/setup/restore") {
+                let response = handle_restore(&conn, path_only, &mut request, bearer.as_deref());
+                respond(request, response);
                 return;
             }
 
-            let bearer = header_value(request.headers(), "Authorization")
-                .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
+            // Read at most one byte past the limit: enough to know it was
+            // exceeded without first buffering an arbitrarily large body.
+            let mut body_str = String::new();
+            let _ = request.as_reader().take(crate::security::MAX_BODY_SIZE as u64 + 1).read_to_string(&mut body_str);
+
+            if let Err(e) = crate::security::check_body_size(body_str.as_bytes()) {
+                respond(request, ApiResponse::Json(413, json!({"error": e.to_string()})));
+                return;
+            }
+
             let business_id_header = header_value(request.headers(), "X-Business-Id");
 
-            // AI ask routes get their own handler with fine-grained
-            // locking (see handle_ai_ask's doc comment) — checked
-            // before the general single-lock path below, and only
-            // for those two specific routes; everything else falls
-            // through unchanged.
-            let ai_response = handle_ai_ask(&conn, &method, &url, &body_str, bearer.as_deref());
+            // AI ask and backup routes get their own handlers with
+            // fine-grained locking (see handle_ai_ask's doc comment) —
+            // checked before the general single-lock path below, and only
+            // for those specific routes; everything else falls through
+            // unchanged.
+            let special_response = handle_ai_ask(&conn, &method, &url, &body_str, bearer.as_deref())
+                .or_else(|| handle_backup(&conn, &method, &url, &body_str, bearer.as_deref()));
 
             // std::panic::catch_unwind, not a bare call — this is the
             // actual fix for the deeper problem the Mutex recovery above
@@ -105,7 +122,7 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
             // for the next request, which is exactly why the Mutex
             // recovery above (poisoned.into_inner()) is also correct
             // rather than a workaround.
-            let response = match ai_response {
+            let response = match special_response {
                 Some(r) => r,
                 None => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut conn_guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -116,36 +133,51 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
                     ApiResponse::Json(500, json!({"error": "internal server error"}))
                 }),
             };
-
-            let http_response = match response {
-                ApiResponse::Json(status, payload) => {
-                    let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-                    Response::from_string(payload.to_string()).with_status_code(status).with_header(header)
-                }
-                ApiResponse::Xlsx(status, bytes, filename) => {
-                    let ctype = Header::from_bytes(
-                        &b"Content-Type"[..],
-                        &b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"[..],
-                    ).unwrap();
-                    let disposition = Header::from_bytes(
-                        &b"Content-Disposition"[..],
-                        format!("attachment; filename=\"{filename}\"").as_bytes(),
-                    ).unwrap();
-                    Response::from_data(bytes).with_status_code(status).with_header(ctype).with_header(disposition)
-                }
-                ApiResponse::Image(status, bytes, mime) => {
-                    let ctype = Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap();
-                    Response::from_data(bytes).with_status_code(status).with_header(ctype)
-                }
-            };
-            let http_response = cors_headers().into_iter().fold(http_response, |r, h| r.with_header(h));
-            let http_response = crate::security::security_headers().into_iter().fold(http_response, |r, (name, value)| {
-                r.with_header(Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap())
-            });
-            let _ = request.respond(http_response);
+            respond(request, response);
         });
     }
     Ok(())
+}
+
+/// Adds the CORS and security headers every response carries and sends it.
+fn send<R: std::io::Read>(request: tiny_http::Request, response: Response<R>) {
+    let response = cors_headers().into_iter().fold(response, |r, h| r.with_header(h));
+    let response = crate::security::security_headers().into_iter().fold(response, |r, (name, value)| {
+        r.with_header(Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap())
+    });
+    let _ = request.respond(response);
+}
+
+fn respond(request: tiny_http::Request, response: ApiResponse) {
+    match response {
+        ApiResponse::Json(status, payload) => {
+            let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+            send(request, Response::from_string(payload.to_string()).with_status_code(status).with_header(header));
+        }
+        ApiResponse::Xlsx(status, bytes, filename) => {
+            let ctype = Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"[..],
+            ).unwrap();
+            let disposition = Header::from_bytes(
+                &b"Content-Disposition"[..],
+                format!("attachment; filename=\"{filename}\"").as_bytes(),
+            ).unwrap();
+            send(request, Response::from_data(bytes).with_status_code(status).with_header(ctype).with_header(disposition));
+        }
+        ApiResponse::Image(status, bytes, mime) => {
+            let ctype = Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap();
+            send(request, Response::from_data(bytes).with_status_code(status).with_header(ctype));
+        }
+        ApiResponse::Download(status, body, len, filename) => {
+            let ctype = Header::from_bytes(&b"Content-Type"[..], &b"application/octet-stream"[..]).unwrap();
+            let disposition = Header::from_bytes(
+                &b"Content-Disposition"[..],
+                format!("attachment; filename=\"{filename}\"").as_bytes(),
+            ).unwrap();
+            send(request, Response::new(tiny_http::StatusCode(status), vec![ctype, disposition], body, Some(len), None));
+        }
+    }
 }
 
 /// CORS is wide-open (`*`). The app binds this API to 127.0.0.1 only
@@ -159,7 +191,7 @@ fn cors_headers() -> Vec<Header> {
     vec![
         Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
         Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, PUT, DELETE, OPTIONS"[..]).unwrap(),
-        Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type, Authorization, X-Business-Id"[..]).unwrap(),
+        Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type, Authorization, X-Business-Id, X-Backup-Passphrase"[..]).unwrap(),
     ]
 }
 
@@ -203,6 +235,144 @@ fn urlish_decode(s: &str) -> String {
         }
     }
     out
+}
+
+/// Handles `POST /admin/backup` outside the single whole-request lock
+/// `route()` uses: copying the database can take a long time on a large
+/// business, and every other request, from every other user, queues on
+/// that lock. The lock is held only to check who is asking and to write
+/// the audit entry; the copy itself runs on its own connection (see
+/// backup.rs) and the file is streamed back, never held in memory.
+fn handle_backup(
+    conn: &Arc<Mutex<Connection>>,
+    method: &Method,
+    url: &str,
+    body: &str,
+    bearer: Option<&str>,
+) -> Option<ApiResponse> {
+    if *method != Method::Post || url.split('?').next() != Some("/admin/backup") {
+        return None;
+    }
+    let token = match bearer {
+        Some(t) => t,
+        None => return Some(json_err(401, "missing Authorization: Bearer <token>")),
+    };
+    let passphrase = match json_body(body).and_then(|o| o.get("passphrase").and_then(Value::as_str).map(String::from)) {
+        Some(p) => p,
+        None => return Some(json_err(400, "a passphrase is required to create a backup")),
+    };
+
+    let (user_id, business_id, db_path) = {
+        let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match crate::security::check_session_expired(&guard, token) {
+            Ok(true) => return Some(json_err(401, "session expired due to inactivity, please log in again")),
+            Ok(false) => {}
+            Err(e) => return Some(json_err(500, &e.to_string())),
+        }
+        let (user_id, business_id) = match auth::current_user(&guard, token) {
+            Ok(pair) => pair,
+            Err(e) => return Some(json_err(401, &e.to_string())),
+        };
+        if let Err(e) = rbac::require_owner(&guard, &user_id) {
+            return Some(json_err(403, &e.to_string()));
+        }
+        match backup::db_file_path(&guard) {
+            Ok(path) => (user_id, business_id, path),
+            Err(e) => return Some(json_err(500, &e.to_string())),
+        }
+    };
+
+    let file = match backup::create_backup(&db_path, &passphrase) {
+        Ok(f) => f,
+        Err(e) => return Some(json_err(500, &e.to_string())),
+    };
+    let len = match usize::try_from(file.total_len()) {
+        Ok(l) => l,
+        Err(_) => return Some(json_err(500, "this database is too large to back up on this device")),
+    };
+    let reader = match file.into_reader() {
+        Ok(r) => r,
+        Err(e) => return Some(json_err(500, &e.to_string())),
+    };
+    {
+        let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = audit::log(&guard, &business_id, Some(&user_id), "_backup", "create", None, None);
+    }
+    let filename = format!("sme-pro-backup-{}.smebak", chrono::Local::now().format("%Y-%m-%d"));
+    Some(ApiResponse::Download(200, Box::new(reader), len, filename))
+}
+
+/// Handles `POST /admin/restore` (Owner, from inside the app) and
+/// `POST /setup/restore` (a fresh install with no business yet — the real
+/// disaster-recovery path: a dead drive leaves nothing to log into, so
+/// this must work before any account exists, and closes the instant a
+/// business does). The request body IS the backup file, streamed to disk
+/// as it arrives — see backup.rs — and the passphrase travels in the
+/// percent-encoded `X-Backup-Passphrase` header.
+///
+/// What actually gates the unauthenticated setup route from being a
+/// free-for-all: the payload must be a backup that decrypts with the
+/// passphrase and is shaped like a real SME Pro database — only someone
+/// who actually has the backup file could produce that.
+fn handle_restore(
+    conn: &Arc<Mutex<Connection>>,
+    path: &str,
+    request: &mut tiny_http::Request,
+    bearer: Option<&str>,
+) -> ApiResponse {
+    let passphrase = match header_value(request.headers(), "X-Backup-Passphrase").map(|v| backup::decode_passphrase_header(&v)) {
+        Some(Ok(p)) => p,
+        Some(Err(e)) => return json_err(400, &e.to_string()),
+        None => return json_err(400, "the backup passphrase is required"),
+    };
+
+    let (audit_who, db_path) = {
+        let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let who = if path == "/admin/restore" {
+            let token = match bearer {
+                Some(t) => t,
+                None => return json_err(401, "missing Authorization: Bearer <token>"),
+            };
+            match crate::security::check_session_expired(&guard, token) {
+                Ok(true) => return json_err(401, "session expired due to inactivity, please log in again"),
+                Ok(false) => {}
+                Err(e) => return json_err(500, &e.to_string()),
+            }
+            let (user_id, business_id) = match auth::current_user(&guard, token) {
+                Ok(pair) => pair,
+                Err(e) => return json_err(401, &e.to_string()),
+            };
+            if let Err(e) = rbac::require_owner(&guard, &user_id) {
+                return json_err(403, &e.to_string());
+            }
+            Some((user_id, business_id))
+        } else {
+            match crate::business_panel::any_business_exists(&guard) {
+                Ok(true) => return json_err(409, "this install already has a business set up — use Admin \u{2192} Backup to restore from within the app instead"),
+                Ok(false) => {}
+                Err(e) => return json_err(500, &e.to_string()),
+            }
+            None
+        };
+        match backup::db_file_path(&guard) {
+            Ok(db_path) => (who, db_path),
+            Err(e) => return json_err(500, &e.to_string()),
+        }
+    };
+
+    let body_len = request.body_length();
+    let reader = request.as_reader();
+    if let Err(e) = backup::stage_restore(&db_path, reader, body_len, &passphrase) {
+        // Read the rest of the upload so the client gets this message
+        // instead of a dropped connection.
+        let _ = std::io::copy(reader, &mut std::io::sink());
+        return json_err(400, &e.to_string());
+    }
+    if let Some((user_id, business_id)) = audit_who {
+        let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = audit::log(&guard, &business_id, Some(&user_id), "_backup", "restore_staged", None, None);
+    }
+    ApiResponse::Json(200, json!({"staged": true, "message": "Restore staged. Restart the app to complete it."}))
 }
 
 /// Handles the AI-ask route (`POST /ai/sessions/{id}/ask`) with
@@ -505,38 +675,6 @@ fn route(
         }));
     }
 
-    // POST /setup/restore — the actual disaster-recovery path, not just
-    // the "I'm already logged in and want to roll back" one that
-    // /admin/restore below covers. A REAL disaster (dead hard drive,
-    // wiped machine, fresh reinstall) leaves nothing to log into —
-    // there's no business, no user, no session to authenticate with.
-    // Without this, the backup/restore system this app already has
-    // would be completely unreachable at the exact moment it's needed
-    // most. Guarded the same way create-business is: only reachable
-    // before any business exists on this install, closed off the
-    // instant one does (same 409 pattern) so it can't be replayed
-    // against a live, already-set-up install without authentication.
-    // What actually gates this from being a free-for-all: the restore
-    // payload itself must contain a backup that decrypts correctly and
-    // is shaped like a real SME Pro database (validated inside
-    // backup::stage_restore) — only someone who actually has your
-    // backup file could produce that.
-    if parts.as_slice() == ["setup", "restore"] && *method == Method::Post {
-        match crate::business_panel::any_business_exists(conn) {
-            Ok(true) => return json_err(409, "this install already has a business set up — use Admin \u{2192} Backup to restore from within the app instead"),
-            Ok(false) => {}
-            Err(e) => return json_err(500, &e.to_string()),
-        }
-        let input: backup::RestoreInput = match serde_json::from_str(body) {
-            Ok(v) => v,
-            Err(_) => return json_err(400, "invalid restore payload"),
-        };
-        return match backup::stage_restore(conn, input) {
-            Ok(()) => ApiResponse::Json(200, json!({"staged": true, "message": "Restore staged. Restart the app to complete it."})),
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-
     if parts.as_slice() == ["auth", "login"] && *method == Method::Post {
         let biz = match business_id_header { Some(b) => b, None => return json_err(400, "X-Business-Id header required") };
         let obj = match json_body(body) { Some(o) => o, None => return json_err(400, "body must be JSON with username/password") };
@@ -684,39 +822,6 @@ fn route(
             Err(e) => json_err(500, &e.to_string()),
         };
     }
-    // ---- Backup & restore — Owner-only, real disaster recovery. ----
-    if parts.as_slice() == ["admin", "backup"] && *method == Method::Post {
-        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
-        let passphrase = match json_body(body).and_then(|o| o.get("passphrase").and_then(|v| v.as_str()).map(String::from)) {
-            Some(p) => p,
-            None => return json_err(400, "a passphrase is required to create a backup"),
-        };
-        return match backup::create_backup(conn, &passphrase) {
-            Ok(data) => {
-                let _ = audit::log(conn, &business_id, Some(&user_id), "_backup", "create", None, None);
-                match serde_json::to_value(&data) {
-                    Ok(v) => ApiResponse::Json(200, v),
-                    Err(e) => json_err(500, &e.to_string()),
-                }
-            }
-            Err(e) => json_err(500, &e.to_string()),
-        };
-    }
-    if parts.as_slice() == ["admin", "restore"] && *method == Method::Post {
-        if let Err(e) = rbac::require_owner(conn, &user_id) { return json_err(403, &e.to_string()); }
-        let input: backup::RestoreInput = match serde_json::from_str(body) {
-            Ok(v) => v,
-            Err(_) => return json_err(400, "invalid restore payload"),
-        };
-        return match backup::stage_restore(conn, input) {
-            Ok(()) => {
-                let _ = audit::log(conn, &business_id, Some(&user_id), "_backup", "restore_staged", None, None);
-                ApiResponse::Json(200, json!({"staged": true, "message": "Restore staged. Restart the app to complete it."}))
-            }
-            Err(e) => json_err(400, &e.to_string()),
-        };
-    }
-
     if parts.as_slice() == ["business"] && *method == Method::Get {
         let result: rusqlite::Result<(String, String, Option<String>, Option<String>)> = conn.query_row(
             "SELECT name, currency, logo_path, slogan FROM businesses WHERE id = ?1",

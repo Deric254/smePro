@@ -26,20 +26,22 @@ import { ApiError } from '../api';
 // blindly would only hide a real problem for a few extra seconds
 // instead of fixing anything, so it's rethrown immediately instead.
 //
-// BUDGET: the original 5 attempts (400/800/1200/1600ms) gave the server
-// only ~4 seconds to come up. That is enough on an idle machine but not
+// BUDGET: the server needs to be given up to ~19 seconds to come up —
 // when the CPU, disk or RAM is saturated (or antivirus is scanning the
-// freshly launched binary): opening the encrypted database can then take
-// longer than that, every retry was spent before the listener existed,
-// and the UI landed permanently on "Could not load modules". The delay
-// still grows per attempt but is capped, giving ~19 seconds in total —
-// a genuinely dead server is still reported, just not mistaken for a
-// slow one. A server that is up costs nothing: the first attempt wins.
+// freshly launched binary), opening the encrypted database can take far
+// longer than on an idle machine, and an early give-up landed
+// permanently on "Could not load modules". Polling is frequent (100 ms,
+// growing to a 400 ms cap) because the delay is also dead time the user
+// waits through: with the old 400 ms–1.5 s steps, a server that came up
+// just after an attempt failed sat unused for up to 1.5 s before the
+// next try. A server that is up costs nothing: the first attempt wins. A
+// genuinely dead server is still reported, just not mistaken for a slow
+// one.
 export async function retryOnConnectionFailure<T>(
   fn: () => Promise<T>,
-  attempts = 15,
-  delayMs = 400,
-  maxDelayMs = 1500,
+  attempts = 50,
+  delayMs = 100,
+  maxDelayMs = 400,
 ): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {

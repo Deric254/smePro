@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { createBusiness, setSession, clearSession, logout, restoreBackupFreshInstall, getTerms, acceptTerms, ApiError } from '../api';
+import { createBusiness, setSession, clearSession, logout, restoreBackupFreshInstall, inspectBackupFile, getTerms, acceptTerms, ApiError } from '../api';
 import { login } from '../api';
 import { parseBackendTimestamp } from '../lib/date';
 
@@ -18,7 +18,7 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const [restoreFile, setRestoreFile] = useState<{ database_base64: string; wrapped_key_base64: string; created_at?: string; name: string } | null>(null);
+  const [restoreFile, setRestoreFile] = useState<{ file: File; created_at?: string } | null>(null);
   const [restorePassphrase, setRestorePassphrase] = useState('');
   const [restoreConfirmText, setRestoreConfirmText] = useState('');
   const [restoreStaged, setRestoreStaged] = useState(false);
@@ -61,20 +61,15 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
     setRestoreConfirmText('');
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(reader.result as string);
-        if (!parsed.database_base64 || !parsed.wrapped_key_base64) {
+    inspectBackupFile(file)
+      .then((info) => {
+        if (!info) {
           setError('This does not look like a valid SME Pro backup file.');
           return;
         }
-        setRestoreFile({ ...parsed, name: file.name });
-      } catch {
-        setError('Could not read this file — it may be corrupted or not a valid backup.');
-      }
-    };
-    reader.readAsText(file);
+        setRestoreFile({ file, created_at: info.createdAt });
+      })
+      .catch(() => setError('Could not read this file — it may be corrupted or not a valid backup.'));
   }
 
   async function handleRestoreSubmit() {
@@ -82,7 +77,7 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
     setLoading(true);
     setError(null);
     try {
-      await restoreBackupFreshInstall({ database_base64: restoreFile.database_base64, wrapped_key_base64: restoreFile.wrapped_key_base64, passphrase: restorePassphrase });
+      await restoreBackupFreshInstall(restoreFile.file, restorePassphrase);
       setRestoreStaged(true);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not restore this backup');
@@ -244,11 +239,11 @@ export default function FirstRunSetup({ onComplete }: { onComplete: () => void }
 
             {!restoreStaged ? (
               <>
-                <input type="file" accept=".json,application/json" onChange={handleRestoreFileSelect} />
+                <input type="file" accept=".smebak,.json" onChange={handleRestoreFileSelect} />
                 {restoreFile && (
                   <div style={styles.restorePreview}>
                     <div style={{ fontSize: '0.85rem' }}>
-                      <strong>{restoreFile.name}</strong>
+                      <strong>{restoreFile.file.name}</strong>
                       {restoreFile.created_at && (
                         <span style={{ color: 'var(--ink-soft)' }}> — backed up {parseBackendTimestamp(restoreFile.created_at).toLocaleString()}</span>
                       )}
