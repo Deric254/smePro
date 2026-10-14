@@ -66,6 +66,7 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
                 return;
             }
 
+<<<<<<< HEAD
             // Licence gate (desktop builds; see licensing.rs). The local API is
             // the real gate: an unlicensed copy gets nothing from it, whatever
             // the window shows. Only the three /licence/* routes the
@@ -111,6 +112,32 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
                 return;
             }
 
+=======
+            let bearer = header_value(request.headers(), "Authorization")
+                .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
+
+            // Restoring a backup streams the upload straight to disk, so
+            // it is handled before the body below is read into memory
+            // (that read, and the 10 MB limit that goes with it, are for
+            // ordinary JSON requests).
+            let path_only = url.split('?').next().unwrap_or("");
+            if method == Method::Post && (path_only == "/admin/restore" || path_only == "/setup/restore") {
+                let response = handle_restore(&conn, path_only, &mut request, bearer.as_deref());
+                respond(request, response);
+                return;
+            }
+
+            // Read at most one byte past the limit: enough to know it was
+            // exceeded without first buffering an arbitrarily large body.
+            let mut body_str = String::new();
+            let _ = request.as_reader().take(crate::security::MAX_BODY_SIZE as u64 + 1).read_to_string(&mut body_str);
+
+            if let Err(e) = crate::security::check_body_size(body_str.as_bytes()) {
+                respond(request, ApiResponse::Json(413, json!({"error": e.to_string()})));
+                return;
+            }
+
+>>>>>>> f4818302151fdd0c328f936d7f20fb03d8c86616
             let business_id_header = header_value(request.headers(), "X-Business-Id");
 
             // AI ask and backup routes get their own handlers with
