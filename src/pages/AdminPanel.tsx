@@ -6,7 +6,7 @@ import {
   listCurrencies, createCurrency, deleteCurrency,
   getSettings, setSetting,
   getAiSettings,
-  createBackup, restoreBackup,
+  createBackup, restoreBackup, inspectBackupFile,
   getAuditLog,
   exportAuditLog,
   getStockMovements,
@@ -1026,7 +1026,7 @@ function BackupTab() {
   const [downloaded, setDownloaded] = useState(false);
   const [backupPassphrase, setBackupPassphrase] = useState('');
 
-  const [restoreFile, setRestoreFile] = useState<{ database_base64: string; wrapped_key_base64: string; created_at?: string; name: string } | null>(null);
+  const [restoreFile, setRestoreFile] = useState<{ file: File; created_at?: string } | null>(null);
   const [restorePassphrase, setRestorePassphrase] = useState('');
   const [confirmText, setConfirmText] = useState('');
   const [restoring, setRestoring] = useState(false);
@@ -1038,13 +1038,11 @@ function BackupTab() {
     setError(null);
     setDownloaded(false);
     try {
-      const data = await createBackup(backupPassphrase);
-      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      const blob = await createBackup(backupPassphrase);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      const dateStamp = parseBackendTimestamp(data.created_at).toISOString().slice(0, 10);
       a.href = url;
-      a.download = `sme-pro-backup-${dateStamp}.json`;
+      a.download = `sme-pro-backup-${new Date().toISOString().slice(0, 10)}.smebak`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1065,20 +1063,15 @@ function BackupTab() {
     setRestorePassphrase('');
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(reader.result as string);
-        if (!parsed.database_base64 || !parsed.wrapped_key_base64) {
+    inspectBackupFile(file)
+      .then((info) => {
+        if (!info) {
           setRestoreError('This does not look like a valid SME Pro backup file.');
           return;
         }
-        setRestoreFile({ ...parsed, name: file.name });
-      } catch {
-        setRestoreError('Could not read this file — it may be corrupted or not a valid backup.');
-      }
-    };
-    reader.readAsText(file);
+        setRestoreFile({ file, created_at: info.createdAt });
+      })
+      .catch(() => setRestoreError('Could not read this file — it may be corrupted or not a valid backup.'));
   }
 
   async function handleRestore() {
@@ -1086,7 +1079,7 @@ function BackupTab() {
     setRestoring(true);
     setRestoreError(null);
     try {
-      await restoreBackup({ database_base64: restoreFile.database_base64, wrapped_key_base64: restoreFile.wrapped_key_base64, passphrase: restorePassphrase });
+      await restoreBackup(restoreFile.file, restorePassphrase);
       setRestoreStaged(true);
     } catch (err) {
       setRestoreError(err instanceof ApiError ? err.message : 'Could not restore this backup');
@@ -1137,11 +1130,11 @@ function BackupTab() {
 
         {!restoreStaged ? (
           <>
-            <input type="file" accept=".json,application/json" onChange={handleFileSelect} style={{ marginBottom: '0.8rem' }} />
+            <input type="file" accept=".smebak,.json" onChange={handleFileSelect} style={{ marginBottom: '0.8rem' }} />
             {restoreFile && (
               <div style={styles.restorePreview}>
                 <div style={{ fontSize: '0.85rem' }}>
-                  <strong>{restoreFile.name}</strong>
+                  <strong>{restoreFile.file.name}</strong>
                   {restoreFile.created_at && (
                     <span style={{ color: 'var(--ink-soft)' }}> — backed up {parseBackendTimestamp(restoreFile.created_at).toLocaleString()}</span>
                   )}
@@ -1165,7 +1158,7 @@ function BackupTab() {
                   disabled={confirmText !== 'RESTORE' || restoring || !restorePassphrase}
                   onClick={handleRestore}
                 >
-                  {restoring ? 'Restoring…' : 'Restore this backup'}
+                  {restoring ? 'Checking and staging the backup… (a large one can take a minute)' : 'Restore this backup'}
                 </button>
               </div>
             )}

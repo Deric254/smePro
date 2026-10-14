@@ -4,10 +4,13 @@ import './index.css'
 import './styles/mobile.css'
 import App from './App.tsx'
 import { ConfirmHost } from './components/ConfirmDialog'
+import LicenceGate from './components/LicenceGate'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <LicenceGate>
+      <App />
+    </LicenceGate>
     <ConfirmHost />
   </StrictMode>,
 )

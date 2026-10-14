@@ -43,6 +43,18 @@ jobs:
   preflight-check-secrets:
     runs-on: ubuntu-24.04
     steps:
+      # Licensing guard (see licensing/ and src-tauri/src/licensing.rs): no
+      # installer may ever be built without the owner's PUBLIC key set, and no
+      # private owner key may be committed. Fails in seconds, before any
+      # version bump, tag or build. Fix: run `python licensing/make_owner_key.py`
+      # on your own computer and commit src-tauri/src/owner_key.rs.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the owner key is set and no private key is committed
+        run: python licensing/check_owner_key.py
+
       - name: Verify updater signing secrets are set
         env:
           HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
@@ -120,6 +132,12 @@ jobs:
       - name: Run backend tests
         working-directory: src-tauri
         run: cargo test --lib
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Licensing kit self-test
+        run: python licensing/selftest.py
 
   # ------------------------------------------------------------------
   # Figures out the version for this run. If triggered by a direct tag

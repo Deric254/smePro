@@ -108,7 +108,7 @@ fn test_v40_index_migration_reaches_a_business_that_already_had_sales_enabled() 
     let biz = crate::business_panel::create_business(&mut conn, "Upgrade Co", "USD", "UTC").expect("create business");
     crate::onboarding::apply_business_type(&mut conn, &biz, "retail").expect("enable modules incl. sales/inventory");
 
-    for idx in ["idx_module_sales_customer_phone", "idx_module_sales_customer_name_lower", "idx_module_sales_item_name", "idx_module_inventory_name"] {
+    for idx in ["idx_module_sales_customer_phone", "idx_module_sales_customer_name_lower", "idx_module_sales_item_name", "idx_module_sales_business_created", "idx_module_inventory_name"] {
         conn.execute(&format!("DROP INDEX IF EXISTS {idx}"), []).unwrap();
     }
     // Rewind to "just before v40": drop v40's row AND every later one,
@@ -130,11 +130,11 @@ fn test_v40_index_migration_reaches_a_business_that_already_had_sales_enabled() 
     // db_migrations::run() on a connection already held open.
     let conn = crate::db::open(&path).expect("re-open after \"upgrade\"");
 
-    for idx in ["idx_module_sales_customer_phone", "idx_module_sales_customer_name_lower", "idx_module_sales_item_name", "idx_module_inventory_name"] {
+    for idx in ["idx_module_sales_customer_phone", "idx_module_sales_customer_name_lower", "idx_module_sales_item_name", "idx_module_sales_business_created", "idx_module_inventory_name"] {
         assert!(has_index(&conn, idx), "{idx} must exist after upgrading an install that already had these tables");
     }
     let version: i64 = conn.query_row("SELECT MAX(version) FROM _schema_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(version, 42);
+    assert_eq!(version, 43);
 
     drop(conn);
     let _ = std::fs::remove_file(&path);

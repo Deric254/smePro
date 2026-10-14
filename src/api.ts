@@ -1072,16 +1072,51 @@ export const MOVEMENT_TYPES: { value: string; label: string }[] = [
 // ---- Backup & restore — real disaster recovery, not a suggestion to
 // copy files manually. The raw database key is never shipped in the
 // backup itself; a passphrase the owner chooses wraps it instead, so
-// possessing the backup file alone is never enough to open it. ----
-interface BackupData {
-  database_base64: string;
-  wrapped_key_base64: string;
-  created_at: string;
-  schema_version: string;
-}
-export const createBackup = (passphrase: string): Promise<BackupData> =>
+// possessing the backup file alone is never enough to open it.
+//
+// Both directions stream: the backup arrives as a binary download and a
+// restore uploads the chosen File itself as the request body (the browser
+// reads it from disk as it sends) — the file is never parsed or held in
+// memory here, so size is limited by disk, not by RAM. The passphrase
+// travels in a header, percent-encoded. ----
+export const createBackup = (passphrase: string): Promise<Blob> =>
   request('/admin/backup', { method: 'POST', body: JSON.stringify({ passphrase }) });
-export const restoreBackup = (data: { database_base64: string; wrapped_key_base64: string; passphrase: string }) =>
-  request('/admin/restore', { method: 'POST', body: JSON.stringify(data) });
-export const restoreBackupFreshInstall = (data: { database_base64: string; wrapped_key_base64: string; passphrase: string }) =>
-  request('/setup/restore', { method: 'POST', body: JSON.stringify(data) });
+
+async function uploadBackup(path: string, file: File, passphrase: string, authenticated: boolean) {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/octet-stream',
+    'X-Backup-Passphrase': encodeURIComponent(passphrase),
+  };
+  if (authenticated && authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  const res = await fetch(`${API_BASE}${path}`, { method: 'POST', headers, body: file, cache: 'no-store' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(res.status, body.error || `Request failed (${res.status})`);
+  return body;
+}
+export const restoreBackup = (file: File, passphrase: string) => uploadBackup('/admin/restore', file, passphrase, true);
+export const restoreBackupFreshInstall = (file: File, passphrase: string) => uploadBackup('/setup/restore', file, passphrase, false);
+
+// Recognizes a backup file by looking only at its first (and, for the
+// older JSON format, last) few hundred bytes — never the whole file — and
+// reports when it was made. Returns null for anything that isn't a backup.
+const BACKUP_MAGIC = 'SMEPRO-BACKUP-2\n';
+export async function inspectBackupFile(file: File): Promise<{ createdAt?: string } | null> {
+  const head = new Uint8Array(await file.slice(0, 20).arrayBuffer());
+  const magic = new TextDecoder().decode(head.slice(0, 16));
+  if (magic === BACKUP_MAGIC) {
+    const headerLen = new DataView(head.buffer).getUint32(16, true);
+    if (headerLen === 0 || headerLen > 64 * 1024) return null;
+    try {
+      const header = JSON.parse(await file.slice(20, 20 + headerLen).text());
+      return { createdAt: header.created_at };
+    } catch {
+      return null;
+    }
+  }
+  // Older format: one JSON document, database first and metadata last.
+  if ((await file.slice(0, 20).text()).startsWith('{"database_base64"')) {
+    const tail = await file.slice(Math.max(0, file.size - 512)).text();
+    return { createdAt: /"created_at":"([^"]+)"/.exec(tail)?.[1] };
+  }
+  return null;
+}

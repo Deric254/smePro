@@ -70,6 +70,14 @@ pub fn open(path: &str) -> Result<Connection> {
     // a genuinely concurrent write to wait its turn rather than fail a
     // real sale for no reason other than bad timing.
     conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
+    // SQLite's default page cache is 2 MB. This database is encrypted, so
+    // every page that misses the cache is read AND decrypted (and
+    // authenticated) again — on a business with years of sales, report
+    // queries that revisit the same pages kept paying that cost.
+    // 32 MB (a negative value is KiB) keeps the hot index and table pages
+    // resident; it is a ceiling that fills only as pages are used, so a
+    // small business pays nothing for it.
+    conn.execute_batch("PRAGMA cache_size = -32768;")?;
     // schema.sql is 16 CREATE TABLE IF NOT EXISTS statements — no-ops
     // after the first launch, since the tables already exist, but
     // still real work every single time otherwise: SQLite's default
@@ -102,25 +110,37 @@ pub fn key_path_for(db_path: &Path) -> PathBuf {
     p
 }
 
-/// A path convention `backup.rs` writes to when a restore is staged —
-/// deliberately just a suffix on the real paths, not a separate
-/// directory, so it's obvious at a glance in the app data folder what
-/// these files are for.
-fn pending_restore_paths(db_path: &Path) -> (PathBuf, PathBuf) {
-    let mut db_pending = db_path.to_path_buf();
-    let db_name = format!("{}.restore-pending", db_path.file_name().and_then(|s| s.to_str()).unwrap_or("erp.db"));
-    db_pending.set_file_name(db_name);
-
-    let key_path = key_path_for(db_path);
-    let mut key_pending = key_path.clone();
-    let key_name = format!("{}.restore-pending", key_path.file_name().and_then(|s| s.to_str()).unwrap_or("erp.db.key"));
-    key_pending.set_file_name(key_name);
-
-    (db_pending, key_pending)
+/// Sibling files `backup.rs` writes next to the live database when a
+/// restore is staged — deliberately just suffixes on the real paths, not a
+/// separate directory, so it's obvious at a glance in the app data folder
+/// what these files are for.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let name = format!("{}{suffix}", path.file_name().and_then(|s| s.to_str()).unwrap_or("erp.db"));
+    path.with_file_name(name)
 }
 
-/// If `backup::stage_restore` left a validated backup waiting, applies
-/// it now by atomically replacing the live database and key files.
+/// The staged database (renamed into place last — its existence is what
+/// marks a staged restore as complete) and the staged key.
+pub(crate) fn pending_restore_paths(db_path: &Path) -> (PathBuf, PathBuf) {
+    (sibling(db_path, ".restore-pending"), sibling(&key_path_for(db_path), ".restore-pending"))
+}
+
+/// Where an uploaded backup is streamed to and verified before it is
+/// promoted to the pending database. Same directory (so the final rename
+/// is atomic), never read by anything but `backup.rs`.
+pub(crate) fn restore_incoming_path(db_path: &Path) -> PathBuf {
+    sibling(db_path, ".restore-incoming")
+}
+
+/// Where the database and key that a restore replaced are kept, so a
+/// restore of the wrong file, or one that can't be opened, never means
+/// the previous data is gone.
+pub(crate) fn previous_paths(db_path: &Path) -> (PathBuf, PathBuf) {
+    (sibling(db_path, ".pre-restore"), sibling(&key_path_for(db_path), ".pre-restore"))
+}
+
+/// If `backup::stage_restore*` left a validated backup waiting, applies
+/// it now by replacing the live database and key files.
 ///
 /// Restart-based on purpose, not a shortcut: SQLite in WAL mode has
 /// live file handles, a shared-memory index file, and potentially
@@ -130,29 +150,67 @@ fn pending_restore_paths(db_path: &Path) -> (PathBuf, PathBuf) {
 /// exists to protect against. This function only ever runs here, at
 /// the very start of `open()`, before any connection to the target
 /// path exists — the one moment this is genuinely safe.
+///
+/// Crash-safe: staging writes the key first and renames the database
+/// into place last, so a pending DATABASE means "a complete restore is
+/// staged"; a lone pending key is the debris of an interrupted staging
+/// and is discarded. Applying swaps the key first and the database
+/// second, each step only if its pending file still exists, so a crash
+/// anywhere in between is finished by simply running this again on the
+/// next launch (the old code renamed the database first and only looked
+/// for a pending key when a pending database existed — a crash between
+/// the two left a new database with the old key, which can never open).
+/// The replaced files are moved aside, not deleted.
 fn apply_pending_restore_if_any(db_path: &Path) -> Result<()> {
+    remove_stale_temp_files(db_path);
     let (db_pending, key_pending) = pending_restore_paths(db_path);
     if !db_pending.exists() {
+        let _ = std::fs::remove_file(&key_pending);
         return Ok(());
     }
 
     let key_path = key_path_for(db_path);
+    let (db_previous, key_previous) = previous_paths(db_path);
 
-    // Clear WAL sidecar files from the database being replaced — stale
-    // ones referencing the old file's content would be actively wrong
-    // to keep around, not just unnecessary.
-    for ext in ["-wal", "-shm"] {
-        let sidecar = db_path.with_extension(format!("db{ext}"));
-        let _ = std::fs::remove_file(sidecar);
-    }
-
-    std::fs::rename(&db_pending, db_path)
-        .map_err(|e| anyhow!("failed to apply staged restore (database file): {e}"))?;
     if key_pending.exists() {
+        if key_path.exists() {
+            std::fs::rename(&key_path, &key_previous)
+                .map_err(|e| anyhow!("failed to apply staged restore (keeping the previous key): {e}"))?;
+        }
         std::fs::rename(&key_pending, &key_path)
             .map_err(|e| anyhow!("failed to apply staged restore (key file): {e}"))?;
     }
+
+    if db_path.exists() {
+        std::fs::rename(db_path, &db_previous)
+            .map_err(|e| anyhow!("failed to apply staged restore (keeping the previous database): {e}"))?;
+    }
+    // WAL sidecar files belong to the database that was just moved
+    // aside — stale ones referencing the old file's content would be
+    // actively wrong next to the restored one. The WAL may hold committed
+    // transactions not yet folded into the old file, so it travels with
+    // the previous database; the shared-memory index is disposable.
+    let _ = std::fs::rename(sibling(db_path, "-wal"), sibling(&db_previous, "-wal"));
+    let _ = std::fs::remove_file(sibling(db_path, "-shm"));
+    std::fs::rename(&db_pending, db_path)
+        .map_err(|e| anyhow!("failed to apply staged restore (database file): {e}"))?;
     Ok(())
+}
+
+/// Removes temp files a crashed or killed backup/restore left behind —
+/// each one is a full copy of the database, so they must not pile up.
+fn remove_stale_temp_files(db_path: &Path) {
+    let _ = std::fs::remove_file(restore_incoming_path(db_path));
+    let (Some(dir), Some(name)) = (db_path.parent(), db_path.file_name().and_then(|s| s.to_str())) else { return };
+    let prefix = format!("{name}.backup-");
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name.starts_with(&prefix) && file_name.ends_with(".tmp") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn get_or_create_key(key_path: &Path) -> Result<String> {
@@ -175,7 +233,7 @@ fn get_or_create_key(key_path: &Path) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
+pub(crate) fn restrict_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path)?.permissions();
     perms.set_mode(0o600); // owner read/write only
@@ -184,7 +242,7 @@ fn restrict_permissions(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<()> {
+pub(crate) fn restrict_permissions(_path: &Path) -> Result<()> {
     // Windows ACLs are a different model; the key file still isn't
     // world-readable by default in a per-user app data directory. Worth
     // revisiting with proper ACL restriction before shipping on Windows.

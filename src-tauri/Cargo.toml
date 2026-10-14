@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.128"
+version = "0.1.129"
 edition = "2021"
 # Cargo would otherwise auto-register every file in src/bin/ as a shipped
 # binary (without the dev-tools guard below), and Tauri then cannot tell
@@ -97,6 +97,8 @@ base64 = "=0.22.1"
 sha2 = "=0.10.8"
 regex = "1.10"
 calamine = { version = "=0.26.1", features = ["dates"] }
+# Offline licence checking (see src/licensing.rs). Verifies Ed25519 signatures.
+ed25519-dalek = "=2.1.1"
 
 [dependencies.base64ct]
 version = "=1.6.0"

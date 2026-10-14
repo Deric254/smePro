@@ -30,3 +30,4 @@ Thumbs.db
 release.keystore
 keystore.properties
 src-tauri/seed_ids.json
+smp-owner.key

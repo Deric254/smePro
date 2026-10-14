@@ -20,7 +20,6 @@
 
 use rusqlite::Connection;
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::forecast;
 
@@ -153,24 +152,42 @@ pub fn compute(conn: &Connection, business_id: &str, user_id: &str) -> BusinessP
     }
 }
 
-/// Total low-stock count across every module that has both `quantity`
-/// and `reorder_level` fields — reuses ai_context's own snapshot
-/// (already-audited logic for exactly this) rather than duplicating
-/// the low-stock query here a second time. Falls back to 0 on any
-/// error, consistent with `compute`'s own "never break the chat
+/// Exact low-stock count across every module the user can read that has
+/// `name`, `quantity` and `reorder_level` fields (same rule ai_context's
+/// low-stock list uses). This used to call `ai_context::build_snapshot`
+/// and count its `low_stock_alerts` — which (1) ran every all-time total,
+/// profit and customer analysis the AI assistant needs, 38–52 s on a
+/// 1M-sale database, just to count rows on the Dashboard, and (2) was
+/// capped at 10 items per module, so the count could never exceed 10.
+/// One COUNT per module is both instant and exact. Falls back to 0 on
+/// any error, consistent with `compute`'s own "never break the chat
 /// response" rule above.
 fn count_low_stock(conn: &Connection, business_id: &str, user_id: &str) -> i64 {
-    let snapshot = match crate::ai_context::build_snapshot(conn, business_id, user_id) {
-        Ok(s) => s,
-        Err(_) => return 0,
+    let count_all = || -> anyhow::Result<i64> {
+        let mut stmt = conn.prepare("SELECT id, schema_json FROM modules WHERE business_id = ?1 AND enabled = 1")?;
+        let module_rows: Vec<(String, String)> = stmt
+            .query_map(rusqlite::params![business_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut total = 0;
+        for (module_id, schema_json) in module_rows {
+            if !crate::rbac::is_allowed(conn, user_id, &module_id, "read").unwrap_or(false) {
+                continue;
+            }
+            let module = crate::module::ModuleDef::from_json_str(&schema_json)?;
+            let has = |name: &str| module.fields.iter().any(|f| f.name == name);
+            if !(has("name") && has("quantity") && has("reorder_level")) {
+                continue;
+            }
+            total += conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE business_id = ?1 AND deleted_at IS NULL AND quantity <= reorder_level",
+                    module.table_name()
+                ),
+                rusqlite::params![business_id],
+                |r| r.get::<_, i64>(0),
+            )?;
+        }
+        Ok(total)
     };
-    let modules = match snapshot.get("modules").and_then(Value::as_object) {
-        Some(m) => m,
-        None => return 0,
-    };
-    modules
-        .values()
-        .filter_map(|m| m.get("low_stock_alerts").and_then(Value::as_array))
-        .map(|arr| arr.len() as i64)
-        .sum()
+    count_all().unwrap_or(0)
 }
