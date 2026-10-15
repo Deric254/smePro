@@ -218,7 +218,7 @@ impl Licensing {
         Ok(data)
     }
 
-    fn parse_owner_key(&self, text: &str) -> Result<[u8; 32], String> {
+    pub(crate) fn parse_owner_key(&self, text: &str) -> Result<[u8; 32], String> {
         let bad = || format!("That isn't an owner key. It starts with {}-OWNER- and is in the owner key file.", self.prefix);
         let t = strip_ws(text);
         let rest = t.strip_prefix(&format!("{}-OWNER-", self.prefix)).ok_or_else(bad)?;
@@ -229,7 +229,7 @@ impl Licensing {
         <[u8; 32]>::try_from(raw).map_err(|_| bad())
     }
 
-    fn owner_key_matches(&self, seed: &[u8; 32]) -> bool {
+    pub(crate) fn owner_key_matches(&self, seed: &[u8; 32]) -> bool {
         match &self.public {
             Some(p) => SigningKey::from_bytes(seed).verifying_key().to_bytes() == p.to_bytes(),
             None => false,
@@ -249,6 +249,64 @@ impl Licensing {
         }
         let sig = SigningKey::from_bytes(&seed).sign(&self.owner_msg());
         self.store.set("owner_proof", json!(B64.encode(sig.to_bytes())))
+    }
+
+    /// True on the owner's own computer (a valid owner proof is stored here).
+    pub fn is_owner_copy(&self) -> bool {
+        self.owner_ok()
+    }
+
+    pub fn today(&self) -> NaiveDate {
+        (self.today)()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_today(mut self, today: impl Fn() -> NaiveDate + Send + Sync + 'static) -> Self {
+        self.today = Box::new(today);
+        self
+    }
+
+    /// Sign a licence for one computer. OWNER SIDE ONLY: `seed` comes from the
+    /// owner's key, which the owner unlocks in memory (see licence_admin.rs) and
+    /// which is never stored or shipped. Same bytes as `issue_licence.py`.
+    pub fn issue(&self, seed: &[u8; 32], code: &str, user: &str, expires: NaiveDate, features: &[String]) -> Result<String, String> {
+        if !self.owner_key_matches(seed) {
+            return Err("That owner key doesn't belong to this app. Use the key made for this app's installer.".into());
+        }
+        let norm = norm_code(code);
+        if norm.len() != 12 {
+            return Err("The activation code is 12 letters and numbers, like ABCD-EFGH-JKLM.".into());
+        }
+        let user = user.split_whitespace().collect::<Vec<_>>().join(" ");
+        if user.is_empty() || user.chars().count() > 60 {
+            return Err("Give the licence holder's name (1 to 60 characters).".into());
+        }
+        let today = (self.today)();
+        if expires <= today || expires > today + Days::days(365) {
+            return Err("A licence lasts 1 to 365 days from today.".into());
+        }
+        let mut feats: Vec<String> = features.to_vec();
+        feats.sort();
+        feats.dedup();
+        let feats_json = if feats.is_empty() {
+            String::new()
+        } else {
+            let items: Vec<String> = feats.iter().map(|f| serde_json::to_string(f).unwrap_or_default()).collect();
+            format!("\"features\":[{}],", items.join(","))
+        };
+        // Compact, keys sorted, exactly like the Python tool: the signature covers these bytes.
+        let payload = format!(
+            "{{\"app\":{},\"expires\":\"{}\",{}\"for\":\"{}\",\"issued\":\"{}\",\"role\":\"member\",\"user\":{},\"v\":{}}}",
+            serde_json::to_string(&self.app_id).map_err(|e| e.to_string())?,
+            expires,
+            feats_json,
+            norm,
+            today,
+            serde_json::to_string(&user).map_err(|e| e.to_string())?,
+            self.version
+        );
+        let sig = SigningKey::from_bytes(seed).sign(payload.as_bytes());
+        Ok(format!("{}.{}.{}", self.tag(), B64.encode(payload.as_bytes()), B64.encode(sig.to_bytes())))
     }
 
     fn owner_ok(&self) -> bool {
@@ -327,6 +385,11 @@ fn lic() -> std::sync::MutexGuard<'static, Licensing> {
     global().lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Run `f` against this app's licensing instance (used by the owner-only manager).
+pub(crate) fn with_lic<R>(f: impl FnOnce(&Licensing) -> R) -> R {
+    f(&lic())
+}
+
 type Cache = Mutex<Option<(Instant, Value)>>;
 
 fn cache() -> &'static Cache {
@@ -403,6 +466,7 @@ pub fn handle_route(method: &str, path: &str, body: &str) -> (u16, Value) {
             reset_cache();
             out
         }
+        (m, p) if p.starts_with("/licence/admin/") => crate::licence_admin::handle(m, p, body),
         _ => (404, json!({"error": "not found"})),
     }
 }
@@ -586,6 +650,24 @@ mod tests {
         let st = l.state();
         assert_eq!(st["ok"], false);
         assert!(st["message"].as_str().unwrap().contains("clock was set back"));
+    }
+
+    #[test]
+    fn issue_reproduces_the_kit_conformance_licence_exactly() {
+        let l = lic_for("Conformance App", "CNF", PUBLIC, "2026-01-01");
+        let token = l.issue(&seed(), CODE, "Test User", date("2026-01-31"), &["pro".to_string()]).unwrap();
+        assert_eq!(token, VECTOR);
+        assert!(l.read(&token, Some(CODE)).is_ok());
+        // wrong key, bad code, bad name, out-of-range dates are all refused
+        assert!(l.issue(&[9u8; 32], CODE, "A", date("2026-01-31"), &[]).unwrap_err().contains("doesn't belong"));
+        assert!(l.issue(&seed(), "ABC", "A", date("2026-01-31"), &[]).is_err());
+        assert!(l.issue(&seed(), CODE, "   ", date("2026-01-31"), &[]).is_err());
+        assert!(l.issue(&seed(), CODE, "A", date("2026-01-01"), &[]).is_err());
+        assert!(l.issue(&seed(), CODE, "A", date("2027-01-02"), &[]).is_err());
+        assert!(l.issue(&seed(), CODE, "A", date("2027-01-01"), &[]).is_ok());
+        // a name needing JSON escaping still produces a valid, verifiable licence
+        let odd = l.issue(&seed(), CODE, "Jane \"JD\" O'Neil", date("2026-02-01"), &[]).unwrap();
+        assert_eq!(l.read(&odd, Some(CODE)).unwrap()["user"], "Jane \"JD\" O'Neil");
     }
 
     #[test]

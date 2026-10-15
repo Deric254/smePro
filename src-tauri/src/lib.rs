@@ -30,6 +30,7 @@ pub mod http_api;
 #[cfg(not(desktop))]
 pub mod installer;
 pub mod invoice;
+pub mod licence_admin;
 pub mod licensing;
 pub mod module;
 pub mod money;

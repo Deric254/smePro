@@ -34,3 +34,16 @@ app data folder to another PC copies its identity. Wind-back of the clock is ref
 Losing the owner key means no new licences, ever.
 
 Tests: `python licensing/selftest.py` (kit) and `cargo test --lib licensing` (Rust).
+
+## Licence Manager inside the app (owner only, no commands)
+On your own computer (the claimed owner copy) a small **Licences** tab appears on the right edge of the window.
+1. Open it and **Unlock** with your owner key (choose `smp-owner.key` or paste it). The key is held in memory only,
+   never saved, and the manager locks again after 30 idle minutes or when you close the app.
+2. Type the customer's activation code and name, press **Generate licence**, copy it and send it.
+3. The list shows every customer, when their licence ends and whether it is active, expiring or expired.
+   Use the month arrows and tick **Paid** for a month: a fresh licence is made, valid to the end of the latest
+   paid month plus 5 days. Send it; they paste it into Renew.
+4. **Export (Excel / CSV)** saves the list. The list lives only on this computer (file `licence_customers.json` in
+   the app data folder, not in business backups): export from time to time.
+Customers' copies never show this tab, and the app refuses every manager request unless it is the owner copy AND unlocked.
+The command-line tools above keep working the same way.

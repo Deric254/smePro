@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from 'react';
 import { API_BASE } from '../api';
 import { retryOnConnectionFailure } from '../lib/retry';
 import UpdateChecker from './UpdateChecker';
+import LicenceManager from './LicenceManager';
 
 // Licence gate for the desktop app. The real enforcement is in the local API
 // (see src-tauri/src/licensing.rs: an unlicensed copy gets nothing from it);
@@ -36,6 +37,7 @@ export default function LicenceGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<LicenceState | null>(null);
   const [gated, setGated] = useState(true);
   const [renewOpen, setRenewOpen] = useState(false);
+  const [managerOpen, setManagerOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -72,6 +74,13 @@ export default function LicenceGate({ children }: { children: ReactNode }) {
   return (
     <>
       {children}
+      {/* Only the claimed owner copy shows this; the local API refuses everyone else too. */}
+      {state.kind === 'owner' && (
+        <>
+          <button type="button" onClick={() => setManagerOpen(true)} style={styles.ownerTab} title="Licence manager (owner only)">Licences</button>
+          {managerOpen && <LicenceManager onClose={() => setManagerOpen(false)} />}
+        </>
+      )}
       {soon && (
         <div role="status" style={styles.renewBar}>
           <span>
@@ -228,6 +237,7 @@ const styles: Record<string, React.CSSProperties> = {
   summary: { cursor: 'pointer', fontSize: '0.8rem', color: 'var(--ink-soft)' },
   error: { background: 'var(--stamp-wash)', color: 'var(--stamp)', padding: '0.5em 0.7em', borderRadius: 3, fontSize: '0.85rem' },
   renewBar: { position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 900, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.8rem', padding: '0.5rem 1rem', background: 'var(--warn-wash)', color: 'var(--ink)', borderTop: '1px solid var(--warn)', fontSize: '0.85rem' },
+  ownerTab: { position: 'fixed', right: 0, top: '45%', zIndex: 800, writingMode: 'vertical-rl', padding: '0.6rem 0.3rem', fontSize: '0.72rem', letterSpacing: '0.06em', background: 'var(--paper-card)', color: 'var(--ink-soft)', border: '1px solid var(--paper-line)', borderRight: 'none', borderRadius: '4px 0 0 4px', cursor: 'pointer' },
   renewBtn: { fontSize: '0.8rem', padding: '0.25em 0.8em' },
   overlay: { position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem', background: 'rgba(0,0,0,0.45)' },
 };
