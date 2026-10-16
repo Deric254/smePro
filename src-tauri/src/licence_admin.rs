@@ -15,12 +15,19 @@
 //! the app data folder): it touches neither the database nor sign-in, so it is
 //! not part of business backups. Use Export regularly.
 //!
+//! One licence is one computer (one activation code). The same customer name on a
+//! second code is never added silently: the owner must say whether it is a
+//! Migration (the old code is marked retired and is never renewed) or an Extra
+//! computer (a second seat, listed and charged). The list shows how many live
+//! computers each customer has.
+//!
 //! Licence rule for a ticked month: valid until the end of the latest paid
 //! month plus a short grace period, capped at 365 days ahead. The licence
 //! still has to be sent to the customer (the app is offline); ticking only
 //! makes it for you. Un-ticking a month does not revoke anything (licences
 //! can't be revoked); it just fixes the record.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -62,6 +69,9 @@ pub struct Customer {
     /// Paid months, "YYYY-MM", sorted.
     #[serde(default)]
     pub paid: Vec<String>,
+    /// Replaced by a newer computer in a migration: kept in the list, never renewed.
+    #[serde(default)]
+    pub retired: bool,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -95,6 +105,21 @@ fn end_of_month(first: NaiveDate) -> NaiveDate {
 
 fn parse_date(s: &Option<String>) -> Option<NaiveDate> {
     s.as_deref().and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+}
+
+/// Live (not retired) computers per customer name, case-insensitive.
+fn live_counts(ledger: &Ledger) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for c in ledger.customers.iter().filter(|c| !c.retired) {
+        *counts.entry(c.name.to_lowercase()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn sorted(ledger: &Ledger) -> Vec<&Customer> {
+    let mut customers: Vec<&Customer> = ledger.customers.iter().collect();
+    customers.sort_by_key(|c| (c.name.to_lowercase(), c.retired));
+    customers
 }
 
 // ---------------------------------------------------------------- file storage
@@ -146,7 +171,36 @@ fn issue_for(lic: &Licensing, seed: &[u8; 32], c: &Customer, expires: NaiveDate)
     lic.issue(seed, &c.code, &c.name, expires, &[])
 }
 
-fn add_customer(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, code: &str, name: &str, note: &str, days: i64) -> Result<(Customer, String), String> {
+/// What the owner decided when the name already has a live computer.
+#[derive(Debug, PartialEq)]
+enum Seat {
+    Unasked,
+    /// The new code replaces an old one (the id, or None when only one is live).
+    Migration(Option<String>),
+    Extra,
+}
+
+#[derive(Debug)]
+enum AddError {
+    Refused(String),
+    /// The name already has live computers (these ones): ask Migration or Extra.
+    NeedsChoice(Vec<Customer>),
+}
+
+impl From<String> for AddError {
+    fn from(m: String) -> Self {
+        AddError::Refused(m)
+    }
+}
+
+impl From<&str> for AddError {
+    fn from(m: &str) -> Self {
+        AddError::Refused(m.to_string())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_customer(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, code: &str, name: &str, note: &str, days: i64, seat: &Seat) -> Result<(Customer, String), AddError> {
     let norm = norm_code(code);
     if norm.len() != 12 {
         return Err("The activation code is 12 letters and numbers, like ABCD-EFGH-JKLM.".into());
@@ -154,10 +208,25 @@ fn add_customer(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, code: &st
     let name = clean_name(name)?;
     let note: String = note.trim().chars().take(200).collect();
     if !(1..=MAX_DAYS).contains(&days) {
-        return Err(format!("A licence lasts 1 to {MAX_DAYS} days."));
+        return Err(format!("A licence lasts 1 to {MAX_DAYS} days.").into());
     }
     if let Some(existing) = ledger.customers.iter().find(|c| c.code == norm) {
-        return Err(format!("{} is already listed for {}. Use Renew on that row.", pretty_code(&norm), existing.name));
+        return Err(format!("{} is already listed for {}. Use Renew on that row.", pretty_code(&norm), existing.name).into());
+    }
+    let key = name.to_lowercase();
+    let live: Vec<usize> = ledger.customers.iter().enumerate().filter(|(_, c)| !c.retired && c.name.to_lowercase() == key).map(|(i, _)| i).collect();
+    let mut retire = None;
+    if !live.is_empty() {
+        retire = match seat {
+            Seat::Unasked => return Err(AddError::NeedsChoice(live.iter().map(|&i| ledger.customers[i].clone()).collect())),
+            Seat::Extra => None,
+            Seat::Migration(Some(id)) => match live.iter().find(|&&i| ledger.customers[i].id == *id) {
+                Some(&i) => Some(i),
+                None => return Err("The computer being replaced isn't in the list any more.".into()),
+            },
+            Seat::Migration(None) if live.len() == 1 => Some(live[0]),
+            Seat::Migration(None) => return Err("Say which computer is being replaced.".into()),
+        };
     }
     let today = lic.today();
     let mut c = Customer {
@@ -170,18 +239,47 @@ fn add_customer(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, code: &st
         last_issued: None,
         licence: None,
         paid: vec![],
+        retired: false,
     };
     let expires = today + Days::days(days);
     let token = issue_for(lic, seed, &c, expires)?;
     c.expires = Some(expires.to_string());
     c.last_issued = Some(today.to_string());
     c.licence = Some(token.clone());
+    if let Some(i) = retire {
+        ledger.customers[i].retired = true;
+    }
     ledger.customers.push(c.clone());
     Ok((c, token))
 }
 
+/// Warning shown when a name already has live computers. The ledger is untouched.
+fn seat_prompt(seats: &[Customer]) -> Value {
+    let name = seats.first().map(|c| c.name.as_str()).unwrap_or_default();
+    let latest = seats.iter().filter_map(|c| c.expires.as_deref()).max();
+    let message = match (seats.len(), latest) {
+        (1, Some(e)) => format!("{name} already has a computer, ending {e}. Is this a migration or an extra computer?"),
+        (1, None) => format!("{name} already has a computer. Is this a migration or an extra computer?"),
+        (n, Some(e)) => format!("{name} already has {n} computers, the latest ending {e}. Is this a migration or an extra computer?"),
+        (n, None) => format!("{name} already has {n} computers. Is this a migration or an extra computer?"),
+    };
+    json!({
+        "error": message,
+        "needs_choice": true,
+        "seats": seats.iter().map(|c| json!({"id": c.id, "code": pretty_code(&c.code), "expires": c.expires})).collect::<Vec<_>>(),
+    })
+}
+
 fn find_mut<'a>(ledger: &'a mut Ledger, id: &str) -> Result<&'a mut Customer, String> {
     ledger.customers.iter_mut().find(|c| c.id == id).ok_or_else(|| "That customer isn't in the list any more.".to_string())
+}
+
+/// A retired computer was replaced in a migration and is never renewed.
+fn refuse_retired(c: &Customer) -> Result<(), String> {
+    if c.retired {
+        return Err(format!("{} ({}) was retired in a migration and is never renewed.", c.name, pretty_code(&c.code)));
+    }
+    Ok(())
 }
 
 fn renew(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, id: &str, days: i64) -> Result<(Customer, String), String> {
@@ -189,6 +287,7 @@ fn renew(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, id: &str, days: 
         return Err(format!("A licence lasts 1 to {MAX_DAYS} days."));
     }
     let c = find_mut(ledger, id)?;
+    refuse_retired(c)?;
     let today = lic.today();
     let expires = today + Days::days(days);
     let token = issue_for(lic, seed, c, expires)?;
@@ -208,6 +307,7 @@ fn set_paid(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, id: &str, mon
         c.paid.retain(|m| *m != key);
         return Ok((c.clone(), None));
     }
+    refuse_retired(c)?;
     let mut months = c.paid.clone();
     if !months.contains(&key) {
         months.push(key);
@@ -231,6 +331,9 @@ fn set_paid(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, id: &str, mon
 }
 
 fn status_of(c: &Customer, today: NaiveDate) -> (&'static str, Option<i64>) {
+    if c.retired {
+        return ("retired", None);
+    }
     match parse_date(&c.expires) {
         None => ("none", None),
         Some(e) => {
@@ -247,32 +350,34 @@ fn status_of(c: &Customer, today: NaiveDate) -> (&'static str, Option<i64>) {
     }
 }
 
-fn customer_view(c: &Customer, month: &str, today: NaiveDate) -> Value {
+fn customer_view(c: &Customer, month: &str, today: NaiveDate, computers: usize) -> Value {
     let (status, left) = status_of(c, today);
     json!({
         "id": c.id, "name": c.name, "code": pretty_code(&c.code), "note": c.note, "created": c.created,
         "expires": c.expires, "status": status, "days_left": left, "last_issued": c.last_issued,
         "licence": c.licence, "paid": c.paid, "paid_for_month": c.paid.iter().any(|m| m == month),
+        "retired": c.retired, "computers": computers,
     })
 }
 
 fn list_view(ledger: &Ledger, month: &str, today: NaiveDate) -> Value {
-    let mut customers: Vec<&Customer> = ledger.customers.iter().collect();
-    customers.sort_by_key(|c| c.name.to_lowercase());
-    let count = |f: &dyn Fn(&Customer) -> bool| ledger.customers.iter().filter(|c| f(c)).count();
+    let counts = live_counts(ledger);
+    // Totals and payment counts are per live computer; retired ones are history.
+    let live: Vec<&Customer> = ledger.customers.iter().filter(|c| !c.retired).collect();
+    let count = |f: &dyn Fn(&Customer) -> bool| live.iter().filter(|c| f(c)).count();
     let paid = count(&|c| c.paid.iter().any(|m| m == month));
     let status = |s: &'static str| count(&|c| status_of(c, today).0 == s);
     json!({
         "month": month,
         "summary": {
-            "total": ledger.customers.len(),
+            "total": live.len(),
             "active": status("active") + status("expiring"),
             "expiring": status("expiring"),
             "expired": status("expired"),
             "paid_for_month": paid,
-            "unpaid_for_month": ledger.customers.len() - paid,
+            "unpaid_for_month": live.len() - paid,
         },
-        "customers": customers.iter().map(|c| customer_view(c, month, today)).collect::<Vec<_>>(),
+        "customers": sorted(ledger).iter().map(|c| customer_view(c, month, today, counts.get(&c.name.to_lowercase()).copied().unwrap_or(0))).collect::<Vec<_>>(),
     })
 }
 
@@ -283,13 +388,12 @@ fn csv_cell(s: &str) -> String {
 }
 
 fn export_csv(ledger: &Ledger, month: &str, today: NaiveDate) -> String {
-    let mut customers: Vec<&Customer> = ledger.customers.iter().collect();
-    customers.sort_by_key(|c| c.name.to_lowercase());
-    let head = ["Name", "Activation code", "Note", "Added", "Licence expires", "Status", "Days left", "All paid months", &format!("Paid for {month}"), "Last licence issued"];
+    let counts = live_counts(ledger);
+    let head = ["Name", "Activation code", "Note", "Added", "Licence expires", "Status", "Days left", "All paid months", &format!("Paid for {month}"), "Last licence issued", "Computers"];
     let mut out = String::from("\u{feff}");
     out.push_str(&head.iter().map(|h| csv_cell(h)).collect::<Vec<_>>().join(","));
     out.push_str("\r\n");
-    for c in customers {
+    for c in sorted(ledger) {
         let (status, left) = status_of(c, today);
         let row = [
             c.name.clone(),
@@ -302,6 +406,7 @@ fn export_csv(ledger: &Ledger, month: &str, today: NaiveDate) -> String {
             c.paid.join(" "),
             if c.paid.iter().any(|m| m == month) { "Yes".into() } else { "No".to_string() },
             c.last_issued.clone().unwrap_or_default(),
+            if c.retired { String::new() } else { counts.get(&c.name.to_lowercase()).copied().unwrap_or(0).to_string() },
         ];
         out.push_str(&row.iter().map(|v| csv_cell(v)).collect::<Vec<_>>().join(","));
         out.push_str("\r\n");
@@ -425,8 +530,16 @@ pub fn handle(method: &str, path: &str, body: &str) -> (u16, Value) {
         }
         ("POST", "add") => {
             let days = number(body, "days").unwrap_or(DEFAULT_DAYS);
-            let r = with_lic(|l| add_customer(l, &seed, &mut ledger, &field(body, "code"), &field(body, "name"), &field(body, "note"), days));
-            finish(r.map(|(c, t)| (c, Some(t))), &path, &ledger, &month, today)
+            let seat = match field(body, "seat").as_str() {
+                "migration" => Seat::Migration(Some(field(body, "replaces")).filter(|id| !id.is_empty())),
+                "extra" => Seat::Extra,
+                _ => Seat::Unasked,
+            };
+            match with_lic(|l| add_customer(l, &seed, &mut ledger, &field(body, "code"), &field(body, "name"), &field(body, "note"), days, &seat)) {
+                Ok((c, t)) => finish(Ok((c, Some(t))), &path, &ledger, &month, today),
+                Err(AddError::Refused(e)) => err(400, e),
+                Err(AddError::NeedsChoice(seats)) => (409, seat_prompt(&seats)),
+            }
         }
         ("POST", "renew") => {
             let days = number(body, "days").unwrap_or(DEFAULT_DAYS);
@@ -503,7 +616,7 @@ mod tests {
     fn adding_a_customer_issues_a_licence_that_verifies_on_their_code() {
         let l = lic_at("2026-10-15");
         let mut led = Ledger::default();
-        let (c, token) = add_customer(&l, &SEED, &mut led, "abcd efgh jklm", "  Jane   Doe ", "Nairobi shop", 31).unwrap();
+        let (c, token) = add_customer(&l, &SEED, &mut led, "abcd efgh jklm", "  Jane   Doe ", "Nairobi shop", 31, &Seat::Unasked).unwrap();
         assert_eq!(c.code, "ABCDEFGHJKLM");
         assert_eq!(c.name, "Jane Doe");
         assert_eq!(c.expires.as_deref(), Some("2026-11-15"));
@@ -511,8 +624,8 @@ mod tests {
         assert_eq!(data["user"], "Jane Doe");
         assert!(l.read(&token, Some("ZZZZ-ZZZZ-ZZZZ")).is_err());
         // same code again is refused and names who has it
-        let dup = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Other", "", 31).unwrap_err();
-        assert!(dup.contains("already listed for Jane Doe"));
+        let dup = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Other", "", 31, &Seat::Unasked).unwrap_err();
+        assert!(matches!(&dup, AddError::Refused(m) if m.contains("already listed for Jane Doe")), "{dup:?}");
         assert_eq!(led.customers.len(), 1);
     }
 
@@ -520,11 +633,11 @@ mod tests {
     fn bad_input_is_refused_without_changing_the_list() {
         let l = lic_at("2026-10-15");
         let mut led = Ledger::default();
-        assert!(add_customer(&l, &SEED, &mut led, "ABC", "A", "", 31).is_err());
-        assert!(add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "   ", "", 31).is_err());
-        assert!(add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "A", "", 0).is_err());
-        assert!(add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "A", "", 366).is_err());
-        assert!(add_customer(&l, &[1u8; 32], &mut led, "ABCD-EFGH-JKLM", "A", "", 31).unwrap_err().contains("doesn't belong"));
+        assert!(add_customer(&l, &SEED, &mut led, "ABC", "A", "", 31, &Seat::Unasked).is_err());
+        assert!(add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "   ", "", 31, &Seat::Unasked).is_err());
+        assert!(add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "A", "", 0, &Seat::Unasked).is_err());
+        assert!(add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "A", "", 366, &Seat::Unasked).is_err());
+        assert!(matches!(add_customer(&l, &[1u8; 32], &mut led, "ABCD-EFGH-JKLM", "A", "", 31, &Seat::Unasked), Err(AddError::Refused(m)) if m.contains("doesn't belong")));
         assert!(led.customers.is_empty());
     }
 
@@ -532,7 +645,7 @@ mod tests {
     fn ticking_a_month_issues_a_licence_to_month_end_plus_grace() {
         let l = lic_at("2026-10-15");
         let mut led = Ledger::default();
-        let (c, _) = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 10).unwrap();
+        let (c, _) = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 10, &Seat::Unasked).unwrap();
         let (c, token) = set_paid(&l, &SEED, &mut led, &c.id, "2026-10", true).unwrap();
         let token = token.unwrap();
         assert_eq!(c.paid, vec!["2026-10"]);
@@ -554,7 +667,7 @@ mod tests {
     fn tick_edge_cases_are_refused_cleanly() {
         let l = lic_at("2026-10-15");
         let mut led = Ledger::default();
-        let (c, _) = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 10).unwrap();
+        let (c, _) = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 10, &Seat::Unasked).unwrap();
         let before = led.customers[0].expires.clone();
         assert!(set_paid(&l, &SEED, &mut led, &c.id, "2026-08", true).unwrap_err().contains("already ended"));
         assert!(set_paid(&l, &SEED, &mut led, &c.id, "2027-12", true).unwrap_err().contains("365 days"));
@@ -565,7 +678,7 @@ mod tests {
         assert_eq!(led.customers[0].expires, before);
         // December rolls the year correctly
         let l2 = lic_at("2026-12-01");
-        let (c, _) = add_customer(&l2, &SEED, &mut led, "WXYZ-2345-6789", "Dec", "", 5).unwrap();
+        let (c, _) = add_customer(&l2, &SEED, &mut led, "WXYZ-2345-6789", "Dec", "", 5, &Seat::Unasked).unwrap();
         let (c, _) = set_paid(&l2, &SEED, &mut led, &c.id, "2026-12", true).unwrap();
         assert_eq!(c.expires.as_deref(), Some("2027-01-05"));
     }
@@ -574,7 +687,7 @@ mod tests {
     fn renew_and_remove() {
         let l = lic_at("2026-10-15");
         let mut led = Ledger::default();
-        let (c, _) = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 10).unwrap();
+        let (c, _) = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 10, &Seat::Unasked).unwrap();
         let (c, _) = renew(&l, &SEED, &mut led, &c.id, 90).unwrap();
         assert_eq!(c.expires.as_deref(), Some("2027-01-13"));
         assert!(renew(&l, &SEED, &mut led, &c.id, 0).is_err());
@@ -586,7 +699,7 @@ mod tests {
         let l = lic_at("2026-10-15");
         let mut led = Ledger::default();
         let mut mk = |code: &str, name: &str, exp: &str, paid: &[&str]| {
-            let (c, _) = add_customer(&l, &SEED, &mut led, code, name, "", 30).unwrap();
+            let (c, _) = add_customer(&l, &SEED, &mut led, code, name, "", 30, &Seat::Unasked).unwrap();
             let c = led.customers.iter_mut().find(|x| x.id == c.id).unwrap();
             c.expires = Some(exp.to_string());
             c.paid = paid.iter().map(|s| s.to_string()).collect();
@@ -612,7 +725,7 @@ mod tests {
     fn csv_export_is_excel_safe() {
         let l = lic_at("2026-10-15");
         let mut led = Ledger::default();
-        add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "=HYPERLINK(\"x\")", "say \"hi\", ok", 30).unwrap();
+        add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "=HYPERLINK(\"x\")", "say \"hi\", ok", 30, &Seat::Unasked).unwrap();
         let csv = export_csv(&led, "2026-10", d("2026-10-15"));
         assert!(csv.starts_with('\u{feff}'));
         assert!(csv.contains("\"Paid for 2026-10\""));
@@ -628,7 +741,7 @@ mod tests {
         assert!(load(&path).unwrap().customers.is_empty(), "missing file = empty list");
         let l = lic_at("2026-10-15");
         let mut led = Ledger::default();
-        add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 30).unwrap();
+        add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 30, &Seat::Unasked).unwrap();
         save(&path, &led).unwrap();
         save(&path, &led).unwrap(); // second save leaves a .bak
         assert!(path.with_extension("json.bak").exists());
@@ -647,6 +760,98 @@ mod tests {
         assert!(fresh_seed(t0 + Duration::from_secs(58 * 60), &mut slot).is_some());
         assert!(fresh_seed(t0 + Duration::from_secs(90 * 60), &mut slot).is_none());
         assert!(slot.is_none(), "an expired key is dropped");
+    }
+
+    fn add(l: &Licensing, led: &mut Ledger, code: &str, name: &str, seat: &Seat) -> Result<Customer, AddError> {
+        add_customer(l, &SEED, led, code, name, "", 30, seat).map(|(c, _)| c)
+    }
+
+    #[test]
+    fn same_name_on_another_code_asks_before_adding() {
+        let l = lic_at("2026-10-15");
+        let mut led = Ledger::default();
+        add_customer(&l, &SEED, &mut led, "AAAA-AAAA-AAAA", "sme x", "", 26, &Seat::Unasked).unwrap(); // ends 2026-11-10
+        // case and spacing do not hide the same name
+        let Err(AddError::NeedsChoice(seats)) = add(&l, &mut led, "BBBB-BBBB-BBBB", "  SME   X ", &Seat::Unasked) else { panic!("expected a question") };
+        assert_eq!(led.customers.len(), 1, "nothing is added until the owner answers");
+        let v = seat_prompt(&seats);
+        assert_eq!(v["error"], "sme x already has a computer, ending 2026-11-10. Is this a migration or an extra computer?");
+        assert_eq!(v["seats"][0]["code"], "AAAA-AAAA-AAAA");
+        // a refused code or days is reported before the question
+        assert!(matches!(add(&l, &mut led, "BBB", "sme x", &Seat::Unasked), Err(AddError::Refused(_))));
+        // a different name never asks
+        assert!(add(&l, &mut led, "CCCC-CCCC-CCCC", "other", &Seat::Unasked).is_ok());
+    }
+
+    #[test]
+    fn migration_retires_the_old_code_and_it_is_never_renewed() {
+        let l = lic_at("2026-10-15");
+        let mut led = Ledger::default();
+        let old = add(&l, &mut led, "AAAA-AAAA-AAAA", "Jane", &Seat::Unasked).unwrap();
+        set_paid(&l, &SEED, &mut led, &old.id, "2026-10", true).unwrap();
+        let new = add(&l, &mut led, "BBBB-BBBB-BBBB", "Jane", &Seat::Migration(None)).unwrap();
+        assert!(!new.retired);
+        assert!(led.customers[0].retired && !led.customers[1].retired);
+        assert!(renew(&l, &SEED, &mut led, &old.id, 30).unwrap_err().contains("never renewed"));
+        assert!(set_paid(&l, &SEED, &mut led, &old.id, "2026-11", true).unwrap_err().contains("never renewed"));
+        assert_eq!(led.customers[0].paid, vec!["2026-10"], "a refused tick records nothing");
+        // un-ticking only corrects the record and stays possible
+        assert!(set_paid(&l, &SEED, &mut led, &old.id, "2026-10", false).is_ok());
+        // the new code renews normally
+        assert!(renew(&l, &SEED, &mut led, &new.id, 30).is_ok());
+        // the list: retired shown as such, counts and totals are live computers only
+        let v = list_view(&led, "2026-10", d("2026-10-15"));
+        assert_eq!(v["summary"]["total"], 1);
+        assert_eq!(v["summary"]["unpaid_for_month"], 1);
+        assert_eq!(v["customers"][0]["status"], "active", "a customer's live computers list before its retired ones");
+        assert_eq!(v["customers"][1]["status"], "retired");
+        assert_eq!(v["customers"][0]["computers"], 1);
+        assert_eq!(v["customers"][1]["computers"], 1);
+        // a name with only retired computers can be added again without a question
+        led.customers[1].retired = true;
+        assert!(add(&l, &mut led, "CCCC-CCCC-CCCC", "Jane", &Seat::Unasked).is_ok());
+    }
+
+    #[test]
+    fn extra_computer_is_a_second_listed_seat() {
+        let l = lic_at("2026-10-15");
+        let mut led = Ledger::default();
+        add(&l, &mut led, "AAAA-AAAA-AAAA", "Jane", &Seat::Unasked).unwrap();
+        add(&l, &mut led, "BBBB-BBBB-BBBB", "jane", &Seat::Extra).unwrap();
+        assert!(led.customers.iter().all(|c| !c.retired));
+        let v = list_view(&led, "2026-10", d("2026-10-15"));
+        assert_eq!(v["summary"]["total"], 2);
+        assert_eq!(v["customers"][0]["computers"], 2);
+        assert_eq!(v["customers"][1]["computers"], 2);
+        let csv = export_csv(&led, "2026-10", d("2026-10-15"));
+        assert!(csv.contains("\"Computers\"\r\n"));
+        assert!(csv.matches(",\"2\"\r\n").count() == 2, "{csv}");
+        // a third computer still has to be answered
+        assert!(matches!(add(&l, &mut led, "CCCC-CCCC-CCCC", "Jane", &Seat::Unasked), Err(AddError::NeedsChoice(s)) if s.len() == 2));
+    }
+
+    #[test]
+    fn migration_with_several_live_computers_must_name_the_one_replaced() {
+        let l = lic_at("2026-10-15");
+        let mut led = Ledger::default();
+        let a = add(&l, &mut led, "AAAA-AAAA-AAAA", "Jane", &Seat::Unasked).unwrap();
+        let b = add(&l, &mut led, "BBBB-BBBB-BBBB", "Jane", &Seat::Extra).unwrap();
+        assert!(matches!(add(&l, &mut led, "CCCC-CCCC-CCCC", "Jane", &Seat::Migration(None)), Err(AddError::Refused(_))));
+        assert!(matches!(add(&l, &mut led, "CCCC-CCCC-CCCC", "Jane", &Seat::Migration(Some("nope".into()))), Err(AddError::Refused(_))));
+        assert_eq!(led.customers.len(), 2);
+        assert!(led.customers.iter().all(|c| !c.retired), "a refused migration retires nothing");
+        add(&l, &mut led, "CCCC-CCCC-CCCC", "Jane", &Seat::Migration(Some(b.id.clone()))).unwrap();
+        let retired: Vec<&str> = led.customers.iter().filter(|c| c.retired).map(|c| c.id.as_str()).collect();
+        assert_eq!(retired, vec![b.id.as_str()]);
+        assert!(!led.customers.iter().find(|c| c.id == a.id).unwrap().retired);
+    }
+
+    #[test]
+    fn a_list_saved_before_seats_existed_still_loads() {
+        let old = r#"{"customers":[{"id":"1","name":"Jane","code":"ABCDEFGHJKLM","created":"2026-10-01","expires":"2026-11-01"}]}"#;
+        let led: Ledger = serde_json::from_str(old).unwrap();
+        assert!(!led.customers[0].retired);
+        assert_eq!(list_view(&led, "2026-10", d("2026-10-15"))["customers"][0]["computers"], 1);
     }
 
     #[test]

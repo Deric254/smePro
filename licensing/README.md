@@ -47,3 +47,13 @@ On your own computer (the claimed owner copy) a small **Licences** tab appears o
    the app data folder, not in business backups): export from time to time.
 Customers' copies never show this tab, and the app refuses every manager request unless it is the owner copy AND unlocked.
 The command-line tools above keep working the same way.
+
+## Same name, second computer (Licence Manager)
+Adding a code whose customer name already has a live computer never goes through silently. The manager asks
+*"<name> already has a computer, ending <date>. Is this a migration or an extra computer?"*
+- **Migration**: the old code is marked **retired** in the list and is never renewed or ticked again. Its last
+  licence still works until its own date (licences can't be revoked), so use short licences.
+- **Extra computer**: recorded as a second seat, listed as its own row and charged like any other.
+The list shows how many live computers each customer has (also in the CSV export, column "Computers").
+Names are compared ignoring capitals and extra spaces. The command-line tools do not use this list, so they
+are not checked.

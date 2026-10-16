@@ -10,12 +10,16 @@ import { confirmDialog } from './ConfirmDialog';
 
 type Customer = {
   id: string; name: string; code: string; note: string; created: string;
-  expires: string | null; status: 'active' | 'expiring' | 'expired' | 'none'; days_left: number | null;
+  expires: string | null; status: 'active' | 'expiring' | 'expired' | 'none' | 'retired'; days_left: number | null;
   licence: string | null; paid: string[]; paid_for_month: boolean; last_issued: string | null;
+  retired: boolean; computers: number;
 };
 type Summary = { total: number; active: number; expiring: number; expired: number; paid_for_month: number; unpaid_for_month: number };
 type ListData = { month: string; summary: Summary; customers: Customer[] };
 type Issued = { name: string; licence: string };
+type SeatChoice = { seat: 'migration' | 'extra'; replaces?: string };
+// The name already has a live computer: the owner must say Migration or Extra computer.
+type Pending = { message: string; seats: { id: string; code: string; expires: string | null }[]; replaces: string };
 
 async function call(path: string, body: Record<string, unknown> = {}, method = 'POST'): Promise<{ status: number; data: any }> {
   const init: RequestInit = { method, cache: 'no-store', headers: { 'Content-Type': 'application/json' } };
@@ -48,10 +52,11 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
   const [form, setForm] = useState({ code: '', name: '', note: '', days: '31' });
   const [renewId, setRenewId] = useState<string | null>(null);
   const [renewDays, setRenewDays] = useState('31');
+  const [pending, setPending] = useState<Pending | null>(null);
 
   // Any answer that says "locked" sends the screen back to the unlock form.
   const handle = useCallback((status: number, d: any): boolean => {
-    if (status === 401) { setUnlocked(false); setData(null); setError(d?.error ?? 'Locked.'); return false; }
+    if (status === 401) { setUnlocked(false); setData(null); setPending(null); setError(d?.error ?? 'Locked.'); return false; }
     if (status >= 400) { setError(d?.error ?? 'That did not work. Please try again.'); return false; }
     return true;
   }, []);
@@ -88,7 +93,7 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
   }
 
   async function lock() {
-    await run(async () => { await call('lock'); setUnlocked(false); setData(null); setIssued(null); });
+    await run(async () => { await call('lock'); setUnlocked(false); setData(null); setIssued(null); setPending(null); });
   }
 
   function readKeyFile(file: File | undefined) {
@@ -104,15 +109,30 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
     await run(() => load(m));
   }
 
-  async function addCustomer(e: FormEvent) {
-    e.preventDefault();
+  // Editing the form drops an open Migration / Extra question: it belonged to the old values.
+  function setField(patch: Partial<typeof form>) {
+    setPending(null);
+    setForm((f) => ({ ...f, ...patch }));
+  }
+
+  async function submitAdd(choice?: SeatChoice) {
     await run(async () => {
-      const { status, data: d } = await call('add', { ...form, days: Number(form.days), month });
+      const { status, data: d } = await call('add', { ...form, days: Number(form.days), month, ...choice });
+      if (status === 409 && d?.needs_choice) {
+        setPending({ message: d.error, seats: d.seats, replaces: d.seats[0]?.id ?? '' });
+        return;
+      }
+      setPending(null);
       if (handle(status, d)) {
         setData(d); setIssued({ name: d.customer, licence: d.licence });
         setForm({ code: '', name: '', note: '', days: form.days });
       }
     });
+  }
+
+  async function addCustomer(e: FormEvent) {
+    e.preventDefault();
+    await submitAdd();
   }
 
   async function tick(c: Customer, paid: boolean) {
@@ -203,7 +223,7 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
         {unlocked && data && s && (
           <>
             <div style={styles.cards}>
-              <Stat label="Total customers" value={s.total} />
+              <Stat label="Computers" value={s.total} />
               <Stat label="Licensed now" value={s.active} />
               <Stat label="Expiring in 7 days" value={s.expiring} warn={s.expiring > 0} />
               <Stat label="Expired" value={s.expired} warn={s.expired > 0} />
@@ -213,15 +233,39 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
 
             <form onSubmit={addCustomer} style={styles.addRow}>
               <input className="mono" placeholder="Activation code" value={form.code} required style={{ flex: '1 1 150px' }}
-                onChange={(e) => setForm({ ...form, code: e.target.value })} autoComplete="off" spellCheck={false} />
+                onChange={(e) => setField({ code: e.target.value })} autoComplete="off" spellCheck={false} />
               <input placeholder="Customer name" value={form.name} required maxLength={60} style={{ flex: '1 1 150px' }}
-                onChange={(e) => setForm({ ...form, name: e.target.value })} />
+                onChange={(e) => setField({ name: e.target.value })} />
               <input placeholder="Note (optional)" value={form.note} maxLength={200} style={{ flex: '1 1 130px' }}
-                onChange={(e) => setForm({ ...form, note: e.target.value })} />
+                onChange={(e) => setField({ note: e.target.value })} />
               <input type="number" min={1} max={365} title="Days the first licence lasts" value={form.days} style={{ width: 80 }}
-                onChange={(e) => setForm({ ...form, days: e.target.value })} />
+                onChange={(e) => setField({ days: e.target.value })} />
               <button type="submit" className="btn btn-stamp" disabled={busy || !form.code.trim() || !form.name.trim()}>Generate licence</button>
             </form>
+
+            {pending && (
+              <div role="alert" style={styles.warning}>
+                <div style={{ marginBottom: '0.5rem' }}><strong>{pending.message}</strong></div>
+                {pending.seats.length > 1 && (
+                  <label style={{ ...styles.label, marginBottom: '0.5rem' }}>
+                    If it is a migration, which computer is being replaced?
+                    <select value={pending.replaces} style={{ display: 'block', marginTop: '0.3rem' }}
+                      onChange={(e) => setPending({ ...pending, replaces: e.target.value })}>
+                      {pending.seats.map((x) => <option key={x.id} value={x.id}>{x.code} (ends {x.expires ?? '—'})</option>)}
+                    </select>
+                  </label>
+                )}
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <button type="button" className="btn btn-stamp" disabled={busy} onClick={() => submitAdd({ seat: 'migration', replaces: pending.replaces })}>Migration</button>
+                  <button type="button" className="btn btn-stamp" disabled={busy} onClick={() => submitAdd({ seat: 'extra' })}>Extra computer</button>
+                  <button type="button" className="btn btn-outline" disabled={busy} onClick={() => setPending(null)}>Cancel</button>
+                </div>
+                <div style={{ ...styles.small, marginTop: '0.5rem' }}>
+                  Migration marks the old code retired and it is never renewed (its current licence still works until it ends).
+                  Extra computer keeps both: the new one is a second seat you can charge for.
+                </div>
+              </div>
+            )}
 
             {issued && (
               <div style={styles.issued}>
@@ -239,7 +283,7 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
               <strong style={{ minWidth: 140, textAlign: 'center' }}>{monthLabel(month)}</strong>
               <button type="button" className="btn btn-outline" onClick={() => changeMonth(1)} disabled={busy} aria-label="Next month">›</button>
               <span style={{ flex: 1 }} />
-              <button type="button" className="btn btn-outline" onClick={exportCsv} disabled={busy || s.total === 0}>Export (Excel / CSV)</button>
+              <button type="button" className="btn btn-outline" onClick={exportCsv} disabled={busy || data.customers.length === 0}>Export (Excel / CSV)</button>
             </div>
             <p style={styles.hint}>
               Tick a month when the customer has paid: a fresh licence is made, valid to the end of the latest paid month plus 5 days.
@@ -259,9 +303,10 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
                   </thead>
                   <tbody>
                     {data.customers.map((c) => (
-                      <tr key={c.id}>
+                      <tr key={c.id} style={c.retired ? { opacity: 0.6 } : undefined}>
                         <td>
                           <div>{c.name}</div>
+                          {!c.retired && <div style={styles.small}>{c.computers === 1 ? '1 computer' : `${c.computers} computers`}</div>}
                           {c.note && <div style={styles.small}>{c.note}</div>}
                           {c.paid.length > 0 && <div style={styles.small}>Paid: {c.paid.join(', ')}</div>}
                         </td>
@@ -270,7 +315,7 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
                           {c.expires ?? '—'} <StatusChip c={c} />
                         </td>
                         <td style={{ textAlign: 'center' }}>
-                          <input type="checkbox" checked={c.paid_for_month} disabled={busy}
+                          <input type="checkbox" checked={c.paid_for_month} disabled={busy || (c.retired && !c.paid_for_month)}
                             aria-label={`${c.name} paid ${monthLabel(month)}`} onChange={(e) => tick(c, e.target.checked)} />
                         </td>
                         <td style={{ whiteSpace: 'nowrap' }}>
@@ -282,8 +327,8 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
                             </span>
                           ) : (
                             <span style={{ display: 'inline-flex', gap: '0.3rem' }}>
-                              {c.licence && <button type="button" className="btn btn-outline" onClick={() => copy(c.licence!, c.id)}>{copied === c.id ? 'Copied' : 'Copy licence'}</button>}
-                              <button type="button" className="btn btn-outline" onClick={() => { setRenewId(c.id); setRenewDays('31'); }}>Renew…</button>
+                              {c.licence && !c.retired && <button type="button" className="btn btn-outline" onClick={() => copy(c.licence!, c.id)}>{copied === c.id ? 'Copied' : 'Copy licence'}</button>}
+                              {!c.retired && <button type="button" className="btn btn-outline" onClick={() => { setRenewId(c.id); setRenewDays('31'); }}>Renew…</button>}
                               <button type="button" className="btn btn-outline" onClick={() => remove(c)}>Remove</button>
                             </span>
                           )}
@@ -319,6 +364,7 @@ function StatusChip({ c }: { c: Customer }) {
     expiring: { text: `${c.days_left ?? 0}d left`, bg: 'var(--warn-wash)', fg: 'var(--warn)' },
     expired: { text: 'expired', bg: 'var(--stamp-wash)', fg: 'var(--stamp)' },
     none: { text: 'no licence', bg: 'var(--paper)', fg: 'var(--ink-soft)' },
+    retired: { text: 'retired', bg: 'var(--paper)', fg: 'var(--ink-soft)' },
   }[c.status];
   return <span style={{ background: map.bg, color: map.fg, borderRadius: 999, padding: '0.1em 0.6em', fontSize: '0.72rem', marginLeft: '0.3rem' }}>{map.text}</span>;
 }
@@ -337,6 +383,7 @@ const styles: Record<string, React.CSSProperties> = {
   cards: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.6rem' },
   stat: { border: '1px solid var(--paper-line)', borderRadius: 3, padding: '0.6rem 0.8rem', background: 'var(--paper)' },
   addRow: { display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' },
+  warning: { border: '1px solid var(--warn)', background: 'var(--warn-wash)', borderRadius: 3, padding: '0.7rem 0.8rem', fontSize: '0.88rem' },
   issued: { border: '1px solid var(--ok)', background: 'var(--ok-wash)', borderRadius: 3, padding: '0.7rem 0.8rem', fontSize: '0.88rem' },
   monthRow: { display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' },
 };
