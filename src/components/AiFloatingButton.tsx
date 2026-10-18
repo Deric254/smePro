@@ -6,7 +6,7 @@ import {
 } from '../api';
 import type { AiChatSession, AiChatMessage } from '../api';
 import { decimalPlacesFor } from '../lib/money';
-import { MarkdownLite } from '../lib/markdownLite';
+import { MarkdownLite, hasTable } from '../lib/markdownLite';
 import BusinessPulseCard from './BusinessPulseCard';
 
 export default function AiFloatingButton({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -228,9 +228,10 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
                 Ask a question about your business.
               </div>
             )}
+            {/* A reply with a table uses the full chat width; the 85% cap on plain bubbles would leave an empty strip beside it. */}
             {messages.map((m, i) => (
               <div key={i}>
-                <div style={m.role === 'user' ? styles.bubbleUser : styles.bubbleAi}>
+                <div style={m.role === 'user' ? styles.bubbleUser : hasTable(m.content) ? { ...styles.bubbleAi, maxWidth: '100%' } : styles.bubbleAi}>
                   <MarkdownLite text={m.content} />
                 </div>
                 {m.role === 'ai' && m.source && (

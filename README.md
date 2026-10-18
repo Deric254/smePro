@@ -11,7 +11,6 @@ backend starts itself inside the app and serves a local HTTP API on
 encrypted (SQLCipher) SQLite database on the user's own device.
 
 ## Layout
-## push changes
 
 ```
 src/                React frontend (Vite + TypeScript)

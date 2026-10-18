@@ -46,7 +46,34 @@ function isTableDivider(line: string): boolean {
   return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?$/.test(line.trim());
 }
 
-const cellStyle = { padding: '0.25em 0.5em', borderBottom: '1px solid var(--paper-line)', textAlign: 'left' as const, whiteSpace: 'nowrap' as const };
+const cellStyle = { padding: '0.25em 0.3em', borderBottom: '1px solid var(--paper-line)', textAlign: 'left' as const };
+
+/** Numbers and dates never split across lines; any other text may wrap. */
+function cellWrap(cell: string): { whiteSpace: 'nowrap' | 'normal' } {
+  return { whiteSpace: /^[\d.,:/-]+$/.test(cell) ? 'nowrap' : 'normal' };
+}
+
+/** Lets values like `owed_to_business` wrap after an underscore. */
+function allowBreaks(nodes: ReactNode[], keyPrefix: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  nodes.forEach((node, i) => {
+    if (typeof node !== 'string') {
+      out.push(node);
+      return;
+    }
+    node.split('_').forEach((part, j, parts) => {
+      if (j < parts.length - 1) out.push(`${part}_`, <wbr key={`${keyPrefix}-${i}-${j}`} />);
+      else out.push(part);
+    });
+  });
+  return out;
+}
+
+/** True when the text contains at least one real table (see MarkdownLite). */
+export function hasTable(text: string): boolean {
+  const lines = text.split('\n');
+  return lines.some((line, i) => line.trimStart().startsWith('|') && isTableDivider(lines[i + 1] ?? ''));
+}
 
 /** Renders a full AI (or user) message: headers, lists, tables, paragraphs. */
 export function MarkdownLite({ text }: { text: string }) {
@@ -63,11 +90,11 @@ export function MarkdownLite({ text }: { text: string }) {
     // narrow chat bubble.
     blocks.push(
       <div key={`table-${blocks.length}`} style={{ overflowX: 'auto', margin: '0.4em 0' }}>
-        <table style={{ borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: '0.75rem' }}>
           <thead>
             <tr>
               {header.map((cell, c) => (
-                <th key={c} style={{ ...cellStyle, borderBottom: '2px solid var(--paper-line)' }}>{renderInline(cell, `th-${blocks.length}-${c}`)}</th>
+                <th key={c} style={{ ...cellStyle, ...cellWrap(cell), borderBottom: '2px solid var(--paper-line)' }}>{allowBreaks(renderInline(cell, `th-${blocks.length}-${c}`), `thb-${blocks.length}-${c}`)}</th>
               ))}
             </tr>
           </thead>
@@ -75,7 +102,7 @@ export function MarkdownLite({ text }: { text: string }) {
             {body.map((row, r) => (
               <tr key={r}>
                 {row.map((cell, c) => (
-                  <td key={c} style={cellStyle}>{renderInline(cell, `td-${blocks.length}-${r}-${c}`)}</td>
+                  <td key={c} style={{ ...cellStyle, ...cellWrap(cell) }}>{allowBreaks(renderInline(cell, `td-${blocks.length}-${r}-${c}`), `tdb-${blocks.length}-${r}-${c}`)}</td>
                 ))}
               </tr>
             ))}
