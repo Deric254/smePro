@@ -5,8 +5,8 @@
 // that instruction, and any message already saved to history before
 // this existed was written under the old, unrestricted prompt. This is
 // defense in depth for both cases: it recognizes just enough markdown
-// (bold, headers, bullet/numbered lists, inline code, line breaks) to
-// render something clean either way, instead of a customer ever seeing
+// (bold, headers, bullet/numbered lists, tables, inline code, line
+// breaks) to render something clean either way, instead of a customer ever seeing
 // a literal "**Total: $450**" in a chat bubble again.
 //
 // Deliberately NOT using a markdown library or dangerouslySetInnerHTML
@@ -36,12 +36,55 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
   });
 }
 
-/** Renders a full AI (or user) message: headers, lists, paragraphs. */
+/** Splits one `| a | b |` row into trimmed cells. */
+function parseTableRow(line: string): string[] {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+}
+
+/** True for the `|---|:---:|` divider row that follows a table header. */
+function isTableDivider(line: string): boolean {
+  return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?$/.test(line.trim());
+}
+
+const cellStyle = { padding: '0.25em 0.5em', borderBottom: '1px solid var(--paper-line)', textAlign: 'left' as const, whiteSpace: 'nowrap' as const };
+
+/** Renders a full AI (or user) message: headers, lists, tables, paragraphs. */
 export function MarkdownLite({ text }: { text: string }) {
   const lines = text.split('\n');
   const blocks: ReactNode[] = [];
   let listItems: string[] = [];
   let listOrdered = false;
+  let tableRows: string[][] = [];
+
+  function flushTable() {
+    if (tableRows.length === 0) return;
+    const [header, ...body] = tableRows;
+    // The wrapper scrolls sideways so a wide table never stretches the
+    // narrow chat bubble.
+    blocks.push(
+      <div key={`table-${blocks.length}`} style={{ overflowX: 'auto', margin: '0.4em 0' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+          <thead>
+            <tr>
+              {header.map((cell, c) => (
+                <th key={c} style={{ ...cellStyle, borderBottom: '2px solid var(--paper-line)' }}>{renderInline(cell, `th-${blocks.length}-${c}`)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {body.map((row, r) => (
+              <tr key={r}>
+                {row.map((cell, c) => (
+                  <td key={c} style={cellStyle}>{renderInline(cell, `td-${blocks.length}-${r}-${c}`)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+    tableRows = [];
+  }
 
   function flushList() {
     if (listItems.length === 0) return;
@@ -61,6 +104,16 @@ export function MarkdownLite({ text }: { text: string }) {
     const bulletMatch = line.match(/^\s*[-*]\s+(.*)$/);
     const numberedMatch = line.match(/^\s*\d+[.)]\s+(.*)$/);
     const headerMatch = line.match(/^#{1,6}\s+(.*)$/);
+
+    // A table is a `|` row followed by a `|---|` divider row, then more
+    // `|` rows. A lone line that merely starts with `|` stays plain text.
+    const startsTable = line.trimStart().startsWith('|') && (tableRows.length > 0 || isTableDivider(lines[i + 1] ?? ''));
+    if (startsTable) {
+      flushList();
+      if (!isTableDivider(line)) tableRows.push(parseTableRow(line));
+      return;
+    }
+    flushTable();
 
     if (bulletMatch) {
       if (listOrdered) flushList();
@@ -91,6 +144,7 @@ export function MarkdownLite({ text }: { text: string }) {
     blocks.push(<div key={`p-${i}`}>{renderInline(line, `p-${i}`)}</div>);
   });
   flushList();
+  flushTable();
 
   return <>{blocks}</>;
 }
