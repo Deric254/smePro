@@ -125,8 +125,10 @@ export default function AndroidUpdateChecker() {
       // security requirement for any app not installed through the
       // Play Store, not something that can be skipped from here.
       await invoke('install_apk', { path: apkPath });
+      // The banner stays: if the user cancels Android's confirmation
+      // screen, Update must still be there to retry. A completed install
+      // replaces this whole app, so there is nothing to clean up.
       setStatus('idle');
-      setRelease(null);
     } catch (e) {
       setStatus('error');
       setError(e instanceof Error ? e.message : 'Could not download or install the update');

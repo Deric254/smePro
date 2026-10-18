@@ -2,6 +2,9 @@ package com.smepro.app
 
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.core.content.FileProvider
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -46,6 +49,18 @@ class InstallerPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun installApk(invoke: Invoke) {
         try {
+            // Android 8+ silently refuses to start an install for an app the
+            // user hasn't allowed under "Install unknown apps". Send them to
+            // that exact screen and reject with a plain-language message, so
+            // the banner stays and a second tap on Update can succeed.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.packageManager.canRequestPackageInstalls()) {
+                activity.startActivity(
+                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${activity.packageName}"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                invoke.reject("Allow SME Pro to install updates on the screen that just opened, then come back and tap Update again.")
+                return
+            }
             val args = invoke.parseArgs(InstallApkArgs::class.java)
             val file = File(args.path)
             val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", file)
