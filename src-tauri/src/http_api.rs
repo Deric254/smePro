@@ -66,12 +66,12 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
                 return;
             }
 
-            // Licence gate (desktop builds; see licensing.rs). The local API is
+            // Licence gate (every platform incl. Android; see licensing.rs). The local API is
             // the real gate: an unlicensed copy gets nothing from it, whatever
             // the window shows. Only the three /licence/* routes the
             // activation screen needs stay reachable. The dev-only binaries
             // (feature "dev-tools", never in a release build) are not gated.
-            #[cfg(all(desktop, not(feature = "dev-tools")))]
+            #[cfg(not(feature = "dev-tools"))]
             {
                 let gate_path = url.split('?').next().unwrap_or("");
                 if gate_path.starts_with("/licence/") {

@@ -5,12 +5,12 @@ import { retryOnConnectionFailure } from '../lib/retry';
 import UpdateChecker from './UpdateChecker';
 import LicenceManager from './LicenceManager';
 
-// Licence gate for the desktop app. The real enforcement is in the local API
+// Licence gate (desktop and Android). The real enforcement is in the local API
 // (see src-tauri/src/licensing.rs: an unlicensed copy gets nothing from it);
 // this component only shows the activation screen and the renewal reminder.
 //
-// Builds without licence routes (the Android build) answer 404 here, which
-// is treated as "nothing to gate", so those builds behave exactly as before.
+// Every release build serves the licence routes. A 404 only happens for dev
+// binaries built without them, and is treated as "nothing to gate".
 // If the local server can't be reached at all, the app is shown as usual:
 // every screen in it already reports that, and the API stays closed anyway.
 

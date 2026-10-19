@@ -1,4 +1,4 @@
-//! Offline, per-computer licensing for the desktop app (Ed25519 signed licences).
+//! Offline, per-computer licensing for the desktop and Android apps (Ed25519 signed licences).
 //!
 //! This is the Rust port of the `offline-app-licensing` kit, using the exact
 //! same licence format as the owner tools in `licensing/` (see
@@ -21,7 +21,7 @@
 //! database nor the users/sign-in system. Licence = "may this copy run";
 //! sign-in = "who is using it".
 //!
-//! Where it is enforced: `http_api::serve` (desktop builds) asks
+//! Where it is enforced: `http_api::serve` (all release builds, Android included) asks
 //! `gate_block()` before routing ANY request, so the local API itself refuses
 //! to serve an unlicensed copy: the window can't be used to bypass it. The
 //! activation screen (`src/components/LicenceGate.tsx`) talks to the three
