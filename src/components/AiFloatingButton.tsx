@@ -230,7 +230,7 @@ export default function AiFloatingButton({ open, onClose }: { open: boolean; onC
             )}
             {/* A reply with a table uses the full chat width; the 85% cap on plain bubbles would leave an empty strip beside it. */}
             {messages.map((m, i) => (
-              <div key={i}>
+              <div key={i} style={{ minWidth: 0 }}>
                 <div style={m.role === 'user' ? styles.bubbleUser : hasTable(m.content) ? { ...styles.bubbleAi, maxWidth: '100%' } : styles.bubbleAi}>
                   <MarkdownLite text={m.content} />
                 </div>
@@ -282,10 +282,10 @@ const styles: Record<string, React.CSSProperties> = {
   historyRow: { display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.5rem 0.5rem', borderRadius: 6, cursor: 'pointer' },
   deleteBtn: { background: 'none', border: 'none', fontSize: '0.85rem', color: 'var(--ink-soft)', cursor: 'pointer', flexShrink: 0 },
   contextPanel: { padding: '0.7rem 0.9rem', borderBottom: '1px solid var(--paper-line)', maxHeight: 160, overflowY: 'auto', background: 'var(--paper)' },
-  body: { flex: 1, overflowY: 'auto', padding: '0.8rem 0.9rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' },
+  body: { flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', padding: '0.8rem 0.9rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' },
   hint: { fontSize: '0.8rem', color: 'var(--ink-soft)', lineHeight: 1.5 },
-  bubbleUser: { alignSelf: 'flex-end', background: 'var(--ink)', color: '#fff', padding: '0.5em 0.75em', borderRadius: '10px 10px 2px 10px', fontSize: '0.85rem', maxWidth: '85%' },
-  bubbleAi: { alignSelf: 'flex-start', background: 'var(--paper)', border: '1px solid var(--paper-line)', padding: '0.5em 0.75em', borderRadius: '10px 10px 10px 2px', fontSize: '0.85rem', maxWidth: '85%', lineHeight: 1.5 },
+  bubbleUser: { alignSelf: 'flex-end', background: 'var(--ink)', color: '#fff', padding: '0.5em 0.75em', borderRadius: '10px 10px 2px 10px', fontSize: '0.85rem', maxWidth: '85%', overflowWrap: 'anywhere' },
+  bubbleAi: { alignSelf: 'flex-start', background: 'var(--paper)', border: '1px solid var(--paper-line)', padding: '0.5em 0.75em', borderRadius: '10px 10px 10px 2px', fontSize: '0.85rem', maxWidth: '85%', lineHeight: 1.5, overflowWrap: 'anywhere' },
   actionRow: { display: 'flex', justifyContent: 'flex-end', padding: '0.3rem 0.9rem 0' },
   clearBtn: { background: 'none', border: 'none', fontSize: '0.72rem', color: 'var(--ink-soft)', cursor: 'pointer', textDecoration: 'underline', padding: '0.1rem 0' },
   // Extra bottom clearance beyond the panel's own padding-bottom (see

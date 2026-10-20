@@ -27,7 +27,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
     }
     if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
       return (
-        <code key={key} style={{ background: 'var(--paper-line)', padding: '0.1em 0.35em', borderRadius: 4, fontSize: '0.9em' }}>
+        <code key={key} style={{ background: 'var(--paper-line)', padding: '0.1em 0.35em', borderRadius: 4, fontSize: '0.9em', overflowWrap: 'anywhere' }}>
           {part.slice(1, -1)}
         </code>
       );

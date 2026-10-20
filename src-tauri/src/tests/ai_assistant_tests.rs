@@ -169,6 +169,43 @@ fn only_the_most_recent_turns_are_sent() {
     assert_eq!(messages.last().unwrap()["content"], "now?");
 }
 
+// --------------------------------------------------- request size budget
+
+#[test]
+fn small_snapshot_is_sent_unchanged() {
+    let snap = json!({ "modules": { "inventory": { "operational_details": [1, 2, 3] } } });
+    assert_eq!(fit_snapshot(&snap).unwrap(), serde_json::to_string(&snap).unwrap());
+}
+
+#[test]
+fn oversized_snapshot_is_shortened_to_budget_keeping_totals_and_time_series() {
+    let rows: Vec<Value> = (0..100).map(|i| json!({ "sku": format!("SKU-{i:04}"), "name": format!("Item number {i}"), "quantity": i, "unit_cost": 12.5, "unit_price": 19.99 })).collect();
+    let snap = json!({
+        "modules": { "inventory": { "record_count": 100, "totals": { "quantity": 4950 }, "operational_details": rows.clone(), "low_stock_alerts": [] } },
+        "stock_runway": rows,
+        "monthly_revenue": (1..=12).map(|m| json!({ "month": format!("2026-{m:02}"), "revenue": 1000.0 })).collect::<Vec<_>>(),
+    });
+    assert!(serde_json::to_string(&snap).unwrap().len() > MAX_SNAPSHOT_CHARS, "fixture must start over budget");
+    let out = fit_snapshot(&snap).unwrap();
+    assert!(out.len() <= MAX_SNAPSHOT_CHARS, "{} chars", out.len());
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["modules"]["inventory"]["record_count"], 100);
+    assert_eq!(v["modules"]["inventory"]["totals"]["quantity"], 4950);
+    assert_eq!(v["monthly_revenue"].as_array().unwrap().len(), 12, "time series never cut");
+    assert!(v["modules"]["inventory"]["operational_details"].as_array().unwrap().len() < 100);
+    assert!(v["data_note"].as_str().unwrap().contains("shortened"));
+}
+
+#[test]
+fn history_is_bounded_by_characters_dropping_the_oldest_first() {
+    let long = "x".repeat(1_500);
+    let history: Vec<Turn> = (0..6).map(|i| Turn { role: if i % 2 == 0 { "user" } else { "ai" }.into(), content: format!("{i}{long}") }).collect();
+    let kept = recent_history(&history);
+    assert!(kept.iter().map(|t| t.content.len()).sum::<usize>() <= MAX_HISTORY_CHARS);
+    assert!(kept.len() < history.len());
+    assert!(kept.last().unwrap().content.starts_with('5'), "newest turn survives");
+}
+
 // --------------------------------------------------------- request shapes
 
 fn sample_prompt<'a>(history: &'a [Turn]) -> Prompt<'a> {

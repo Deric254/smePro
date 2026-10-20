@@ -30,6 +30,18 @@ const MAX_MODELS_PER_PROVIDER: usize = 3;
 /// Free tiers cap tokens per minute (Groq: 8K). Resending an entire long
 /// conversation every turn would trip that, so only the recent turns go.
 const MAX_HISTORY_TURNS: usize = 12;
+/// The turn count alone is no bound: twelve long answers are thousands of
+/// tokens. Oldest turns are dropped until the rest fit this many characters.
+const MAX_HISTORY_CHARS: usize = 4_000;
+/// The business snapshot rides along with every question. Groq's free tier
+/// refuses any request over ~8K tokens (input plus the output cap) with a
+/// 413, and JSON costs roughly 3 characters per token, so the snapshot gets
+/// a hard character budget instead of growing with the business.
+const MAX_SNAPSHOT_CHARS: usize = 10_000;
+/// Row caps tried in turn on the snapshot's long lists until it fits.
+const LIST_CAPS: [usize; 6] = [100, 50, 25, 12, 6, 3];
+/// Time series: newest rows matter most, so these are never cut from the end.
+const KEEP_WHOLE: [&str; 2] = ["monthly_revenue", "day_of_week_sales_pattern"];
 /// Headroom matters: reasoning models spend output tokens thinking, and a
 /// cap that is too small leaves an empty answer.
 const MAX_OUTPUT_TOKENS: u32 = 1200;
@@ -214,9 +226,69 @@ pub fn prepare(conn: &Connection, business_id: &str, user_id: &str) -> Result<Pr
          snapshot does not support.\n\n\
          BUSINESS SNAPSHOT:\n{}",
         // Compact, not pretty: whitespace is wasted tokens on a metered free tier.
-        serde_json::to_string(&snapshot)?
+        fit_snapshot(&snapshot)?
     );
     Ok(PreparedAiCall { system_prompt, chain: chain_for(conn, business_id)? })
+}
+
+/// The snapshot as compact JSON, shortened until it fits `MAX_SNAPSHOT_CHARS`.
+/// Only the long row lists are cut (to the first N rows of their own sort
+/// order); `record_count` and `totals` are never touched, so aggregate
+/// answers stay exact, and a note tells the model the lists are partial so
+/// it says so instead of treating a missing row as a missing record.
+fn fit_snapshot(snapshot: &Value) -> Result<String> {
+    let full = serde_json::to_string(snapshot)?;
+    if full.len() <= MAX_SNAPSHOT_CHARS {
+        return Ok(full);
+    }
+    let mut trimmed = snapshot.clone();
+    let mut out = full;
+    for cap in LIST_CAPS {
+        cap_lists(&mut trimmed, cap);
+        if let Some(obj) = trimmed.as_object_mut() {
+            obj.insert(
+                "data_note".to_string(),
+                json!(format!(
+                    "Long lists are shortened to their first {cap} rows to fit. record_count and totals still cover every record. \
+                     If asked about an item that is not listed, say the list is partial rather than that it does not exist."
+                )),
+            );
+        }
+        out = serde_json::to_string(&trimmed)?;
+        if out.len() <= MAX_SNAPSHOT_CHARS {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Truncates every array under `value` to `cap` rows, except the time series.
+fn cap_lists(value: &mut Value, cap: usize) {
+    match value {
+        Value::Array(items) => {
+            items.truncate(cap);
+            items.iter_mut().for_each(|v| cap_lists(v, cap));
+        }
+        Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                if !KEEP_WHOLE.contains(&key.as_str()) {
+                    cap_lists(v, cap);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The newest turns that fit both the turn cap and the character budget.
+fn recent_history(history: &[Turn]) -> &[Turn] {
+    let mut start = history.len().saturating_sub(MAX_HISTORY_TURNS);
+    let mut chars: usize = history[start..].iter().map(|t| t.content.len()).sum();
+    while start < history.len() && chars > MAX_HISTORY_CHARS {
+        chars -= history[start].content.len();
+        start += 1;
+    }
+    &history[start..]
 }
 
 /// The active provider first (it must have a key), then every other FREE
@@ -253,7 +325,7 @@ pub fn send(prepared: &PreparedAiCall, question: &str, history: &[Turn]) -> Resu
     let prompt = Prompt {
         system: &prepared.system_prompt,
         question,
-        history: &history[history.len().saturating_sub(MAX_HISTORY_TURNS)..],
+        history: recent_history(history),
     };
     let deadline = Instant::now() + TOTAL_BUDGET;
     let mut failures: Vec<String> = Vec::new();
@@ -382,7 +454,15 @@ fn post_json(url: &str, headers: &[(&str, String)], body: &Value, timeout: Durat
             skip_provider: matches!(code, 401 | 402 | 403),
         }),
         // `kind()` only: the full Display includes the URL.
-        Err(ureq::Error::Transport(t)) => Err(Failure { detail: format!("unreachable ({})", t.kind()), skip_provider: true }),
+        // ureq reports a read/write failure, which includes hitting the
+        // timeout, as a bare "Network Error"; say what it usually means.
+        Err(ureq::Error::Transport(t)) => {
+            let detail = match t.kind() {
+                ureq::ErrorKind::Io => "unreachable (connection dropped or timed out)".to_string(),
+                kind => format!("unreachable ({kind})"),
+            };
+            Err(Failure { detail, skip_provider: true })
+        }
     }
 }
 
