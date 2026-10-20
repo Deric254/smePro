@@ -36,3 +36,5 @@ smp-owner.key
 __pycache__/
 *.pyc
 smepro-licence-kit/
+/src-tauri/licensing.json
+/src-tauri/licensing.json.bak
