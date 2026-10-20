@@ -2,6 +2,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Response, Server};
 
@@ -19,9 +20,35 @@ enum ApiResponse {
     Download(u16, Box<dyn std::io::Read + Send>, usize, String),
 }
 
+/// The port the local API is really listening on (0 until it is bound).
+static API_PORT: AtomicU16 = AtomicU16::new(0);
+
+/// Read by the window (the `api_port` command in lib.rs) so it talks to the right port.
+pub fn api_port() -> u16 {
+    API_PORT.load(Ordering::SeqCst)
+}
+
+/// Binds the requested loopback address. If that port is taken (another program, or a stuck
+/// earlier copy), takes any free loopback port instead of leaving the app without a server:
+/// a fixed port that is busy on one computer and free on another is what made the app work on
+/// one device and not on the next.
+fn bind(addr: &str) -> Result<(Server, u16), String> {
+    let server = match Server::http(addr) {
+        Ok(s) => s,
+        Err(first) => match addr.rsplit_once(':') {
+            Some((host, _)) if host == "127.0.0.1" => Server::http(format!("{host}:0"))
+                .map_err(|e| format!("failed to bind local API server at {addr} ({first}) or at any free port ({e})"))?,
+            _ => return Err(format!("failed to bind local API server at {addr}: {first}")),
+        },
+    };
+    let port = server.server_addr().to_ip().map(|a| a.port()).ok_or("the local API server has no network address")?;
+    Ok((server, port))
+}
+
 pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
-    let server = Server::http(addr)
-        .map_err(|e| format!("failed to bind local API server at {addr}: {e}"))?;
+    let (server, port) = bind(addr)?;
+    API_PORT.store(port, Ordering::SeqCst);
+    let addr = format!("127.0.0.1:{port}");
     let conn = Arc::new(Mutex::new(conn));
     // 5 attempts per 15-minute rolling window — generous enough that a
     // real user fumbling their password isn't locked out, tight enough
@@ -55,11 +82,23 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
             let method = request.method().clone();
             let url = request.url().to_string();
 
+            // Only this app's own windows may use the API. A web page open in the owner's browser
+            // can reach 127.0.0.1 too, so a request from any other origin, or addressed to any
+            // other host name (DNS rebinding), is refused before anything else happens, the
+            // owner licence routes included. No Origin header means no web page is involved.
+            let origin = header_value(request.headers(), "Origin");
+            let host_ok = header_value(request.headers(), "Host").map(|h| crate::local_guard::host_allowed(&h)).unwrap_or(true);
+            let origin_ok = origin.as_deref().map(crate::local_guard::origin_allowed).unwrap_or(true);
+            if !host_ok || !origin_ok {
+                respond(request, ApiResponse::Json(403, json!({"error": "This request isn't allowed."})));
+                return;
+            }
+
             // CORS preflight — the frontend runs on a different port (Vite
             // dev server) than this API, so browsers send an OPTIONS request
             // before PUT/DELETE calls and calls with custom headers.
             if method == Method::Options {
-                let headers = cors_headers();
+                let headers = cors_headers(origin.as_deref());
                 let response = Response::from_string("").with_status_code(204);
                 let response = headers.into_iter().fold(response, |r, h| r.with_header(h));
                 let _ = request.respond(response);
@@ -162,7 +201,8 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
 
 /// Adds the CORS and security headers every response carries and sends it.
 fn send<R: std::io::Read>(request: tiny_http::Request, response: Response<R>) {
-    let response = cors_headers().into_iter().fold(response, |r, h| r.with_header(h));
+    let origin = header_value(request.headers(), "Origin");
+    let response = cors_headers(origin.as_deref()).into_iter().fold(response, |r, h| r.with_header(h));
     let response = crate::security::security_headers().into_iter().fold(response, |r, (name, value)| {
         r.with_header(Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap())
     });
@@ -201,19 +241,20 @@ fn respond(request: tiny_http::Request, response: ApiResponse) {
     }
 }
 
-/// CORS is wide-open (`*`). The app binds this API to 127.0.0.1 only
-/// (see lib.rs's setup()) — not reachable from outside the device, so
-/// the usual cross-origin risk model doesn't apply the way it would
-/// for a public API. Every request still requires a valid bearer token
-/// (see `auth::current_user` below), so this is "no un-authenticated
-/// endpoint is exposed," not "no security boundary at all." Traffic is
-/// plain HTTP, not HTTPS — loopback only, so nothing crosses a network.
-fn cors_headers() -> Vec<Header> {
-    vec![
-        Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
-        Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, PUT, DELETE, OPTIONS"[..]).unwrap(),
-        Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type, Authorization, X-Business-Id, X-Backup-Passphrase"[..]).unwrap(),
-    ]
+/// CORS names the one allowed window instead of `*`. The API is bound to 127.0.0.1, but any web
+/// page in the owner's browser could otherwise read its answers, owner licence routes included.
+/// Requests from other origins never get here (see the check at the top of `serve`); they and
+/// requests with no Origin get no CORS headers, which is all a non-browser caller needs.
+fn cors_headers(origin: Option<&str>) -> Vec<Header> {
+    match origin.filter(|o| crate::local_guard::origin_allowed(o)) {
+        Some(o) => vec![
+            Header::from_bytes(&b"Access-Control-Allow-Origin"[..], o.as_bytes()).unwrap(),
+            Header::from_bytes(&b"Vary"[..], &b"Origin"[..]).unwrap(),
+            Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, PUT, DELETE, OPTIONS"[..]).unwrap(),
+            Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type, Authorization, X-Business-Id, X-Backup-Passphrase"[..]).unwrap(),
+        ],
+        None => vec![],
+    }
 }
 
 fn header_value(headers: &[Header], name: &str) -> Option<String> {
@@ -2391,4 +2432,26 @@ fn crud_error(e: &anyhow::Error) -> ApiResponse {
     let msg = e.to_string();
     let status = if msg.starts_with(rbac::PERMISSION_DENIED_PREFIX) { 403 } else { 400 };
     ApiResponse::Json(status, json!({"error": msg}))
+}
+
+#[cfg(test)]
+mod local_access_tests {
+    use super::*;
+
+    #[test]
+    fn a_busy_port_falls_back_to_a_free_loopback_port() {
+        let (_held, port) = bind("127.0.0.1:0").unwrap();
+        let (_second, other) = bind(&format!("127.0.0.1:{port}")).unwrap();
+        assert_ne!(port, other);
+        assert!(other > 0);
+        assert!(bind("192.0.2.1:1").is_err(), "only loopback addresses fall back");
+    }
+
+    #[test]
+    fn cors_is_granted_only_to_this_apps_own_window() {
+        assert!(cors_headers(Some("https://evil.example")).is_empty());
+        assert!(cors_headers(None).is_empty());
+        let granted = cors_headers(Some("http://tauri.localhost"));
+        assert_eq!(header_value(&granted, "Access-Control-Allow-Origin").as_deref(), Some("http://tauri.localhost"));
+    }
 }

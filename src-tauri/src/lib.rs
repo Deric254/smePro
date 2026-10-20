@@ -15,6 +15,7 @@ pub mod crud;
 pub mod currency;
 pub mod customers;
 pub mod db;
+pub mod durable;
 pub mod db_migrations;
 pub mod debt_settlement;
 pub mod excel_import;
@@ -32,6 +33,7 @@ pub mod installer;
 pub mod invoice;
 pub mod licence_admin;
 pub mod licensing;
+pub mod local_guard;
 pub mod module;
 pub mod money;
 pub mod onboarding;
@@ -202,6 +204,13 @@ pub mod xlsx_export;
 /// mobile. Cfg-gating this command out of that build entirely is safer
 /// than trying to make it fail gracefully at runtime instead.
 #[cfg(desktop)]
+/// The port the local API really got (it is 8080 unless something else already holds it).
+/// 0 means the server has not finished binding yet; the window asks again.
+#[tauri::command]
+fn api_port() -> u16 {
+    http_api::api_port()
+}
+
 #[tauri::command]
 async fn rollback_to_manifest(app: tauri::AppHandle, token: String, tag: String) -> Result<(), String> {
     use tauri::Manager;
@@ -333,11 +342,11 @@ pub fn run() {
                 let _ = window.unminimize();
             }
         }))
-        .invoke_handler(tauri::generate_handler![rollback_to_manifest]);
+        .invoke_handler(tauri::generate_handler![rollback_to_manifest, api_port]);
     #[cfg(not(desktop))]
     let builder = tauri::Builder::default()
         .plugin(installer::init())
-        .invoke_handler(tauri::generate_handler![installer::install_apk]);
+        .invoke_handler(tauri::generate_handler![installer::install_apk, api_port]);
 
     // Self-updating via tauri-plugin-updater only makes sense on
     // desktop — that plugin has no Android/iOS implementation.

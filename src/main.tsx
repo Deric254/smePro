@@ -5,12 +5,13 @@ import './styles/mobile.css'
 import App from './App.tsx'
 import { ConfirmHost } from './components/ConfirmDialog'
 import LicenceGate from './components/LicenceGate'
+import { initApiBase } from './api'
 
-createRoot(document.getElementById('root')!).render(
+initApiBase().finally(() => createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <LicenceGate>
       <App />
     </LicenceGate>
     <ConfirmHost />
   </StrictMode>,
-)
+))

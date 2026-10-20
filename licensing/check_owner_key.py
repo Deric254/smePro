@@ -35,6 +35,10 @@ def main():
         if not ok:
             bad.append(f"{a.file} has no valid {a.var} (64 hex characters). Run make_owner_key.py and set it before building.")
 
+    shipped = cfg.get("public_key")
+    if key and shipped and shipped.lower() != key.lower():
+        bad.append(f"licensing.json public_key does not match {a.var} in {a.file}. Licences issued by the tools would not open in the app. Make them the same.")
+
     if not a.no_scan:
         files = _common.tracked_files()
         if files is not None:

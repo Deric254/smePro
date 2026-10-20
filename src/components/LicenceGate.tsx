@@ -16,7 +16,7 @@ import LicenceManager from './LicenceManager';
 
 type LicenceState = {
   ok: boolean;
-  kind: 'owner' | 'licensed' | 'unlicensed' | 'unconfigured';
+  kind: 'owner' | 'licensed' | 'unlicensed' | 'unconfigured' | 'storage';
   message: string;
   install_id?: string;
   expires?: string;
@@ -148,11 +148,11 @@ function ActivationScreen({
     } catch { /* clipboard not available: the code is on screen to read out */ }
   }
 
-  if (state.kind === 'unconfigured') {
+  if (state.kind === 'unconfigured' || state.kind === 'storage') {
     return (
       <div style={renewal ? undefined : styles.wrap}>
         <div className="card" style={styles.card}>
-          <h2 style={styles.title}>This copy can't be used</h2>
+          <h2 style={styles.title}>{state.kind === 'storage' ? "The licence can't be checked right now" : "This copy can't be used"}</h2>
           <p style={styles.text}>{state.message}</p>
         </div>
       </div>

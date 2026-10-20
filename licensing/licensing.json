@@ -2,5 +2,6 @@
   "app_id": "SME Pro",
   "prefix": "SMP",
   "public_key_file": "src-tauri/src/owner_key.rs",
-  "public_key_var": "OWNER_PUBLIC_KEY"
+  "public_key_var": "OWNER_PUBLIC_KEY",
+  "public_key": "de645067d4c692c647ec58f2700f666251a366c1db3a7884b0072da7d02e7f5f"
 }

@@ -30,6 +30,27 @@ def load_config(path=None) -> dict:
     return {}
 
 
+def save_config(cfg: dict, path=None):
+    with open(path or os.path.join(HERE, CONFIG_NAME), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+
+
+def valid_public_key(hex_key) -> bool:
+    try:
+        return bool(hex_key) and len(bytes.fromhex(hex_key)) == 32
+    except ValueError:
+        return False
+
+
+def resolve_public_key(explicit, key_file, var, cfg):
+    """The app's public key, from (in order) --public-key, licensing.json's "public_key", or the app's key file.
+
+    Keeping the key in licensing.json is what lets the four tool files run on any computer without the project.
+    """
+    return explicit or cfg.get("public_key") or (read_public_key(key_file, var) if key_file else None)
+
+
 def key_pattern(var: str):
     # NAME = "hex"  |  NAME: &str = "hex"  |  "NAME": "hex"  (Python, Rust, JS, C#, Go, JSON ...)
     return re.compile(r"(" + re.escape(var) + r"""["']?\s*[:=]\s*(?:[^"'\n]*?)["'])([0-9a-fA-F]*)(["'])""")

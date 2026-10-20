@@ -36,9 +36,9 @@ def main():
     ap.add_argument("--var", default=cfg.get("public_key_var", "OWNER_PUBLIC_KEY"))
     ap.add_argument("--public-key")
     a = ap.parse_args()
-    public = a.public_key or (_common.read_public_key(a.public_key_file, a.var) if a.public_key_file else None)
+    public = _common.resolve_public_key(a.public_key, a.public_key_file, a.var, cfg)
     if not (a.prefix and a.app and public):
-        ap.error("need --prefix, --app and the public key (--public-key-file or --public-key)")
+        ap.error("need --prefix, --app and the public key (\"public_key\" in licensing.json, --public-key or --public-key-file)")
     try:
         body = json.loads(licensing._unb64(re.sub(r"\s+", "", a.token).split(".")[1]))
         print("Contents:", json.dumps(body, indent=2))

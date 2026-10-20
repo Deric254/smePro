@@ -7,6 +7,8 @@ The owner key is read from the key file (or typed at a hidden prompt), never fro
 Works for ANY app that uses this licence format: pass --prefix/--app/--public-key-file (or have a licensing.json next to it).
 """
 import argparse
+import csv
+import datetime
 import getpass
 import os
 import sys
@@ -35,12 +37,15 @@ def main():
     if not (a.prefix and a.app):
         ap.error("--prefix and --app are required (or keep licensing.json next to this script)")
 
-    public = a.public_key or (_common.read_public_key(a.public_key_file, a.var) if a.public_key_file else None)
+    public = _common.resolve_public_key(a.public_key, a.public_key_file, a.var, cfg)
     if not public:
-        ap.error("Can't find the app's public key: give --public-key-file or --public-key")
+        ap.error("Can't find the app's public key: put \"public_key\" in licensing.json, or give --public-key or --public-key-file")
     lic = licensing.Licensing(a.app, a.prefix, public, store=None)
 
     key_file = a.key_file or f"{a.prefix.lower()}-owner.key"
+    if not os.path.exists(key_file) and not a.key_file:
+        beside = os.path.join(_common.HERE, f"{a.prefix.lower()}-owner.key")   # the key kept next to the tools
+        key_file = beside if os.path.exists(beside) else key_file
     if os.path.exists(key_file):
         key_text = open(key_file, encoding="utf-8").read()
     else:
@@ -51,8 +56,9 @@ def main():
     except (licensing.LicenceError, ValueError) as e:
         sys.exit(f"Not issued: {e}")
     if a.log:
-        with open(a.log, "a", encoding="utf-8") as f:
-            f.write(f"{__import__('datetime').date.today().isoformat()},{out['user']},{a.code.upper()},{out['expires']}\n")
+        # csv quotes names that contain commas or quotes, so one customer is always one row.
+        with open(a.log, "a", encoding="utf-8", newline="") as f:
+            csv.writer(f).writerow([datetime.date.today().isoformat(), out["user"], a.code.upper(), out["expires"]])
     print(f"""
 Licence for {out['user']}, computer {a.code.upper()}, valid until {out['expires']}.
 Send them everything between the lines:

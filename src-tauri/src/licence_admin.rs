@@ -133,28 +133,33 @@ fn ledger_path() -> PathBuf {
 }
 
 /// A missing file is an empty list. An unreadable one is an ERROR and is never
-/// overwritten, so a damaged file can't silently wipe the customer list.
+/// overwritten, so a damaged file can't silently wipe the customer list. A file
+/// that is damaged (not just busy) is read from its `.bak` copy when that is good.
 fn load(path: &Path) -> Result<Ledger, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str::<Ledger>(&text)
-            .map_err(|_| format!("The customer list file is damaged and was left untouched: {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Ledger::default()),
+    let backup = crate::durable::sibling(path, ".bak");
+    let from_backup = || crate::durable::read_text(&backup).ok().flatten().and_then(|t| serde_json::from_str::<Ledger>(&t).ok());
+    let damaged = || format!("The customer list file is damaged and was left untouched: {}", path.display());
+    match crate::durable::read_text(path) {
+        Ok(Some(text)) => match serde_json::from_str::<Ledger>(&text) {
+            Ok(l) => Ok(l),
+            Err(_) => from_backup().ok_or_else(damaged),
+        },
+        Ok(None) => Ok(from_backup().unwrap_or_default()),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => from_backup().ok_or_else(damaged),
         Err(e) => Err(format!("Couldn't read the customer list: {e}")),
     }
 }
 
-/// Atomic write, keeping the previous version as `.bak`.
+/// Crash-safe write (forced to disk), keeping the previous GOOD version as `.bak`.
+/// A file that doesn't parse is never copied over the backup.
 fn save(path: &Path, ledger: &Ledger) -> Result<(), String> {
     let text = serde_json::to_string_pretty(ledger).map_err(|e| e.to_string())?;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Ok(Some(old)) = crate::durable::read_text(path) {
+        if serde_json::from_str::<Ledger>(&old).is_ok() {
+            let _ = crate::durable::write_atomic(&crate::durable::sibling(path, ".bak"), old.as_bytes());
+        }
     }
-    if path.exists() {
-        let _ = std::fs::copy(path, path.with_extension("json.bak"));
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text).map_err(|e| format!("Couldn't save the customer list: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("Couldn't save the customer list: {e}"))
+    crate::durable::write_atomic(path, text.as_bytes()).map_err(|e| format!("Couldn't save the customer list: {e}"))
 }
 
 // ---------------------------------------------------------------- operations (pure: testable)
@@ -747,8 +752,17 @@ mod tests {
         assert!(path.with_extension("json.bak").exists());
         assert_eq!(load(&path).unwrap().customers[0].name, "Jane");
         std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(load(&path).unwrap().customers[0].name, "Jane", "a damaged file is read from the good .bak copy");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json", "reading never rewrites the damaged file");
+        save(&path, &led).unwrap();
+        assert!(std::fs::read_to_string(path.with_extension("json.bak")).unwrap().contains("Jane"), "a damaged file is never copied over the good backup");
+        std::fs::write(&path, "{ not json").unwrap();
+        std::fs::remove_file(path.with_extension("json.bak")).unwrap();
         assert!(load(&path).unwrap_err().contains("damaged"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json", "damaged file left as it was");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap(); // unreadable (a busy file behaves the same way): an error, not an empty list
+        assert!(load(&path).unwrap_err().contains("Couldn't read"));
     }
 
     #[test]

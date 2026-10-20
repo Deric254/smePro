@@ -49,6 +49,8 @@ def main():
     added = _common.ensure_gitignored(os.path.basename(key_file))
     if a.set_in:
         _common.set_public_key(a.set_in, a.var, public)
+    if not cfg.get("public_key"):
+        _common.save_config({**cfg, "public_key": public})
     print(f"""
 Made {os.path.abspath(key_file)}
   KEEP THIS FILE SECRET AND BACK IT UP (USB stick or password manager). If it is lost, no new licences can be issued.

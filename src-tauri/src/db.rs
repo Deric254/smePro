@@ -28,7 +28,7 @@ pub fn open(path: &str) -> Result<Connection> {
     apply_pending_restore_if_any(db_path)?;
 
     let key_path = key_path_for(db_path);
-    let key_hex = get_or_create_key(&key_path)?;
+    let key_hex = get_or_create_key(&key_path, db_path)?;
 
     let mut conn = Connection::open(db_path)?;
     // SQLCipher's raw-key syntax (`x'...'`) avoids its own key-derivation
@@ -213,21 +213,30 @@ fn remove_stale_temp_files(db_path: &Path) {
     }
 }
 
-fn get_or_create_key(key_path: &Path) -> Result<String> {
+fn get_or_create_key(key_path: &Path, db_path: &Path) -> Result<String> {
     if key_path.exists() {
         let contents = std::fs::read_to_string(key_path)?;
         let trimmed = contents.trim();
-        if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(trimmed.to_string());
+        }
+        // A key file that is not a whole key. If a database exists, it was encrypted with a key
+        // that is now lost or damaged: refuse, and never replace it (that would orphan the data).
+        // If there is NO database content yet, this is a first run that was cut short (power cut
+        // between writing the key and creating the database): nothing can be lost, so start over.
+        let db_has_data = std::fs::metadata(db_path).map(|m| m.len() > 0).unwrap_or(false);
+        if db_has_data {
             return Err(anyhow!("key file at {} is corrupted (expected 64 hex chars)", key_path.display()));
         }
-        return Ok(trimmed.to_string());
     }
 
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let hex_key: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 
-    std::fs::write(key_path, &hex_key)?;
+    // Written to disk before it can be used, and all-or-nothing: a half-written key file would
+    // make the database permanently unopenable.
+    crate::durable::write_atomic(key_path, hex_key.as_bytes())?;
     restrict_permissions(key_path)?;
     Ok(hex_key)
 }

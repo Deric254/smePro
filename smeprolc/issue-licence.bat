@@ -2,11 +2,15 @@
 setlocal EnableExtensions
 title SME Pro - issue a licence
 
-rem ================= EDIT THESE THREE LINES ONLY =================
-set "REPO=C:\path\to\smePro-main"
-set "KEY=C:\path\to\private-keys\smp-owner.key"
+rem ===== Works from any folder on any computer: nothing here needs editing. =====
+rem The tools are found next to this file (the licence kit made by make_kit.py) or, inside the
+rem project, in ..\licensing. Keep your private owner key next to this file as smp-owner.key,
+rem or change the KEY line to where you keep it (outside any project folder).
+set "TOOLS=%~dp0"
+if not exist "%TOOLS%issue_licence.py" set "TOOLS=%~dp0..\licensing\"
+set "KEY=%~dp0smp-owner.key"
 set "OUT=%USERPROFILE%\SMEPro-licences"
-rem ===============================================================
+rem ===============================================================================
 
 set "LOG=%OUT%\licences-issued.csv"
 set "LAST=%OUT%\latest-licence.txt"
@@ -15,13 +19,10 @@ set "PY="
 where python >nul 2>&1 && set "PY=python"
 if not defined PY where py >nul 2>&1 && set "PY=py"
 if not defined PY goto :nopython
-if not exist "%REPO%\licensing\issue_licence.py" goto :norepo
+if not exist "%TOOLS%issue_licence.py" goto :norepo
 if not exist "%KEY%" goto :nokey
 if not exist "%OUT%" mkdir "%OUT%"
 if not exist "%OUT%" goto :noout
-
-rem The tools read the public key from the project, so run from the project folder.
-cd /d "%REPO%"
 
 :again
 echo.
@@ -40,7 +41,7 @@ if not defined DAYS set "DAYS=30"
 set "DAYS=%DAYS:"=%"
 
 set "RAW=%TEMP%\smp-licence-%RANDOM%%RANDOM%.txt"
-"%PY%" "%REPO%\licensing\issue_licence.py" --code "%CODE%" --user "%CNAME%" --days "%DAYS%" --key-file "%KEY%" --log "%LOG%" > "%RAW%" 2>&1
+"%PY%" "%TOOLS%issue_licence.py" --code "%CODE%" --user "%CNAME%" --days "%DAYS%" --key-file "%KEY%" --log "%LOG%" > "%RAW%" 2>&1
 if errorlevel 1 goto :notissued
 
 powershell -NoProfile -Command "$t = Get-Content -LiteralPath $env:RAW | Where-Object { $_ -like 'SMP1.*' } | Select-Object -First 1; if (-not $t) { exit 1 }; Set-Content -LiteralPath $env:LAST -Value $t -Encoding ascii; Set-Clipboard -Value $t"
@@ -50,7 +51,7 @@ del "%RAW%" >nul 2>&1
 rem Prove the licence is valid for that code before it goes to the customer.
 set "TOK="
 set /p "TOK=" < "%LAST%"
-"%PY%" "%REPO%\licensing\verify_licence.py" --token "%TOK%" --code "%CODE%" > "%RAW%" 2>&1
+"%PY%" "%TOOLS%verify_licence.py" --token "%TOK%" --code "%CODE%" > "%RAW%" 2>&1
 if errorlevel 1 goto :notverified
 del "%RAW%" >nul 2>&1
 
@@ -95,14 +96,14 @@ pause
 exit /b 1
 
 :norepo
-echo Cannot find the SME Pro project at: %REPO%
-echo Edit the REPO line at the top of this file.
+echo Cannot find the licence tools (issue_licence.py) next to this file or in ..\licensing.
+echo Make the licence kit with: python licensing\make_kit.py  and copy that whole folder.
 pause
 exit /b 1
 
 :nokey
 echo Cannot find your private owner key at: %KEY%
-echo Edit the KEY line at the top of this file. Keep the key OUTSIDE the project folder.
+echo Put smp-owner.key next to this file, or edit the KEY line at the top of this file.
 pause
 exit /b 1
 

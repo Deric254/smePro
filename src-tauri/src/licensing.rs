@@ -68,9 +68,31 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 // ---------------------------------------------------------------- storage
 
-/// A tiny JSON-file store (atomic writes) in the app's own data folder.
+/// A tiny JSON-file store in the app's own data folder.
+///
+/// It never mistakes "couldn't read it right now" for "it's empty": that mistake
+/// used to overwrite a customer's licence (and make `install_id` invent a new
+/// activation code) whenever antivirus or a sync client held the file for a moment.
+///   * a missing file is a fresh install; any other read failure is an ERROR and
+///     nothing is written while it lasts;
+///   * every change keeps the previous good copy as `licensing.json.bak`;
+///   * a damaged file is recovered from that copy; with no usable copy it is set
+///     aside as `licensing.json.damaged` (never deleted) and the store starts fresh;
+///   * writes are forced to disk (see durable.rs), so a power cut can't leave an empty file.
 pub struct FileStore {
     path: PathBuf,
+}
+
+enum Loaded {
+    Data(Map<String, Value>),
+    /// No file, or a file that holds nothing usable and has no usable backup.
+    Fresh,
+    /// The file is there but is not a JSON object, and the backup couldn't replace it.
+    Damaged,
+}
+
+fn parse_store(text: &str) -> Option<Map<String, Value>> {
+    serde_json::from_str::<Value>(text).ok().and_then(|v| v.as_object().cloned())
 }
 
 impl FileStore {
@@ -78,28 +100,62 @@ impl FileStore {
         FileStore { path }
     }
 
-    fn load(&self) -> Map<String, Value> {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default()
+    fn backup(&self) -> PathBuf {
+        crate::durable::sibling(&self.path, ".bak")
+    }
+
+    fn from_backup(&self) -> Option<Map<String, Value>> {
+        crate::durable::read_text(&self.backup()).ok().flatten().and_then(|t| parse_store(&t))
+    }
+
+    fn load(&self) -> Result<Loaded, String> {
+        let unreadable = |e: std::io::Error| format!("The licence file on this computer can't be read right now ({e}). Close other programs using it and try again.");
+        match crate::durable::read_text(&self.path) {
+            Ok(Some(text)) => match parse_store(&text) {
+                Some(map) => Ok(Loaded::Data(map)),
+                None => Ok(self.from_backup().map(Loaded::Data).unwrap_or(Loaded::Damaged)),
+            },
+            // Not valid UTF-8: damaged content, not a busy file.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Ok(self.from_backup().map(Loaded::Data).unwrap_or(Loaded::Damaged)),
+            Err(e) => Err(unreadable(e)),
+            // The file itself is gone (a cleaner or antivirus removed it): the backup is the licence.
+            Ok(None) => Ok(self.from_backup().map(Loaded::Data).unwrap_or(Loaded::Fresh)),
+        }
+    }
+
+    /// `Err` only when the file exists but can't be read right now.
+    pub fn try_get(&self, key: &str) -> Result<Option<Value>, String> {
+        Ok(match self.load()? {
+            Loaded::Data(m) => m.get(key).cloned(),
+            Loaded::Fresh | Loaded::Damaged => None,
+        })
     }
 
     pub fn get(&self, key: &str) -> Option<Value> {
-        self.load().get(key).cloned()
+        self.try_get(key).ok().flatten()
     }
 
     pub fn set(&self, key: &str, value: Value) -> Result<(), String> {
-        let mut data = self.load();
+        let saving = |e: std::io::Error| format!("Couldn't save the licence on this computer: {e}");
+        let mut data = match self.load()? {
+            Loaded::Data(m) => m,
+            Loaded::Fresh => Map::new(),
+            Loaded::Damaged => {
+                // Keep the damaged file for inspection instead of silently replacing it.
+                let _ = std::fs::rename(&self.path, crate::durable::sibling(&self.path, ".damaged"));
+                Map::new()
+            }
+        };
         data.insert(key.to_string(), value);
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let tmp = self.path.with_extension("json.tmp");
         let text = serde_json::to_string(&Value::Object(data)).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, text).map_err(|e| format!("Couldn't save the licence on this computer: {e}"))?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| format!("Couldn't save the licence on this computer: {e}"))
+        crate::durable::write_atomic(&self.path, text.as_bytes()).map_err(saving)?;
+        // The backup always mirrors the latest real change. The clock marker moves about once a
+        // minute, so it alone doesn't refresh it. The backup is written AFTER the main file, from
+        // data this code just wrote, so a damaged main file is never copied over it.
+        if key != "clock_high" {
+            let _ = crate::durable::write_atomic(&self.backup(), text.as_bytes());
+        }
+        Ok(())
     }
 }
 
@@ -111,6 +167,9 @@ pub struct Licensing {
     version: u32,
     public: Option<VerifyingKey>,
     store: FileStore,
+    /// The activation code, once read or made. Held so a file that becomes unreadable
+    /// for a moment can never make this copy invent a second code.
+    id_cache: Mutex<Option<String>>,
     grace_days: i64,
     today: Box<dyn Fn() -> NaiveDate + Send + Sync>,
     clock: Box<dyn Fn() -> i64 + Send + Sync>,
@@ -129,6 +188,7 @@ impl Licensing {
             version: VERSION,
             public,
             store,
+            id_cache: Mutex::new(None),
             grace_days: 0,
             today: Box::new(|| Local::now().date_naive()),
             clock: Box::new(|| chrono::Utc::now().timestamp()),
@@ -145,18 +205,31 @@ impl Licensing {
     }
 
     /// This copy's activation code, created once and kept in the data folder.
-    pub fn install_id(&self) -> String {
-        if let Some(Value::String(code)) = self.store.get("install_id") {
+    /// `Err` when the licence file can't be read or written right now: nothing is
+    /// invented in that case (a new code would invalidate the customer's licence).
+    fn id_or_create(&self) -> Result<String, String> {
+        let mut cached = self.id_cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(code) = cached.as_ref() {
+            return Ok(code.clone());
+        }
+        if let Some(Value::String(code)) = self.store.try_get("install_id")? {
             if norm_code(&code).len() == 12 {
-                return code;
+                *cached = Some(code.clone());
+                return Ok(code);
             }
         }
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let raw: String = (0..12).map(|_| CODE_ALPHABET[rng.gen_range(0..CODE_ALPHABET.len())] as char).collect();
         let code = format!("{}-{}-{}", &raw[0..4], &raw[4..8], &raw[8..12]);
-        let _ = self.store.set("install_id", json!(code));
-        code
+        self.store.set("install_id", json!(code))?;
+        *cached = Some(code.clone());
+        Ok(code)
+    }
+
+    /// Empty only when the licence file is unreadable (`state()` then says why).
+    pub fn install_id(&self) -> String {
+        self.id_or_create().unwrap_or_default()
     }
 
     /// Check signature, app, computer and expiry. Returns the licence data.
@@ -188,7 +261,7 @@ impl Licensing {
         }
         let here = match for_install {
             Some(c) => norm_code(c),
-            None => norm_code(&self.install_id()),
+            None => norm_code(&self.id_or_create()?),
         };
         if data.get("for").and_then(Value::as_str) != Some(here.as_str()) {
             return Err("This licence was made for a different computer. Send the owner the activation code shown on this screen.".into());
@@ -236,8 +309,8 @@ impl Licensing {
         }
     }
 
-    fn owner_msg(&self) -> Vec<u8> {
-        format!("owner:{}:{}", self.app_id, norm_code(&self.install_id())).into_bytes()
+    fn owner_msg(&self) -> Result<Vec<u8>, String> {
+        Ok(format!("owner:{}:{}", self.app_id, norm_code(&self.id_or_create()?)).into_bytes())
     }
 
     /// The owner proves it is them, once, on their own computer. A signed proof
@@ -247,7 +320,7 @@ impl Licensing {
         if !self.owner_key_matches(&seed) {
             return Err("That owner key doesn't belong to this app, so it can't claim the owner copy.".into());
         }
-        let sig = SigningKey::from_bytes(&seed).sign(&self.owner_msg());
+        let sig = SigningKey::from_bytes(&seed).sign(&self.owner_msg()?);
         self.store.set("owner_proof", json!(B64.encode(sig.to_bytes())))
     }
 
@@ -310,12 +383,12 @@ impl Licensing {
     }
 
     fn owner_ok(&self) -> bool {
-        let (Some(public), Some(Value::String(proof))) = (&self.public, self.store.get("owner_proof")) else {
+        let (Some(public), Ok(Some(Value::String(proof))), Ok(msg)) = (&self.public, self.store.try_get("owner_proof"), self.owner_msg()) else {
             return false;
         };
         unb64(&proof)
             .and_then(|b| <[u8; 64]>::try_from(b).ok())
-            .map(|b| public.verify(&self.owner_msg(), &Signature::from_bytes(&b)).is_ok())
+            .map(|b| public.verify(&msg, &Signature::from_bytes(&b)).is_ok())
             .unwrap_or(false)
     }
 
@@ -344,8 +417,11 @@ impl Licensing {
         let unlicensed = |message: String| {
             json!({"ok": false, "kind": "unlicensed", "message": message, "install_id": self.install_id()})
         };
-        let Some(Value::String(token)) = self.store.get("license") else {
-            return unlicensed("This computer isn't licensed yet.".into());
+        let token = match self.store.try_get("license") {
+            Ok(Some(Value::String(t))) => t,
+            Ok(_) => return unlicensed("This computer isn't licensed yet.".into()),
+            // The file is there but can't be read right now. Say so; never present it as "no licence".
+            Err(message) => return json!({"ok": false, "kind": "storage", "message": message}),
         };
         let data = match self.read(&token, None) {
             Ok(d) => d,
@@ -607,12 +683,14 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_build_has_to_set_its_key_to_open() {
-        // While the key is empty the real instance must refuse everything.
-        // (Once the owner sets it this assertion simply doesn't apply.)
-        if crate::owner_key::OWNER_PUBLIC_KEY.trim().is_empty() {
-            let l = Licensing::new(APP_ID, PREFIX, crate::owner_key::OWNER_PUBLIC_KEY, tmp_store());
+    fn the_shipped_owner_key_is_a_valid_key_and_an_empty_one_refuses_everything() {
+        let shipped = crate::owner_key::OWNER_PUBLIC_KEY;
+        let l = Licensing::new(APP_ID, PREFIX, shipped, tmp_store());
+        if shipped.trim().is_empty() {
             assert_eq!(l.state()["kind"], "unconfigured");
+        } else {
+            // A typo in the committed key would make every licence fail on every computer.
+            assert!(l.configured(), "OWNER_PUBLIC_KEY is not a valid Ed25519 public key");
         }
     }
 
@@ -678,5 +756,61 @@ mod tests {
         assert_eq!(l.state()["features"], json!([]));
         l.activate(&issue(&l, &id, "A", 30, &["pro"]), None).unwrap();
         assert_eq!(l.state()["features"], json!(["pro"]));
+    }
+
+    // ---- the file store must never turn "can't read it right now" into "empty"
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_never_overwritten_and_never_changes_the_activation_code() {
+        let l = lic_for("SME Pro", "SMP", PUBLIC, "2026-01-01");
+        let id = l.install_id();
+        l.activate(&issue(&l, &id, "Jane", 30, &[]), None).unwrap();
+        // A second copy of the same data folder that can't read the file (a folder stands in for a locked file).
+        let path = l.store.path.clone();
+        let held = path.with_extension("held");
+        std::fs::rename(&path, &held).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let fresh = Licensing::new("SME Pro", "SMP", PUBLIC, FileStore::new(path.clone()));
+        assert_eq!(fresh.install_id(), "", "no new code is invented while the file is unreadable");
+        assert!(fresh.store.set("clock_high", json!(1)).is_err(), "nothing is written while the file is unreadable");
+        assert_eq!(fresh.state()["kind"], "storage");
+        // The running copy keeps its code in memory even though its file is now unreadable.
+        assert_eq!(l.install_id(), id);
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&held, &path).unwrap();
+        let mut back = Licensing::new("SME Pro", "SMP", PUBLIC, FileStore::new(path));
+        back.today = Box::new(|| date("2026-01-01"));
+        assert_eq!(back.install_id(), id);
+        assert_eq!(back.state()["kind"], "licensed", "the licence survived");
+    }
+
+    #[test]
+    fn an_empty_or_damaged_file_is_recovered_from_the_backup() {
+        let l = lic_for("SME Pro", "SMP", PUBLIC, "2026-01-01");
+        let id = l.install_id();
+        l.activate(&issue(&l, &id, "Jane", 30, &[]), None).unwrap();
+        l.claim_owner(&format!("SMP-OWNER-{}", B64.encode(seed()))).unwrap();
+        for ruined in ["", "{ half a fi"] {
+            std::fs::write(&l.store.path, ruined).unwrap(); // what a power cut leaves behind
+            let again = Licensing::new("SME Pro", "SMP", PUBLIC, FileStore::new(l.store.path.clone()));
+            assert_eq!(again.install_id(), id, "same activation code");
+            assert!(again.store.get("license").is_some(), "licence kept");
+            assert!(again.is_owner_copy(), "owner proof kept");
+        }
+        std::fs::remove_file(&l.store.path).unwrap(); // removed by a cleaner
+        let again = Licensing::new("SME Pro", "SMP", PUBLIC, FileStore::new(l.store.path.clone()));
+        assert_eq!(again.install_id(), id);
+    }
+
+    #[test]
+    fn damaged_with_no_backup_is_set_aside_not_deleted_and_the_app_can_start_over() {
+        let store = tmp_store();
+        std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
+        std::fs::write(&store.path, "garbage").unwrap();
+        let l = Licensing::new("SME Pro", "SMP", PUBLIC, store);
+        let id = l.install_id();
+        assert_eq!(norm_code(&id).len(), 12);
+        assert_eq!(std::fs::read_to_string(crate::durable::sibling(&l.store.path, ".damaged")).unwrap(), "garbage");
+        assert_eq!(l.state()["kind"], "unlicensed");
     }
 }

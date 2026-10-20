@@ -2,7 +2,9 @@
 //! check licences, never make them. It is empty until the owner runs, on their
 //! own computer:
 //!
-//!     python licensing/make_owner_key.py
+//! ```text
+//! python licensing/make_owner_key.py
+//! ```
 //!
 //! That writes the private key file (smp-owner.key, git-ignored: never commit
 //! or share it) and fills the key in below, once. While it is empty the app

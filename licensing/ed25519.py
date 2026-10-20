@@ -3,7 +3,7 @@
 Used for one thing: licences. The owner signs a licence with a private key that never leaves the owner; every copy of
 the app carries only the matching PUBLIC key, so it can check a licence but can never make one. Signing happens
 rarely and on the owner's own computer, so this plain implementation (not constant-time) is fine; it is checked against
-the RFC's published test vectors in tests/test_backend.py.
+the RFC's published test vectors in licensing/selftest.py.
 """
 import hashlib
 

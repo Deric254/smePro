@@ -1,7 +1,33 @@
-// The backend only ever binds to loopback (see lib.rs's setup()) — a
-// plain constant, not a live binding, since there's no longer a "point
-// this app at a different device" mode to switch it at runtime.
-export const API_BASE = 'http://127.0.0.1:8080';
+// The backend only ever binds to loopback (see lib.rs's setup()). It uses port 8080 unless
+// something else on the computer already holds it, in which case the backend takes a free
+// port and reports it through the `api_port` command. `initApiBase()` (awaited in main.tsx
+// before anything renders) reads it; until then, and in a plain browser during development,
+// it stays at 8080. Exported with `let` so every importer sees the updated value.
+export let API_BASE = 'http://127.0.0.1:8080';
+
+export async function initApiBase(): Promise<void> {
+  if (!('__TAURI_INTERNALS__' in window)) return;
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Keeps asking in the background (the server binds only after the database has opened and
+  // migrated, which can take a while on a large database) and updates API_BASE as soon as it knows.
+  const poll = async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      for (let attempt = 0; attempt < 600; attempt++) {
+        const port = await invoke<number>('api_port');
+        if (port > 0) {
+          API_BASE = `http://127.0.0.1:${port}`;
+          return;
+        }
+        await sleep(100);
+      }
+    } catch {
+      /* keep the default: every screen already reports an unreachable server */
+    }
+  };
+  // The screen waits at most 1.5 s for it, so a slow start never shows a blank window.
+  await Promise.race([poll(), sleep(1500)]);
+}
 
 // Branding paths come from the backend's filesystem and are Windows paths
 // in the desktop build. Only the filename belongs in the public uploads URL.

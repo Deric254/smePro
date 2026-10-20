@@ -23,6 +23,13 @@ refuses to build (fail closed).
 4. Renewal: same command, same name, new days; they use **Renew** (shown 14 days before expiry).
 5. "It doesn't work": `python licensing/verify_licence.py --token <paste> --code <their code>`
 
+## Issuing from any other computer
+`python licensing/make_kit.py` makes a folder `smepro-licence-kit` (five tool files, `licensing.json` with the public
+key, `issue-licence.bat`). Copy it and your private `smp-owner.key` to any computer with Python 3, put the key in the
+same folder, and run `issue-licence.bat` (Windows) or `python issue_licence.py --code ... --user ... --days ...`.
+Nothing needs editing and the project isn't needed. The kit holds no secret. Alternatively, claim the owner copy of the
+app itself on that computer (below) and use the Licence Manager.
+
 ## Your own computer (owner copy, never expires)
 On the activation screen open **I am the owner of this app**, paste the contents of
 `smp-owner.key`. It is used once and never stored.

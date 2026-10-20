@@ -31,3 +31,8 @@ release.keystore
 keystore.properties
 src-tauri/seed_ids.json
 smp-owner.key
+
+# --- Python tools ---
+__pycache__/
+*.pyc
+smepro-licence-kit/
