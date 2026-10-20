@@ -55,6 +55,11 @@ jobs:
       - name: Check the owner key is set and no private key is committed
         run: python licensing/check_owner_key.py
 
+      # Seconds instead of a failed Android build: every command registered for a platform must be
+      # compiled on that platform (see scripts/check-command-platforms.py).
+      - name: Check every Tauri command is available on the platform it is registered for
+        run: python scripts/check-command-platforms.py
+
       - name: Verify updater signing secrets are set
         env:
           HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}

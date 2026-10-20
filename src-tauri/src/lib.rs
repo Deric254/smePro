@@ -156,6 +156,14 @@ pub mod settings;
 pub mod users;
 pub mod xlsx_export;
 
+/// The port the local API really got (it is 8080 unless something else already holds it).
+/// 0 means the server has not finished binding yet; the window asks again.
+/// Registered on every platform (desktop and Android): the window needs it everywhere.
+#[tauri::command]
+fn api_port() -> u16 {
+    http_api::api_port()
+}
+
 /// Installs one specific past release the Owner picked via
 /// `rollback::list_releases`/`check_rollback_target`. This command's
 /// job is the part only the Tauri runtime can do: build a one-off
@@ -204,13 +212,6 @@ pub mod xlsx_export;
 /// mobile. Cfg-gating this command out of that build entirely is safer
 /// than trying to make it fail gracefully at runtime instead.
 #[cfg(desktop)]
-/// The port the local API really got (it is 8080 unless something else already holds it).
-/// 0 means the server has not finished binding yet; the window asks again.
-#[tauri::command]
-fn api_port() -> u16 {
-    http_api::api_port()
-}
-
 #[tauri::command]
 async fn rollback_to_manifest(app: tauri::AppHandle, token: String, tag: String) -> Result<(), String> {
     use tauri::Manager;
