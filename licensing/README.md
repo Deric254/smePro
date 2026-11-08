@@ -30,6 +30,14 @@ same folder, and run `issue-licence.bat` (Windows) or `python issue_licence.py -
 Nothing needs editing and the project isn't needed. The kit holds no secret. Alternatively, claim the owner copy of the
 app itself on that computer (below) and use the Licence Manager.
 
+## Plans, grace and view-only
+Monthly is $100 for 30 days (`--days 30`); lifetime is $1000 (`--lifetime`, ends 2099-12-31; in the Licence Manager
+press **Lifetime** after Renew). For 5 days after a licence ends everything still works and a notice asks for a
+renewal. After that the app is **view-only**: people can sign in, look at their data and take it out (reports,
+Excel exports, backup download); anything that adds or changes is refused until they renew. A computer that was never
+activated, a licence for another computer or a wound-back clock stays fully locked. Customers pay from the
+licence screen (PayPal, then "Email my proof"); paste the licence you send back to restore full use at once.
+
 ## Your own computer (owner copy, never expires)
 On the activation screen open **I am the owner of this app**, paste the contents of
 `smp-owner.key`. It is used once and never stored.

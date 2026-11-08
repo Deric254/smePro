@@ -217,6 +217,11 @@ async fn rollback_to_manifest(app: tauri::AppHandle, token: String, tag: String)
     use tauri::Manager;
     use tauri_plugin_updater::UpdaterExt;
 
+    // Installing another release is not reading: refused once the licence has run out (read-only).
+    if let Some((_, body)) = licensing::gate_block(false) {
+        return Err(body["error"].as_str().unwrap_or("This copy isn't licensed.").to_string());
+    }
+
     // Everything that touches the database is confined to this block,
     // and `conn` is dropped at its closing brace — BEFORE the first
     // `.await` below. rusqlite's `Connection` isn't `Send`, and a

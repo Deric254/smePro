@@ -62,6 +62,10 @@ export function getToken() {
   return authToken;
 }
 
+// Sent when the local API refuses a change because the licence has expired (read-only mode);
+// LicenceGate shows the view-only notice.
+export const LICENCE_READ_ONLY_EVENT = 'licence-read-only';
+
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -109,6 +113,7 @@ async function request(path: string, options: RequestInit = {}, needsBusinessId 
     try {
       const body = await res.json();
       message = body.error || message;
+      if (res.status === 402 && body.licence?.read_only) window.dispatchEvent(new Event(LICENCE_READ_ONLY_EVENT));
     } catch {
       /* non-JSON error body, keep default message */
     }

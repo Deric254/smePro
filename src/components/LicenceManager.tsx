@@ -147,9 +147,9 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
     });
   }
 
-  async function renew(c: Customer) {
+  async function renew(c: Customer, lifetime = false) {
     await run(async () => {
-      const { status, data: d } = await call('renew', { id: c.id, days: Number(renewDays), month });
+      const { status, data: d } = await call('renew', { id: c.id, days: Number(renewDays), lifetime, month });
       if (handle(status, d)) { setData(d); setRenewId(null); setIssued({ name: c.name, licence: d.licence }); }
     });
   }
@@ -323,6 +323,7 @@ export default function LicenceManager({ onClose }: { onClose: () => void }) {
                             <span style={{ display: 'inline-flex', gap: '0.3rem', alignItems: 'center' }}>
                               <input type="number" min={1} max={365} value={renewDays} style={{ width: 70 }} onChange={(e) => setRenewDays(e.target.value)} />
                               <button type="button" className="btn btn-stamp" disabled={busy} onClick={() => renew(c)}>Make</button>
+                              <button type="button" className="btn btn-outline" disabled={busy} title="A licence that never expires ($1000 plan)" onClick={() => renew(c, true)}>Lifetime</button>
                               <button type="button" className="btn btn-outline" onClick={() => setRenewId(null)}>Cancel</button>
                             </span>
                           ) : (

@@ -1,13 +1,14 @@
 {
   "name": "sme-pro",
   "private": true,
-  "version": "0.1.144",
+  "version": "0.1.143",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "generate-icons": "tauri icon src-tauri/icons/icon.png",
     "lint": "oxlint",
+    "test": "node --experimental-strip-types --no-warnings --test scripts/pay.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "setup": "bash scripts/setup.sh",
@@ -19,6 +20,7 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-fs": "^2",
     "@tauri-apps/plugin-http": "^2",
+    "@tauri-apps/plugin-opener": "^2.7.2",
     "@tauri-apps/plugin-os": "^2",
     "@tauri-apps/plugin-process": "^2",
     "@tauri-apps/plugin-updater": "^2",

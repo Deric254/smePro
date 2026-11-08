@@ -8,7 +8,15 @@
     "updater:default",
     "process:default",
     "os:default",
-    "opener:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://dericbi.vercel.app/renew.html?*" },
+        { "url": "https://www.paypal.com/*" },
+        { "url": "https://mail.google.com/mail/?view=cm*" },
+        { "url": "mailto:dericmarangu@gmail.com?*" }
+      ]
+    },
     "fs:default",
     {
       "identifier": "fs:allow-write",
