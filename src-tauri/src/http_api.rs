@@ -108,7 +108,8 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
             // Licence gate (every platform incl. Android; see licensing.rs). The local API is
             // the real gate: an unlicensed copy gets nothing from it, whatever
             // the window shows. Only the three /licence/* routes the
-            // activation screen needs stay reachable. The dev-only binaries
+            // activation screen needs stay reachable; once a licence has run out the copy is
+            // read-only (see licensing::is_read). The dev-only binaries
             // (feature "dev-tools", never in a release build) are not gated.
             #[cfg(not(feature = "dev-tools"))]
             {
@@ -120,7 +121,7 @@ pub fn serve(conn: Connection, addr: &str) -> Result<(), String> {
                     respond(request, ApiResponse::Json(status, payload));
                     return;
                 }
-                if let Some((status, payload)) = crate::licensing::gate_block() {
+                if let Some((status, payload)) = crate::licensing::gate_block(crate::licensing::is_read(method.as_str(), gate_path)) {
                     respond(request, ApiResponse::Json(status, payload));
                     return;
                 }

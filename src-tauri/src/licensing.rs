@@ -41,9 +41,19 @@ pub const APP_ID: &str = "SME Pro";
 /// 2-6 capitals: tags the owner key text (`SMP-OWNER-...`) and licences (`SMP1.`).
 pub const PREFIX: &str = "SMP";
 const VERSION: u32 = 1;
+/// Days after a licence ends that everything still works (the window shows a renewal notice).
+pub const GRACE_DAYS: i64 = 5;
+/// Where a person renews: the DericBI site, pre-filled with this app and this computer's activation code.
+const RENEW_PAGE: &str = "https://dericbi.vercel.app/renew.html";
+const RENEW_APP: &str = "smepro";
 const ROLLBACK_SECONDS: i64 = 86_400;
 /// No look-alike characters (0/O/1/I) so codes can be read out over the phone.
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/// A lifetime licence is an ordinary licence that expires far beyond any computer's life.
+pub fn lifetime_end() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2099, 12, 31).expect("a valid date")
+}
 
 fn unb64(s: &str) -> Option<Vec<u8>> {
     B64.decode(s.trim_end_matches('=')).ok()
@@ -195,6 +205,11 @@ impl Licensing {
         }
     }
 
+    pub fn with_grace_days(mut self, days: i64) -> Self {
+        self.grace_days = days;
+        self
+    }
+
     /// False when the build has no valid owner public key.
     pub fn configured(&self) -> bool {
         self.public.is_some()
@@ -232,8 +247,8 @@ impl Licensing {
         self.id_or_create().unwrap_or_default()
     }
 
-    /// Check signature, app, computer and expiry. Returns the licence data.
-    pub fn read(&self, token: &str, for_install: Option<&str>) -> Result<Value, String> {
+    /// Check signature, app and computer (not the expiry). Returns the licence data and its end date.
+    fn verify(&self, token: &str, for_install: Option<&str>) -> Result<(Value, NaiveDate), String> {
         let public = self.public.as_ref().ok_or_else(|| {
             "This copy of the app can't check licences yet (the owner key isn't set in the build).".to_string()
         })?;
@@ -271,6 +286,12 @@ impl Licensing {
             .and_then(Value::as_str)
             .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
             .ok_or_else(|| "That licence has no valid expiry date.".to_string())?;
+        Ok((data, expires))
+    }
+
+    /// Check signature, app, computer and expiry (grace included). Returns the licence data.
+    pub fn read(&self, token: &str, for_install: Option<&str>) -> Result<Value, String> {
+        let (data, expires) = self.verify(token, for_install)?;
         if expires + Days::days(self.grace_days) < (self.today)() {
             return Err("This licence has expired. Ask the owner for a new one.".into());
         }
@@ -342,7 +363,8 @@ impl Licensing {
     /// Sign a licence for one computer. OWNER SIDE ONLY: `seed` comes from the
     /// owner's key, which the owner unlocks in memory (see licence_admin.rs) and
     /// which is never stored or shipped. Same bytes as `issue_licence.py`.
-    pub fn issue(&self, seed: &[u8; 32], code: &str, user: &str, expires: NaiveDate, features: &[String]) -> Result<String, String> {
+    /// `expires: None` issues a lifetime licence (ends 2099-12-31, payload `plan:"lifetime"`).
+    pub fn issue(&self, seed: &[u8; 32], code: &str, user: &str, expires: Option<NaiveDate>, features: &[String]) -> Result<String, String> {
         if !self.owner_key_matches(seed) {
             return Err("That owner key doesn't belong to this app. Use the key made for this app's installer.".into());
         }
@@ -355,9 +377,15 @@ impl Licensing {
             return Err("Give the licence holder's name (1 to 60 characters).".into());
         }
         let today = (self.today)();
-        if expires <= today || expires > today + Days::days(365) {
-            return Err("A licence lasts 1 to 365 days from today.".into());
+        if let Some(e) = expires {
+            if e <= today || e > today + Days::days(365) {
+                return Err("A licence lasts 1 to 365 days from today.".into());
+            }
         }
+        let (expires, plan) = match expires {
+            Some(e) => (e.to_string(), ""),
+            None => (lifetime_end().to_string(), "\"plan\":\"lifetime\","),
+        };
         let mut feats: Vec<String> = features.to_vec();
         feats.sort();
         feats.dedup();
@@ -369,12 +397,13 @@ impl Licensing {
         };
         // Compact, keys sorted, exactly like the Python tool: the signature covers these bytes.
         let payload = format!(
-            "{{\"app\":{},\"expires\":\"{}\",{}\"for\":\"{}\",\"issued\":\"{}\",\"role\":\"member\",\"user\":{},\"v\":{}}}",
+            "{{\"app\":{},\"expires\":\"{}\",{}\"for\":\"{}\",\"issued\":\"{}\",{}\"role\":\"member\",\"user\":{},\"v\":{}}}",
             serde_json::to_string(&self.app_id).map_err(|e| e.to_string())?,
             expires,
             feats_json,
             norm,
             today,
+            plan,
             serde_json::to_string(&user).map_err(|e| e.to_string())?,
             self.version
         );
@@ -423,21 +452,29 @@ impl Licensing {
             // The file is there but can't be read right now. Say so; never present it as "no licence".
             Err(message) => return json!({"ok": false, "kind": "storage", "message": message}),
         };
-        let data = match self.read(&token, None) {
+        let (data, expires) = match self.verify(&token, None) {
             Ok(d) => d,
             Err(e) => return unlicensed(e),
         };
         if !self.clock_ok() {
             return unlicensed("This computer's clock was set back. Fix the date and time to continue.".into());
         }
-        let left = data
-            .get("expires")
-            .and_then(Value::as_str)
-            .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-            .map(|d| (d - (self.today)()).num_days())
-            .unwrap_or(0);
-        json!({"ok": true, "kind": "licensed", "message": "", "expires": data["expires"], "days_left": left,
-               "user": data.get("user"), "features": data.get("features").cloned().unwrap_or_else(|| json!([]))})
+        let left = (expires - (self.today)()).num_days();
+        let mut st = json!({"ok": true, "kind": "licensed", "message": "", "expires": data["expires"], "days_left": left,
+               "user": data.get("user"), "features": data.get("features").cloned().unwrap_or_else(|| json!([])),
+               "lifetime": data.get("plan").and_then(Value::as_str) == Some("lifetime"), "install_id": self.install_id()});
+        if left < 0 && left >= -self.grace_days {
+            // Just lapsed: everything keeps working while the owner is asked to renew.
+            st["grace"] = json!(true);
+            st["grace_days_left"] = json!(self.grace_days + left);
+        } else if left < -self.grace_days {
+            // Past the grace period: the data stays readable, adding or changing anything stops.
+            st["ok"] = json!(false);
+            st["kind"] = json!("expired");
+            st["read_only"] = json!(true);
+            st["message"] = json!("Your licence has expired. You can still sign in and view your data. Renew to add or change anything.");
+        }
+        st
     }
 }
 
@@ -453,7 +490,7 @@ fn global() -> &'static Mutex<Licensing> {
             PREFIX,
             crate::owner_key::OWNER_PUBLIC_KEY,
             FileStore::new(dir.join("licensing.json")),
-        ))
+        ).with_grace_days(GRACE_DAYS))
     })
 }
 
@@ -491,11 +528,45 @@ fn cached_state() -> Value {
     v
 }
 
-/// `None` = this copy may be used. `Some((402, body))` = refuse the request.
-pub fn gate_block() -> Option<(u16, Value)> {
-    let st = cached_state();
+/// The state plus the page that renews it (pre-filled with this computer's activation code).
+fn with_renew_url(mut st: Value) -> Value {
+    if let Some(id) = st["install_id"].as_str().filter(|id| !id.is_empty()) {
+        st["renew_url"] = json!(format!("{RENEW_PAGE}?app={RENEW_APP}&code={id}"));
+    }
+    st
+}
+
+/// Calls that still work once the licence has run out: signing in (and the password recovery that
+/// goes with it), looking at data, and taking it out (every GET: lists, reports, Excel exports, receipts,
+/// plus the backup download). Nothing here changes business data. Every other call is a write and is
+/// refused, including any route not named here (fail safe).
+pub fn is_read(method: &str, path: &str) -> bool {
+    method == "GET"
+        || (method == "POST"
+            && matches!(
+                path.trim_end_matches('/'),
+                "/auth/login" | "/auth/logout" | "/auth/recover/security-questions" | "/auth/recover/admin-code" | "/terms/accept" | "/admin/backup" | "/currency/convert"
+            ))
+}
+
+/// `None` = this call may run. `Some((402, body))` = refuse it. `read` says whether the call only
+/// reads (see `is_read`); reads still work in read-only mode, everything else needs a full licence.
+/// The two Tauri commands: `api_port` is always open (the licence screen needs it) and
+/// `rollback_to_manifest` installs another release, so it is a write (`gate_block(false)`).
+pub fn gate_block(read: bool) -> Option<(u16, Value)> {
+    block(&cached_state(), read)
+}
+
+fn block(st: &Value, read: bool) -> Option<(u16, Value)> {
     if st["ok"].as_bool() == Some(true) {
         return None;
+    }
+    if st["read_only"].as_bool() == Some(true) {
+        if read {
+            return None;
+        }
+        return Some((402, json!({"error": "Your licence has expired, so this is view-only. Renew your licence to add or change anything.",
+            "licence": with_renew_url(json!({"ok": false, "kind": "expired", "read_only": true, "install_id": st["install_id"]}))})));
     }
     let message = st["message"].as_str().unwrap_or("This copy isn't licensed.").to_string();
     Some((402, json!({"error": message, "licence": st})))
@@ -514,7 +585,7 @@ pub fn handle_route(method: &str, path: &str, body: &str) -> (u16, Value) {
         if l.configured() {
             s["install_id"] = json!(l.install_id());
         }
-        s
+        with_renew_url(s)
     };
     match (method, path) {
         ("GET", "/licence/state") => (200, with_id(&lic())),
@@ -550,6 +621,7 @@ pub fn handle_route(method: &str, path: &str, body: &str) -> (u16, Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Datelike;
     use std::sync::atomic::{AtomicU32, AtomicI64, Ordering};
     use std::sync::Arc;
 
@@ -733,18 +805,18 @@ mod tests {
     #[test]
     fn issue_reproduces_the_kit_conformance_licence_exactly() {
         let l = lic_for("Conformance App", "CNF", PUBLIC, "2026-01-01");
-        let token = l.issue(&seed(), CODE, "Test User", date("2026-01-31"), &["pro".to_string()]).unwrap();
+        let token = l.issue(&seed(), CODE, "Test User", Some(date("2026-01-31")), &["pro".to_string()]).unwrap();
         assert_eq!(token, VECTOR);
         assert!(l.read(&token, Some(CODE)).is_ok());
         // wrong key, bad code, bad name, out-of-range dates are all refused
-        assert!(l.issue(&[9u8; 32], CODE, "A", date("2026-01-31"), &[]).unwrap_err().contains("doesn't belong"));
-        assert!(l.issue(&seed(), "ABC", "A", date("2026-01-31"), &[]).is_err());
-        assert!(l.issue(&seed(), CODE, "   ", date("2026-01-31"), &[]).is_err());
-        assert!(l.issue(&seed(), CODE, "A", date("2026-01-01"), &[]).is_err());
-        assert!(l.issue(&seed(), CODE, "A", date("2027-01-02"), &[]).is_err());
-        assert!(l.issue(&seed(), CODE, "A", date("2027-01-01"), &[]).is_ok());
+        assert!(l.issue(&[9u8; 32], CODE, "A", Some(date("2026-01-31")), &[]).unwrap_err().contains("doesn't belong"));
+        assert!(l.issue(&seed(), "ABC", "A", Some(date("2026-01-31")), &[]).is_err());
+        assert!(l.issue(&seed(), CODE, "   ", Some(date("2026-01-31")), &[]).is_err());
+        assert!(l.issue(&seed(), CODE, "A", Some(date("2026-01-01")), &[]).is_err());
+        assert!(l.issue(&seed(), CODE, "A", Some(date("2027-01-02")), &[]).is_err());
+        assert!(l.issue(&seed(), CODE, "A", Some(date("2027-01-01")), &[]).is_ok());
         // a name needing JSON escaping still produces a valid, verifiable licence
-        let odd = l.issue(&seed(), CODE, "Jane \"JD\" O'Neil", date("2026-02-01"), &[]).unwrap();
+        let odd = l.issue(&seed(), CODE, "Jane \"JD\" O'Neil", Some(date("2026-02-01")), &[]).unwrap();
         assert_eq!(l.read(&odd, Some(CODE)).unwrap()["user"], "Jane \"JD\" O'Neil");
     }
 
@@ -812,5 +884,170 @@ mod tests {
         assert_eq!(norm_code(&id).len(), 12);
         assert_eq!(std::fs::read_to_string(crate::durable::sibling(&l.store.path, ".damaged")).unwrap(), "garbage");
         assert_eq!(l.state()["kind"], "unlicensed");
+    }
+
+    // ---- plans: grace, read-only, lifetime, renewal
+
+    const LIFETIME_VECTOR: &str = "CNF1.eyJhcHAiOiJDb25mb3JtYW5jZSBBcHAiLCJleHBpcmVzIjoiMjA5OS0xMi0zMSIsImZlYXR1cmVzIjpbInBybyJdLCJmb3IiOiJBQkNERUZHSEpLTE0iLCJpc3N1ZWQiOiIyMDI2LTAxLTAxIiwicGxhbiI6ImxpZmV0aW1lIiwicm9sZSI6Im1lbWJlciIsInVzZXIiOiJUZXN0IFVzZXIiLCJ2IjoxfQ.MhmqqVdTPsWj3fAHH-rFywR0m5vhTWZg8_-F_rW-XPV9jyf20BZZzX2qLA6BLXeiX-wLDzoHKGA-tPhbGNFnDA";
+
+    /// A licensing instance (grace 5, like the app) whose date the test moves with `set`.
+    fn lic_on(day: &str) -> (Licensing, Arc<AtomicI64>) {
+        let now = Arc::new(AtomicI64::new(date(day).num_days_from_ce() as i64));
+        let n = now.clone();
+        let mut l = Licensing::new("SME Pro", "SMP", PUBLIC, tmp_store()).with_grace_days(GRACE_DAYS);
+        l.today = Box::new(move || NaiveDate::from_num_days_from_ce_opt(n.load(Ordering::SeqCst) as i32).unwrap());
+        (l, now)
+    }
+
+    fn set(now: &AtomicI64, day: &str) {
+        now.store(date(day).num_days_from_ce() as i64, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn a_monthly_licence_works_then_graces_five_days_then_goes_read_only() {
+        let (l, now) = lic_on("2026-01-01");
+        let id = l.install_id();
+        l.activate(&issue(&l, &id, "Jane", 30, &[]), None).unwrap(); // ends 2026-01-31
+        set(&now, "2026-01-31");
+        let st = l.state();
+        assert_eq!((st["ok"].clone(), st["kind"].clone(), st["days_left"].clone()), (json!(true), json!("licensed"), json!(0)));
+        assert!(st.get("grace").is_none() && st["lifetime"] == false);
+        for (day, left) in [("2026-02-01", 4), ("2026-02-05", 0)] {
+            set(&now, day);
+            let st = l.state();
+            assert_eq!((st["ok"].clone(), st["kind"].clone(), st["grace"].clone()), (json!(true), json!("licensed"), json!(true)), "{day}");
+            assert_eq!(st["grace_days_left"], left, "{day}");
+        }
+        set(&now, "2026-02-06"); // 6th day after the end
+        let st = l.state();
+        assert_eq!((st["ok"].clone(), st["kind"].clone(), st["read_only"].clone()), (json!(false), json!("expired"), json!(true)));
+        assert_eq!(st["user"], "Jane");
+        assert_eq!(st["install_id"], json!(id), "the expired state still carries the code the renewal link needs");
+        assert!(st["message"].as_str().unwrap().contains("view your data"));
+        // an expired licence can no longer be (re)activated, but a fresh one restores full use at once
+        assert!(l.activate(&issue_at(&id, "2026-01-01"), None).unwrap_err().contains("expired"));
+        l.activate(&issue(&l, &id, "Jane", 30, &[]), None).unwrap();
+        let st = l.state();
+        assert_eq!((st["ok"].clone(), st["kind"].clone(), st.get("read_only").cloned()), (json!(true), json!("licensed"), None));
+        assert_eq!(st["days_left"], 30);
+    }
+
+    /// A licence issued on `day` for 30 days, whatever day the instance is on.
+    fn issue_at(code: &str, day: &str) -> String {
+        issue(&lic_for("SME Pro", "SMP", PUBLIC, day), code, "Jane", 30, &[])
+    }
+
+    #[test]
+    fn a_lifetime_licence_is_issued_like_the_kit_and_never_expires_or_warns() {
+        let l = lic_for("Conformance App", "CNF", PUBLIC, "2026-01-01");
+        // byte for byte what `issue_licence.py --lifetime` makes
+        assert_eq!(l.issue(&seed(), CODE, "Test User", None, &["pro".to_string()]).unwrap(), LIFETIME_VECTOR);
+        assert_eq!(l.read(LIFETIME_VECTOR, Some(CODE)).unwrap()["plan"], "lifetime");
+        let (l, now) = lic_on("2026-01-01");
+        let id = l.install_id();
+        l.activate(&l.issue(&seed(), &id, "Lucy", None, &[]).unwrap(), None).unwrap();
+        for day in ["2026-01-01", "2060-06-01", "2099-12-31"] {
+            set(&now, day);
+            let st = l.state();
+            assert_eq!((st["ok"].clone(), st["lifetime"].clone(), st["expires"].clone()), (json!(true), json!(true), json!("2099-12-31")), "{day}");
+            assert!(st.get("grace").is_none());
+        }
+    }
+
+    #[test]
+    fn expiry_never_unlocks_a_wrong_computer_or_a_wound_back_clock() {
+        // past grace, for another computer: locked like never activated, not view-only
+        let (l, now) = lic_on("2026-01-01");
+        l.store.set("license", json!(issue(&l, "ZZZZ-ZZZZ-ZZZZ", "A", 30, &[]))).unwrap();
+        set(&now, "2026-06-01");
+        assert_eq!(l.state()["kind"], "unlicensed");
+        // past grace with a clock wound back: locked too
+        let clock = Arc::new(AtomicI64::new(1_800_000_000));
+        let (mut l, now) = lic_on("2026-01-01");
+        let c = clock.clone();
+        l.clock = Box::new(move || c.load(Ordering::SeqCst));
+        let id = l.install_id();
+        l.activate(&issue(&l, &id, "A", 30, &[]), None).unwrap();
+        clock.store(1_800_000_000 + 40 * 86_400, Ordering::SeqCst);
+        set(&now, "2026-02-20");
+        assert_eq!(l.state()["kind"], "expired");
+        clock.store(1_800_000_000, Ordering::SeqCst);
+        assert_eq!(l.state()["kind"], "unlicensed");
+    }
+
+    #[test]
+    fn read_only_refuses_writes_with_the_renew_payload_and_keeps_reads() {
+        let (l, now) = lic_on("2026-01-01");
+        let id = l.install_id();
+        l.activate(&issue(&l, &id, "Jane", 30, &[]), None).unwrap();
+        set(&now, "2026-03-01");
+        let st = l.state();
+        assert!(block(&st, true).is_none(), "reads still work");
+        let (code, body) = block(&st, false).unwrap();
+        assert_eq!(code, 402);
+        assert_eq!(body["error"], "Your licence has expired, so this is view-only. Renew your licence to add or change anything.");
+        assert_eq!(body["licence"]["read_only"], true);
+        assert_eq!(body["licence"]["kind"], "expired");
+        assert_eq!(body["licence"]["renew_url"], json!(format!("https://dericbi.vercel.app/renew.html?app=smepro&code={id}")));
+        // valid and grace copies are never blocked
+        set(&now, "2026-02-03");
+        assert!(block(&l.state(), false).is_none());
+        // never activated: everything refused, reads included (full lock as before)
+        let fresh = lic_for("SME Pro", "SMP", PUBLIC, "2026-01-01");
+        assert!(block(&fresh.state(), true).is_some());
+        assert_eq!(block(&fresh.state(), true).unwrap().0, 402);
+    }
+
+    #[test]
+    fn read_only_lets_people_sign_in_view_and_take_their_data_out_and_nothing_else() {
+        for (m, p) in [
+            ("POST", "/auth/login"), ("POST", "/auth/logout"), ("POST", "/auth/recover/security-questions"), ("POST", "/auth/recover/admin-code"),
+            ("POST", "/terms/accept"), ("POST", "/admin/backup"), ("POST", "/currency/convert"),
+            ("GET", "/auth/me"), ("GET", "/modules/inventory/records"), ("GET", "/modules/sales/export"), ("GET", "/modules/sales/report/export"),
+            ("GET", "/audit-log.xlsx"), ("GET", "/pos/receipt/abc"), ("GET", "/reports/highlights"), ("GET", "/ai/sessions/export.xlsx"),
+            ("GET", "/uploads/logo.png"), ("GET", "/modules/inventory/import-template"),
+        ] {
+            assert!(is_read(m, p), "{m} {p} should work in read-only");
+        }
+        // every route that creates, changes, deletes or uses a premium feature
+        for (m, p) in [
+            ("POST", "/setup/create-business"), ("POST", "/users"), ("PUT", "/users/u1/role"), ("DELETE", "/users/u1"),
+            ("POST", "/roles"), ("DELETE", "/roles/r1"), ("PUT", "/roles/r1/admin-flag"), ("PUT", "/roles/r1/reports-flag"), ("PUT", "/roles/r1/permissions"),
+            ("POST", "/units"), ("DELETE", "/units/u1"), ("POST", "/currencies"), ("DELETE", "/currencies/c1"), ("PUT", "/settings"),
+            ("POST", "/modules/inventory/import-excel"), ("POST", "/modules/inventory/records"), ("PUT", "/modules/inventory/records/r1"),
+            ("DELETE", "/modules/inventory/records/r1"), ("POST", "/modules/inventory/enable"), ("POST", "/modules/inventory/disable"),
+            ("POST", "/pos/checkout"), ("POST", "/pos/service-sale"), ("POST", "/sales/refund"), ("POST", "/inventory/repack"),
+            ("POST", "/inventory/i1/batches/b1/price"), ("POST", "/inventory/stocktake/initiate"), ("POST", "/inventory/stocktake/count"),
+            ("POST", "/inventory/stocktake/write-off-expired"), ("POST", "/inventory/stocktake/s1/close"), ("POST", "/inventory/stocktake/s1/cancel"),
+            ("POST", "/debt_credit/settle"), ("POST", "/onboarding/setup"), ("POST", "/ai/sessions"), ("POST", "/ai/sessions/s1/ask"),
+            ("POST", "/ai/sessions/s1/clear"), ("DELETE", "/ai/sessions/s1"), ("POST", "/invoices"), ("POST", "/invoices/i1/send"),
+            ("POST", "/invoices/i1/pay"), ("POST", "/invoices/i1/cancel"), ("PUT", "/business/branding"), ("POST", "/business/settings"),
+            ("POST", "/currency/refresh"), ("POST", "/admin/restore"), ("POST", "/setup/restore"),
+            // not named anywhere: unknown means write
+            ("POST", "/something/new"), ("PATCH", "/auth/login"), ("PUT", "/auth/login"), ("DELETE", "/admin/backup"), ("POST", "/auth/login/extra"),
+        ] {
+            assert!(!is_read(m, p), "{m} {p} must be refused in read-only");
+        }
+    }
+
+    #[test]
+    fn every_post_put_and_delete_route_in_the_api_is_refused_unless_named_as_a_read() {
+        // Reads the source of the API: any non-GET route must be a write here unless the sign-in/export list names it.
+        let api = include_str!("http_api.rs");
+        let mut checked = 0;
+        for line in api.lines() {
+            let l = line.trim();
+            if !(l.contains("*method == Method::Post") || l.contains("*method == Method::Put") || l.contains("*method == Method::Delete")) || !l.contains("parts") {
+                continue;
+            }
+            let Some(start) = l.find("== [") else { continue };
+            let list = &l[start + 4..l[start..].find(']').map(|i| start + i).unwrap_or(l.len())];
+            let path: String = list.split(',').map(|seg| seg.trim().trim_matches('"')).map(|seg| format!("/{seg}")).collect();
+            let method = if l.contains("Method::Post") { "POST" } else if l.contains("Method::Put") { "PUT" } else { "DELETE" };
+            let named = matches!(path.as_str(), "/auth/login" | "/auth/logout" | "/auth/recover/security-questions" | "/auth/recover/admin-code" | "/terms/accept" | "/currency/convert");
+            assert_eq!(is_read(method, &path), named, "{method} {path}");
+            checked += 1;
+        }
+        assert!(checked >= 20, "the scan found only {checked} fixed-path write routes");
     }
 }

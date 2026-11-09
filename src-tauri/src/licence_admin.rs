@@ -172,7 +172,7 @@ fn clean_name(name: &str) -> Result<String, String> {
     Ok(n)
 }
 
-fn issue_for(lic: &Licensing, seed: &[u8; 32], c: &Customer, expires: NaiveDate) -> Result<String, String> {
+fn issue_for(lic: &Licensing, seed: &[u8; 32], c: &Customer, expires: Option<NaiveDate>) -> Result<String, String> {
     lic.issue(seed, &c.code, &c.name, expires, &[])
 }
 
@@ -247,7 +247,7 @@ fn add_customer(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, code: &st
         retired: false,
     };
     let expires = today + Days::days(days);
-    let token = issue_for(lic, seed, &c, expires)?;
+    let token = issue_for(lic, seed, &c, Some(expires))?;
     c.expires = Some(expires.to_string());
     c.last_issued = Some(today.to_string());
     c.licence = Some(token.clone());
@@ -287,15 +287,16 @@ fn refuse_retired(c: &Customer) -> Result<(), String> {
     Ok(())
 }
 
-fn renew(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, id: &str, days: i64) -> Result<(Customer, String), String> {
-    if !(1..=MAX_DAYS).contains(&days) {
+/// `days: None` issues a lifetime licence (the $1000 plan).
+fn renew(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, id: &str, days: Option<i64>) -> Result<(Customer, String), String> {
+    if days.is_some_and(|d| !(1..=MAX_DAYS).contains(&d)) {
         return Err(format!("A licence lasts 1 to {MAX_DAYS} days."));
     }
     let c = find_mut(ledger, id)?;
     refuse_retired(c)?;
     let today = lic.today();
-    let expires = today + Days::days(days);
-    let token = issue_for(lic, seed, c, expires)?;
+    let expires = days.map_or_else(crate::licensing::lifetime_end, |d| today + Days::days(d));
+    let token = issue_for(lic, seed, c, days.map(|_| expires))?;
     c.expires = Some(expires.to_string());
     c.last_issued = Some(today.to_string());
     c.licence = Some(token.clone());
@@ -327,7 +328,7 @@ fn set_paid(lic: &Licensing, seed: &[u8; 32], ledger: &mut Ledger, id: &str, mon
     if expires > today + Days::days(MAX_DAYS) {
         return Err("A licence can run at most 365 days ahead. Tick only the months up to about a year from now.".into());
     }
-    let token = issue_for(lic, seed, c, expires)?;
+    let token = issue_for(lic, seed, c, Some(expires))?;
     c.paid = months;
     c.expires = Some(expires.to_string());
     c.last_issued = Some(today.to_string());
@@ -547,7 +548,7 @@ pub fn handle(method: &str, path: &str, body: &str) -> (u16, Value) {
             }
         }
         ("POST", "renew") => {
-            let days = number(body, "days").unwrap_or(DEFAULT_DAYS);
+            let days = if flag(body, "lifetime") { None } else { Some(number(body, "days").unwrap_or(DEFAULT_DAYS)) };
             let r = with_lic(|l| renew(l, &seed, &mut ledger, &field(body, "id"), days));
             finish(r.map(|(c, t)| (c, Some(t))), &path, &ledger, &month, today)
         }
@@ -693,10 +694,20 @@ mod tests {
         let l = lic_at("2026-10-15");
         let mut led = Ledger::default();
         let (c, _) = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 10, &Seat::Unasked).unwrap();
-        let (c, _) = renew(&l, &SEED, &mut led, &c.id, 90).unwrap();
+        let (c, _) = renew(&l, &SEED, &mut led, &c.id, Some(90)).unwrap();
         assert_eq!(c.expires.as_deref(), Some("2027-01-13"));
-        assert!(renew(&l, &SEED, &mut led, &c.id, 0).is_err());
-        assert!(renew(&l, &SEED, &mut led, "nope", 30).is_err());
+        assert!(renew(&l, &SEED, &mut led, &c.id, Some(0)).is_err());
+        assert!(renew(&l, &SEED, &mut led, "nope", Some(30)).is_err());
+    }
+
+    #[test]
+    fn a_lifetime_licence_can_be_issued_from_the_manager() {
+        let l = lic_at("2026-10-15");
+        let mut led = Ledger::default();
+        let (c, _) = add_customer(&l, &SEED, &mut led, "ABCD-EFGH-JKLM", "Jane", "", 10, &Seat::Unasked).unwrap();
+        let (c, token) = renew(&l, &SEED, &mut led, &c.id, None).unwrap();
+        assert_eq!(c.expires.as_deref(), Some("2099-12-31"));
+        assert_eq!(l.read(&token, Some("ABCD-EFGH-JKLM")).unwrap()["plan"], "lifetime");
     }
 
     #[test]
@@ -806,13 +817,13 @@ mod tests {
         let new = add(&l, &mut led, "BBBB-BBBB-BBBB", "Jane", &Seat::Migration(None)).unwrap();
         assert!(!new.retired);
         assert!(led.customers[0].retired && !led.customers[1].retired);
-        assert!(renew(&l, &SEED, &mut led, &old.id, 30).unwrap_err().contains("never renewed"));
+        assert!(renew(&l, &SEED, &mut led, &old.id, Some(30)).unwrap_err().contains("never renewed"));
         assert!(set_paid(&l, &SEED, &mut led, &old.id, "2026-11", true).unwrap_err().contains("never renewed"));
         assert_eq!(led.customers[0].paid, vec!["2026-10"], "a refused tick records nothing");
         // un-ticking only corrects the record and stays possible
         assert!(set_paid(&l, &SEED, &mut led, &old.id, "2026-10", false).is_ok());
         // the new code renews normally
-        assert!(renew(&l, &SEED, &mut led, &new.id, 30).is_ok());
+        assert!(renew(&l, &SEED, &mut led, &new.id, Some(30)).is_ok());
         // the list: retired shown as such, counts and totals are live computers only
         let v = list_view(&led, "2026-10", d("2026-10-15"));
         assert_eq!(v["summary"]["total"], 1);

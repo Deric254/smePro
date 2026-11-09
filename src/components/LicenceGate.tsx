@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { API_BASE } from '../api';
 import { retryOnConnectionFailure } from '../lib/retry';
 import UpdateChecker from './UpdateChecker';
 import LicenceManager from './LicenceManager';
+import PayWindow, { PlanButtons } from './PayWindow';
+import { openLink } from '../lib/pay';
+import type { Plan } from '../lib/pay';
+import { API_BASE, LICENCE_READ_ONLY_EVENT } from '../api';
 
 // Licence gate (desktop and Android). The real enforcement is in the local API
 // (see src-tauri/src/licensing.rs: an unlicensed copy gets nothing from it);
 // this component only shows the activation screen and the renewal reminder.
+//
+// Past the grace period (see licensing.rs) the copy is read-only, not locked: people still sign in,
+// look at their data and take it out; the local API refuses everything that adds or changes.
+// So only a copy that never was licensed (or is on the wrong computer, or has a wound-back clock)
+// gets the full-screen activation; an expired one shows the app plus a Renew notice.
 //
 // Every release build serves the licence routes. A 404 only happens for dev
 // binaries built without them, and is treated as "nothing to gate".
@@ -16,15 +24,21 @@ import LicenceManager from './LicenceManager';
 
 type LicenceState = {
   ok: boolean;
-  kind: 'owner' | 'licensed' | 'unlicensed' | 'unconfigured' | 'storage';
+  kind: 'owner' | 'licensed' | 'expired' | 'unlicensed' | 'unconfigured' | 'storage';
   message: string;
   install_id?: string;
   expires?: string;
   days_left?: number;
   user?: string;
+  grace?: boolean;
+  grace_days_left?: number;
+  read_only?: boolean;
+  lifetime?: boolean;
+  renew_url?: string;
 };
 
 const RENEW_WARNING_DAYS = 14;
+const VIEW_ONLY_MESSAGE = 'Your licence has expired, so this is view-only. Renew your licence to add or change anything.';
 
 async function licenceRequest(path: string, init?: RequestInit): Promise<{ status: number; body: any }> {
   const res = await fetch(`${API_BASE}${path}`, { ...init, cache: 'no-store', headers: { 'Content-Type': 'application/json' } });
@@ -38,6 +52,7 @@ export default function LicenceGate({ children }: { children: ReactNode }) {
   const [gated, setGated] = useState(true);
   const [renewOpen, setRenewOpen] = useState(false);
   const [managerOpen, setManagerOpen] = useState(false);
+  const [blocked, setBlocked] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -57,10 +72,22 @@ export default function LicenceGate({ children }: { children: ReactNode }) {
     return () => { window.clearInterval(timer); window.removeEventListener('focus', refresh); };
   }, [refresh]);
 
+  // A refused change (the API answers 402 in read-only mode) shows the view-only notice for a few seconds.
+  useEffect(() => {
+    let timer = 0;
+    const onBlocked = () => {
+      setBlocked(true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setBlocked(false), 8000);
+    };
+    window.addEventListener(LICENCE_READ_ONLY_EVENT, onBlocked);
+    return () => { window.clearTimeout(timer); window.removeEventListener(LICENCE_READ_ONLY_EVENT, onBlocked); };
+  }, []);
+
   if (!gated) return <>{children}</>;
   if (!state) return null;
 
-  if (!state.ok) {
+  if (!state.ok && !state.read_only) {
     return (
       <>
         <ActivationScreen state={state} onChanged={(s) => setState(s)} />
@@ -70,7 +97,14 @@ export default function LicenceGate({ children }: { children: ReactNode }) {
     );
   }
 
-  const soon = state.kind === 'licensed' && typeof state.days_left === 'number' && state.days_left <= RENEW_WARNING_DAYS;
+  const soon = state.kind === 'licensed' && !state.lifetime && typeof state.days_left === 'number' && state.days_left <= RENEW_WARNING_DAYS;
+  const notice = state.read_only
+    ? (blocked ? VIEW_ONLY_MESSAGE : 'Licence expired: this copy is view-only. Renew to add or change anything.')
+    : state.grace
+      ? `Licence expired. Renew within ${state.grace_days_left} day${state.grace_days_left === 1 ? '' : 's'} to keep full access.`
+      : soon
+        ? `Your licence ${state.days_left! <= 0 ? 'ends today' : `ends in ${state.days_left} day${state.days_left === 1 ? '' : 's'}`}${state.expires ? ` (${state.expires})` : ''}. Renew to keep full access.`
+        : null;
   return (
     <>
       {children}
@@ -81,12 +115,9 @@ export default function LicenceGate({ children }: { children: ReactNode }) {
           {managerOpen && <LicenceManager onClose={() => setManagerOpen(false)} />}
         </>
       )}
-      {soon && (
-        <div role="status" style={styles.renewBar}>
-          <span>
-            Your licence {state.days_left! <= 0 ? 'ends today' : `ends in ${state.days_left} day${state.days_left === 1 ? '' : 's'}`}
-            {state.expires ? ` (${state.expires})` : ''}. Ask the owner for a renewal.
-          </span>
+      {notice && (
+        <div role={blocked ? 'alert' : 'status'} style={styles.renewBar}>
+          <span>{notice}</span>
           <button type="button" className="btn btn-outline" style={styles.renewBtn} onClick={() => setRenewOpen(true)}>Renew</button>
         </div>
       )}
@@ -119,6 +150,7 @@ function ActivationScreen({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [plan, setPlan] = useState<Plan | null>(null);
 
   async function submit(path: string, payload: Record<string, string>, e?: FormEvent) {
     e?.preventDefault();
@@ -172,6 +204,15 @@ function ActivationScreen({
           <code className="mono" style={styles.code}>{state.install_id ?? '…'}</code>
           <button type="button" className="btn btn-outline" style={styles.copyBtn} onClick={copyCode}>{copied ? 'Copied' : 'Copy'}</button>
         </div>
+
+        <PlanButtons code={state.install_id ?? ''} onPick={setPlan} />
+        <p style={{ ...styles.text, fontSize: '0.78rem', color: 'var(--ink-soft)', marginBottom: '1.1rem' }}>
+          Pay, email us the proof, and we send your licence back. Paste it below.
+          {state.renew_url && (
+            <> <button type="button" style={styles.link} onClick={() => openLink(state.renew_url!)}>Or pay on the website</button></>
+          )}
+        </p>
+        {plan && state.install_id && <PayWindow code={state.install_id} plan={plan} onClose={() => setPlan(null)} />}
 
         <form onSubmit={(e) => submit('/licence/activate', { licence }, e)} style={styles.form}>
           <label style={styles.label}>
@@ -234,6 +275,7 @@ const styles: Record<string, React.CSSProperties> = {
   copyBtn: { fontSize: '0.8rem', padding: '0.45em 0.8em' },
   form: { display: 'flex', flexDirection: 'column', gap: '0.8rem' },
   label: { fontSize: '0.85rem', display: 'block' },
+  link: { background: 'none', border: 'none', padding: 0, font: 'inherit', textDecoration: 'underline', cursor: 'pointer', color: 'inherit' },
   summary: { cursor: 'pointer', fontSize: '0.8rem', color: 'var(--ink-soft)' },
   error: { background: 'var(--stamp-wash)', color: 'var(--stamp)', padding: '0.5em 0.7em', borderRadius: 3, fontSize: '0.85rem' },
   renewBar: { position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 900, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.8rem', padding: '0.5rem 1rem', background: 'var(--warn-wash)', color: 'var(--ink)', borderTop: '1px solid var(--warn)', fontSize: '0.85rem' },
