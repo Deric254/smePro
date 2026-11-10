@@ -21,6 +21,7 @@ node -e '
     "node_modules/@tauri-apps/plugin-fs": "tauri-plugin-fs",
     "node_modules/@tauri-apps/plugin-updater": "tauri-plugin-updater",
     "node_modules/@tauri-apps/plugin-http": "tauri-plugin-http",
+    "node_modules/@tauri-apps/plugin-opener": "tauri-plugin-opener",
   };
   for (const [pkgPath, crate] of Object.entries(map)) {
     const version = pkgs[pkgPath] && pkgs[pkgPath].version;
