@@ -521,10 +521,12 @@ pub fn checkout(conn: &mut Connection, business_id: &str, user_id: &str, req: Ch
             // guarantee price >= cost at creation/edit time.
             if portion.unit_price < portion.unit_cost {
                 let price_display = crate::money::format_money(portion.unit_price, &business_currency);
-                let cost_display = crate::money::format_money(portion.unit_cost, &business_currency);
+                let loss_display =
+                    crate::money::format_money(portion.unit_cost - portion.unit_price, &business_currency);
                 return Err(anyhow!(
-                    "cannot sell '{name}': priced at {price_display} but costs {cost_display} — this would \
-                     sell at a loss. Raise the price first."
+                    "\u{1F6D1} TRANSACTION BLOCKED: Selling '{name}' at {price_display} will result in an \
+                     immediate cash leak of {loss_display} per unit directly from your drawer. The sale \
+                     has been stopped to protect your margin; raise the price first."
                 ));
             }
 

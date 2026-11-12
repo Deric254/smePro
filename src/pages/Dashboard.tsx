@@ -1,12 +1,13 @@
 import { useEffect, useState, lazy, Suspense } from 'react';
 import type { ReactNode } from 'react';
-import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary, getBusinessPulse, getReportHighlights } from '../api';
+import { listModules, listRecords, getModuleSchema, runReport, listUsers, getBusinessInfo, getSettings, setSetting, getDebtSummary, getGrossProfitSummary, getBusinessPulse, getReportHighlights, getSlowMovers } from '../api';
 import type { ModuleListItem } from '../types';
 import type { DebtSummary, GrossProfitSummary, BusinessPulse, ReportHighlights } from '../api';
 import { formatMoney } from '../lib/money';
 
 // Lazy-loaded: it's the only place recharts is used, and that roughly
 // doubles the bundle size — only downloaded when Dashboard is viewed.
+const DEAD_STOCK_DAYS = 45;
 const AnalyticsSection = lazy(() => import('../components/AnalyticsSection'));
 
 function initials(name: string) {
@@ -59,6 +60,7 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
   // Each field independently null when there's nothing worth
   // highlighting yet, same discipline as everything else here.
   const [highlights, setHighlights] = useState<ReportHighlights | null>(null);
+  const [deadCapitalCents, setDeadCapitalCents] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,6 +133,7 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
       // no permission at all) leaves this null and skips the card.
       getBusinessPulse().then((r) => { if (!cancelled) setPulse(r.business_pulse); }).catch(() => {});
       getReportHighlights().then((r) => { if (!cancelled) setHighlights(r); }).catch(() => {});
+      getSlowMovers(DEAD_STOCK_DAYS, 100).then((r) => { if (!cancelled) setDeadCapitalCents(r.items.reduce((sum, it) => sum + it.value_at_risk_cents, 0)); }).catch(() => {});
     }
 
     return () => { cancelled = true; };
@@ -150,6 +153,12 @@ export default function Dashboard({ businessName, onSelectModule, onOpenAdmin, c
         <div style={styles.eyebrow}>Welcome back</div>
         <h1 style={{ margin: '0.15rem 0 0' }}>{businessName || 'Your business'}</h1>
       </div>
+
+      {deadCapitalCents > 0 && (
+        <div role="alert" className="card" style={{ padding: '0.7rem 1rem', marginBottom: '1rem', borderColor: 'var(--stamp)', background: 'var(--stamp-wash)', color: 'var(--stamp)', fontSize: '0.88rem', fontWeight: 600 }}>
+          ⚠️ DEAD CAPITAL DETECTED: {formatMoney(deadCapitalCents, currency)} of your liquid money is currently trapped on your shelves. It has generated 0 Shillings in revenue for the past {DEAD_STOCK_DAYS}+ days.
+        </div>
+      )}
 
       {(grossProfit || debtSummary) && (
         <div style={styles.kpiRow}>
