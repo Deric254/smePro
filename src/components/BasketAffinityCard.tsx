@@ -18,6 +18,9 @@ export default function BasketAffinityCard({ pairs, currency }: { pairs: BasketP
   return (
     <div className="card" style={{ padding: '0.9rem 1.1rem' }}>
       <div style={{ fontWeight: 600, marginBottom: '0.2rem' }}>Frequently bought together</div>
+      <div style={{ fontSize: '0.86rem', marginBottom: '0.4rem' }}>
+        💡 BUNDLING OPPORTUNITY: {pairs[0].item_a} and {pairs[0].item_b} were bought in the same order {pairs[0].order_count} time{pairs[0].order_count === 1 ? '' : 's'}. Offer {pairs[0].item_b} when {pairs[0].item_a} is sold.
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
         {pairs.map((p) => (
           <div
