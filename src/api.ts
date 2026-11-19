@@ -553,6 +553,59 @@ export interface RefundRate {
 export const getRefundRateByItem = (limit = 20): Promise<{ items: RefundRate[] }> =>
   request(`/sales/refund-rate?limit=${limit}`);
 
+// Business intelligence — the eight intelligence areas as structured
+// insights. See intelligence.rs and INTELLIGENCE.md.
+export interface IntelligencePeriod { label: string; start: string; end: string; }
+export interface IntelligenceEvidence { label: string; value: string; }
+export interface IntelligenceComparison {
+  label: string;
+  period: IntelligencePeriod;
+  current: number;
+  previous: number;
+  change_pct: number | null;
+  unit: string;
+}
+export interface IntelligenceInsight {
+  area: string;
+  kind: string;
+  title: string;
+  severity: 'problem' | 'watch' | 'info' | 'good';
+  what_happened: string;
+  evidence: IntelligenceEvidence[];
+  period: IntelligencePeriod;
+  comparison: IntelligenceComparison | null;
+  why_it_matters: string;
+  impact: { amount_cents: number; basis: string } | null;
+  recommended_action: string;
+  confidence: { level: 'high' | 'medium' | 'low'; limitations: string[] };
+  follow_up: string | null;
+}
+export interface IntelligenceKpi {
+  label: string;
+  value: number | null;
+  previous: number | null;
+  change_pct: number | null;
+  unit: string;
+}
+export interface IntelligenceArea {
+  id: string;
+  title: string;
+  status: 'full' | 'partial' | 'unavailable';
+  kpis: IntelligenceKpi[];
+  insights: IntelligenceInsight[];
+  missing: string[];
+  notes: string[];
+}
+export interface IntelligenceReport {
+  as_of: string;
+  currency: string;
+  period: IntelligencePeriod;
+  previous_period: IntelligencePeriod;
+  areas: IntelligenceArea[];
+}
+export const getIntelligenceReport = (days = 30): Promise<IntelligenceReport> =>
+  request(`/reports/intelligence?days=${days}`);
+
 // Slow-moving stock — see stock_health::slow_movers.
 export interface SlowMover {
   item_name: string;

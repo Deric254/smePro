@@ -21,6 +21,7 @@ pub mod debt_settlement;
 pub mod excel_import;
 pub mod forecast;
 pub mod http_api;
+pub mod intelligence;
 // Not gated to target_os = "android" specifically because this
 // codebase has no iOS build at all (no mobile-ios.sh, no ios/ target
 // anywhere) — "not desktop" already means "Android" in practice

@@ -12,6 +12,7 @@ import type { ModuleListItem, ModuleSchema } from '../types';
 import { formatMoney } from '../lib/money';
 import { ReportPanel } from './ModuleView';
 import BasketAffinityCard from '../components/BasketAffinityCard';
+import IntelligenceSection from '../components/IntelligenceSection';
 import ItemMarginCard from '../components/ItemMarginCard';
 import ItemMarginTrendCard from '../components/ItemMarginTrendCard';
 import DebtAgingCard from '../components/DebtAgingCard';
@@ -188,6 +189,10 @@ export default function Reports() {
   return (
     <div>
       <h2 style={{ marginTop: 0 }}>Reports</h2>
+
+      <CollapsibleSection title="Business intelligence">
+        <IntelligenceSection currency={currency} />
+      </CollapsibleSection>
 
       <CollapsibleSection title="Profitability" onExpand={loadProfitability} loading={profitabilityLoading}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: '0.9rem' }}>

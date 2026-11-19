@@ -2049,6 +2049,22 @@ fn route(
         return ApiResponse::Json(200, json!(highlights));
     }
 
+    // ---- GET /reports/intelligence?days= — the eight business
+    // intelligence areas (Sales, Profitability, Inventory, Customer,
+    // Expense, Cash Flow, Performance, Growth) as structured insights.
+    // See intelligence.rs. Read-only; Reports-gated like every other
+    // analytics route here.
+    if parts.as_slice() == ["reports", "intelligence"] && *method == Method::Get {
+        if let Err(e) = rbac::require_reports_access(conn, &user_id) { return json_err(403, &e.to_string()); }
+        let q = query_params(url);
+        let today = chrono::Utc::now().date_naive().to_string();
+        let days = q.get("days").and_then(|s| s.parse::<i64>().ok()).unwrap_or(30);
+        return match crate::intelligence::report(conn, &business_id, &user_id, &today, days) {
+            Ok(report) => ApiResponse::Json(200, json!(report)),
+            Err(e) => crud_error(&e),
+        };
+    }
+
     // ---- AI chat history: sessions. (The actual ask/answer route —
     // POST /ai/sessions/{id}/ask — is handled by handle_ai_ask()
     // above, before serve() ever reaches route() at all; see that

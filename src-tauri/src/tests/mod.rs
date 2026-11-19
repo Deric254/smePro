@@ -13,6 +13,8 @@ mod excel_import_tests;
 #[cfg(test)]
 mod forecast_tests;
 #[cfg(test)]
+mod intelligence_tests;
+#[cfg(test)]
 mod backup_tests;
 #[cfg(test)]
 mod crud_tests;
